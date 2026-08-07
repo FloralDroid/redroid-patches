@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 7 Aug 2026 17:36:00 +0800
+Subject: [PATCH] init: allow reading Floral device profile
+
+Allow init to traverse the host-mounted vendor directory and read the
+optional device identity profile before Android finalizes product
+properties. Keep the rule read-only and mirror it in the frozen API 31
+policy snapshot.
+
+---
+diff --git a/prebuilts/api/31.0/private/init.te b/prebuilts/api/31.0/private/init.te
+index f569e0c2d156663701e225caa7fcd40067e45d6f..06bc00171d5f421b437549cb668bd3711f5e60c0 100644
+--- a/prebuilts/api/31.0/private/init.te
++++ b/prebuilts/api/31.0/private/init.te
+@@ -2,6 +2,11 @@ typeattribute init coredomain;
+ 
+ tmpfs_domain(init)
+ 
++# Read the optional host-mounted Floral identity before product properties
++# are finalized.
++allow init mnt_vendor_file:dir search;
++allow init mnt_vendor_file:file r_file_perms;
++
+ # Transitions to seclabel processes in init.rc
+ domain_trans(init, rootfs, healthd)
+ domain_trans(init, rootfs, slideshow)
+diff --git a/private/init.te b/private/init.te
+index f569e0c2d156663701e225caa7fcd40067e45d6f..06bc00171d5f421b437549cb668bd3711f5e60c0 100644
+--- a/private/init.te
++++ b/private/init.te
+@@ -2,6 +2,11 @@ typeattribute init coredomain;
+ 
+ tmpfs_domain(init)
+ 
++# Read the optional host-mounted Floral identity before product properties
++# are finalized.
++allow init mnt_vendor_file:dir search;
++allow init mnt_vendor_file:file r_file_perms;
++
+ # Transitions to seclabel processes in init.rc
+ domain_trans(init, rootfs, healthd)
+ domain_trans(init, rootfs, slideshow)
+-- 
+2.47.3

@@ -1,0 +1,406 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 7 Aug 2026 17:24:00 +0800
+Subject: [PATCH 9/9] init: load Floral device identity profile
+
+Read a strict, complete device.prop from the shared Floral instance
+directory during boot property initialization. Invalid or absent profiles
+fall back atomically to the built-in Floral identity.
+
+Expose the selected GPU presentation strings as immutable boot properties
+for the graphics libraries without changing rendering capabilities.
+
+---
+diff --git a/init/Android.bp b/init/Android.bp
+index 7eeafa24b8b091783687ac7d5488fcbe6750519e..514d2d7481909c780fb97fc21d8fb62d9ec734bc 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -61,6 +61,7 @@ init_device_sources = [
+     "first_stage_console.cpp",
+     "first_stage_init.cpp",
+     "first_stage_mount.cpp",
++    "floral_device_profile.cpp",
+     "fscrypt_init_extensions.cpp",
+     "init.cpp",
+     "lmkd_service.cpp",
+@@ -389,6 +390,7 @@ cc_test {
+         "devices_test.cpp",
+         "epoll_test.cpp",
+         "firmware_handler_test.cpp",
++        "floral_device_profile_test.cpp",
+         "init_test.cpp",
+         "keychords_test.cpp",
+         "oneshot_on_test.cpp",
+diff --git a/init/floral_device_profile.cpp b/init/floral_device_profile.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..515535a24bfee388a743be9c402a79add99ba83d
+--- /dev/null
++++ b/init/floral_device_profile.cpp
+@@ -0,0 +1,177 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_device_profile.h"
++
++#include <sys/stat.h>
++
++#include <array>
++#include <cctype>
++#include <cerrno>
++#include <map>
++#include <string>
++
++#include <android-base/file.h>
++#include <android-base/result.h>
++#include <android-base/strings.h>
++
++#include "util.h"
++
++namespace android {
++namespace init {
++namespace {
++
++constexpr size_t kMaximumProfileSize = 4096;
++constexpr size_t kMaximumIdentityLength = 64;
++constexpr size_t kMaximumIdentifierLength = 32;
++
++constexpr std::array<std::string_view, 10> kRequiredFields = {
++        "version",          "brand",     "manufacturer", "model",     "device", "product",
++        "soc_manufacturer", "soc_model", "gpu_vendor",   "gpu_model",
++};
++
++bool IsRequiredField(std::string_view key) {
++    for (std::string_view required : kRequiredFields) {
++        if (key == required) return true;
++    }
++    return false;
++}
++
++bool IsDisplayValueValid(const std::string& value) {
++    if (value.empty() || value.size() > kMaximumIdentityLength ||
++        !IsLegalPropertyValue("ro.product.model", value).ok()) {
++        return false;
++    }
++    for (unsigned char character : value) {
++        if (std::iscntrl(character)) return false;
++    }
++    return true;
++}
++
++bool IsIdentifierValid(const std::string& value) {
++    if (value.empty() || value.size() > kMaximumIdentifierLength ||
++        !std::isalnum(static_cast<unsigned char>(value.front()))) {
++        return false;
++    }
++    for (unsigned char character : value) {
++        if (!std::isalnum(character) && character != '_' && character != '-' && character != '.') {
++            return false;
++        }
++    }
++    return true;
++}
++
++android::base::Result<std::map<std::string, std::string>> ParseFields(std::string_view content) {
++    std::map<std::string, std::string> fields;
++    size_t line_number = 0;
++    for (const std::string& raw_line : android::base::Split(std::string(content), "\n")) {
++        ++line_number;
++        std::string line = android::base::Trim(raw_line);
++        if (line.empty() || line.front() == '#') continue;
++
++        size_t separator = line.find('=');
++        if (separator == std::string::npos) {
++            return android::base::Error() << "line " << line_number << " has no '=' separator";
++        }
++
++        std::string key = android::base::Trim(line.substr(0, separator));
++        std::string value = android::base::Trim(line.substr(separator + 1));
++        if (!IsRequiredField(key)) {
++            return android::base::Error()
++                   << "line " << line_number << " contains unknown field '" << key << "'";
++        }
++        if (value.empty()) {
++            return android::base::Error() << "line " << line_number << " has an empty value";
++        }
++        if (!fields.emplace(key, value).second) {
++            return android::base::Error()
++                   << "line " << line_number << " repeats field '" << key << "'";
++        }
++    }
++
++    if (fields.size() != kRequiredFields.size()) {
++        return android::base::Error() << "profile must contain all required fields";
++    }
++    return fields;
++}
++
++}  // namespace
++
++FloralDeviceProfile DefaultFloralDeviceProfile() {
++    return {"Floral",      "FloralDroid", "Floral F12",  "floral_f12", "floral_f12",
++            "FloralDroid", "Floral S12",  "FloralDroid", "Floral GPU"};
++}
++
++android::base::Result<FloralDeviceProfile> ParseFloralDeviceProfile(std::string_view content) {
++    auto parsed_fields = ParseFields(content);
++    if (!parsed_fields.ok()) return parsed_fields.error();
++    const auto& fields = *parsed_fields;
++
++    if (fields.at("version") != "1") {
++        return android::base::Error() << "unsupported profile version";
++    }
++
++    FloralDeviceProfile profile = {
++            fields.at("brand"),     fields.at("manufacturer"), fields.at("model"),
++            fields.at("device"),    fields.at("product"),      fields.at("soc_manufacturer"),
++            fields.at("soc_model"), fields.at("gpu_vendor"),   fields.at("gpu_model"),
++    };
++
++    if (!IsDisplayValueValid(profile.brand) || !IsDisplayValueValid(profile.manufacturer) ||
++        !IsDisplayValueValid(profile.model) || !IsIdentifierValid(profile.device) ||
++        !IsIdentifierValid(profile.product) || !IsDisplayValueValid(profile.soc_manufacturer) ||
++        !IsDisplayValueValid(profile.soc_model) || !IsDisplayValueValid(profile.gpu_vendor) ||
++        !IsDisplayValueValid(profile.gpu_model)) {
++        return android::base::Error() << "profile contains an invalid identity value";
++    }
++    return profile;
++}
++
++android::base::Result<FloralDeviceProfile> ReadFloralDeviceProfile(const std::string& path) {
++    struct stat status = {};
++    if (stat(path.c_str(), &status) != 0) {
++        return android::base::ErrnoError() << "cannot stat profile";
++    }
++    if (!S_ISREG(status.st_mode) || status.st_size < 0 ||
++        static_cast<size_t>(status.st_size) > kMaximumProfileSize) {
++        return android::base::Error() << "profile must be a regular file no larger than "
++                                      << kMaximumProfileSize << " bytes";
++    }
++
++    std::string content;
++    if (!android::base::ReadFileToString(path, &content)) {
++        return android::base::ErrnoError() << "cannot read profile";
++    }
++    return ParseFloralDeviceProfile(content);
++}
++
++std::map<std::string, std::string> FloralDeviceProfileProperties(
++        const FloralDeviceProfile& profile) {
++    return {
++            {"ro.product.brand", profile.brand},
++            {"ro.product.manufacturer", profile.manufacturer},
++            {"ro.product.model", profile.model},
++            {"ro.product.device", profile.device},
++            {"ro.product.name", profile.product},
++            {"ro.soc.manufacturer", profile.soc_manufacturer},
++            {"ro.soc.model", profile.soc_model},
++            {"ro.boot.floral_gpu_vendor", profile.gpu_vendor},
++            {"ro.boot.floral_gpu_model", profile.gpu_model},
++    };
++}
++
++}  // namespace init
++}  // namespace android
+diff --git a/init/floral_device_profile.h b/init/floral_device_profile.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0e71a7fb17d96ee74262027e70a38293e38bbd8
+--- /dev/null
++++ b/init/floral_device_profile.h
+@@ -0,0 +1,47 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <map>
++#include <string>
++#include <string_view>
++
++#include <android-base/result.h>
++
++namespace android {
++namespace init {
++
++struct FloralDeviceProfile {
++    std::string brand;
++    std::string manufacturer;
++    std::string model;
++    std::string device;
++    std::string product;
++    std::string soc_manufacturer;
++    std::string soc_model;
++    std::string gpu_vendor;
++    std::string gpu_model;
++};
++
++FloralDeviceProfile DefaultFloralDeviceProfile();
++android::base::Result<FloralDeviceProfile> ParseFloralDeviceProfile(std::string_view content);
++android::base::Result<FloralDeviceProfile> ReadFloralDeviceProfile(const std::string& path);
++std::map<std::string, std::string> FloralDeviceProfileProperties(
++        const FloralDeviceProfile& profile);
++
++}  // namespace init
++}  // namespace android
+diff --git a/init/floral_device_profile_test.cpp b/init/floral_device_profile_test.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ae95e135a9c2ed03e00696794b22ccd76bc35d7
+--- /dev/null
++++ b/init/floral_device_profile_test.cpp
+@@ -0,0 +1,83 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_device_profile.h"
++
++#include <gtest/gtest.h>
++
++namespace android {
++namespace init {
++namespace {
++
++constexpr std::string_view kValidProfile = R"(
++version=1
++brand=OPPO
++manufacturer=OPPO
++model=Find X6 Pro
++device=PGEM10
++product=PGEM10
++soc_manufacturer=Qualcomm
++soc_model=SM8550
++gpu_vendor=Qualcomm
++gpu_model=Adreno (TM) 740
++)";
++
++TEST(floral_device_profile, ParsesCompleteProfile) {
++    auto result = ParseFloralDeviceProfile(kValidProfile);
++
++    ASSERT_TRUE(result.ok()) << result.error();
++    EXPECT_EQ(result->brand, "OPPO");
++    EXPECT_EQ(result->model, "Find X6 Pro");
++    EXPECT_EQ(result->device, "PGEM10");
++    EXPECT_EQ(result->soc_model, "SM8550");
++    EXPECT_EQ(result->gpu_model, "Adreno (TM) 740");
++}
++
++TEST(floral_device_profile, RejectsPartialProfile) {
++    EXPECT_FALSE(ParseFloralDeviceProfile("version=1\nbrand=Floral\n").ok());
++}
++
++TEST(floral_device_profile, RejectsUnknownAndDuplicateFields) {
++    std::string unknown(kValidProfile);
++    unknown.append("unexpected=value\n");
++    EXPECT_FALSE(ParseFloralDeviceProfile(unknown).ok());
++
++    std::string duplicate(kValidProfile);
++    duplicate.append("model=Other\n");
++    EXPECT_FALSE(ParseFloralDeviceProfile(duplicate).ok());
++}
++
++TEST(floral_device_profile, RejectsInvalidProductIdentifiers) {
++    std::string invalid(kValidProfile);
++    size_t position = invalid.find("device=PGEM10");
++    ASSERT_NE(position, std::string::npos);
++    invalid.replace(position, std::string("device=PGEM10").size(), "device=Find X6 Pro");
++
++    EXPECT_FALSE(ParseFloralDeviceProfile(invalid).ok());
++}
++
++TEST(floral_device_profile, MapsDefaultIdentityToAndroidProperties) {
++    auto properties = FloralDeviceProfileProperties(DefaultFloralDeviceProfile());
++
++    EXPECT_EQ(properties.at("ro.product.brand"), "Floral");
++    EXPECT_EQ(properties.at("ro.product.model"), "Floral F12");
++    EXPECT_EQ(properties.at("ro.soc.model"), "Floral S12");
++    EXPECT_EQ(properties.at("ro.boot.floral_gpu_model"), "Floral GPU");
++}
++
++}  // namespace
++}  // namespace init
++}  // namespace android
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index 55e89c6478bf5996916455fe3bf05fd67e0b5832..a02e5e8c514e96d7f43f5e406e0566218840d737 100755
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -64,6 +64,7 @@
+ 
+ #include "debug_ramdisk.h"
+ #include "epoll.h"
++#include "floral_device_profile.h"
+ #include "init.h"
+ #include "persistent_properties.h"
+ #include "property_type.h"
+@@ -100,6 +101,7 @@ constexpr auto ID_PROP = "ro.build.id";
+ constexpr auto LEGACY_ID_PROP = "ro.build.legacy.id";
+ constexpr auto VBMETA_DIGEST_PROP = "ro.boot.vbmeta.digest";
+ constexpr auto DIGEST_SIZE_USED = 8;
++constexpr auto FLORAL_DEVICE_PROFILE_PATH = "/mnt/vendor/floral_stream/device.prop";
+ 
+ static bool persistent_properties_loaded = false;
+ 
+@@ -1089,6 +1091,25 @@ void PropertyLoadBootDefaults() {
+         load_properties_from_file(kDebugRamdiskProp, nullptr, &properties);
+     }
+ 
++    FloralDeviceProfile floral_profile = DefaultFloralDeviceProfile();
++    if (access(FLORAL_DEVICE_PROFILE_PATH, F_OK) == 0) {
++        auto mounted_profile = ReadFloralDeviceProfile(FLORAL_DEVICE_PROFILE_PATH);
++        if (mounted_profile.ok()) {
++            floral_profile = std::move(*mounted_profile);
++            LOG(INFO) << "Using mounted Floral device profile '" << floral_profile.model << "'";
++        } else {
++            LOG(WARNING) << "Ignoring invalid Floral device profile: "
++                         << mounted_profile.error();
++        }
++    } else if (errno == ENOENT) {
++        LOG(INFO) << "Using default Floral device profile";
++    } else {
++        PLOG(WARNING) << "Cannot inspect Floral device profile; using defaults";
++    }
++    for (auto&& [name, value] : FloralDeviceProfileProperties(floral_profile)) {
++        properties.insert_or_assign(std::move(name), std::move(value));
++    }
++
+     for (const auto& [name, value] : properties) {
+         std::string error;
+         if (PropertySet(name, value, &error) != PROP_SUCCESS) {
+-- 
+2.47.3
