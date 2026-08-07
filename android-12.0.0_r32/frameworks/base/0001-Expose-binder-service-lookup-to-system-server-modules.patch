@@ -10,28 +10,23 @@ surface so modular services can receive a narrow, lifecycle-owned resolver.
 
 Change-Id: I5bbfa29d87c880ad974f066899626644fe0362aa
 ---
- services/api/current.txt                              | 2 +-
+ services/api/current.txt                              | 1 +
  services/api/lint-baseline.txt                        | 3 +++
  services/core/java/com/android/server/SystemService.java | 6 ++++--
- 3 files changed, 8 insertions(+), 3 deletions(-)
+ 3 files changed, 8 insertions(+), 2 deletions(-)
 
 diff --git a/services/api/current.txt b/services/api/current.txt
-index 50f0052..12bddf7 100644
+index 50f0052..f8f7d23 100644
 --- a/services/api/current.txt
 +++ b/services/api/current.txt
-@@ -18,6 +18,7 @@ package com.android.server {
-     method public void onUserSwitching(@Nullable com.android.server.SystemService.TargetUser, @NonNull com.android.server.SystemService.TargetUser);
-     method public void onUserUnlocked(@NonNull com.android.server.SystemService.TargetUser);
-     method public void onUserUnlocking(@NonNull com.android.server.SystemService.TargetUser);
-+    method @Nullable protected final android.os.IBinder getBinderService(@NonNull String);
-     method protected final void publishBinderService(@NonNull String, @NonNull android.os.IBinder);
-     method protected final void publishBinderService(@NonNull String, @NonNull android.os.IBinder, boolean);
-     field public static final int PHASE_ACTIVITY_MANAGER_READY = 550; // 0x226
-@@ -82,4 +83,3 @@ package com.android.server.wifi {
-   }
+@@ -8,6 +8,7 @@ package com.android.server {
  
- }
--
+   public abstract class SystemService {
+     ctor public SystemService(@NonNull android.content.Context);
++    method @Nullable protected final android.os.IBinder getBinderService(@NonNull String);
+     method @NonNull public final android.content.Context getContext();
+     method public boolean isUserSupported(@NonNull com.android.server.SystemService.TargetUser);
+     method public void onBootPhase(int);
 diff --git a/services/api/lint-baseline.txt b/services/api/lint-baseline.txt
 index b46d21e..95ee5b5 100644
 --- a/services/api/lint-baseline.txt
