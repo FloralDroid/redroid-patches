@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 7 Aug 2026 19:16:54 +0800
+Subject: [PATCH] Allow Floral Wi-Fi AIDL dependency in updatable modules
+
+The Wi-Fi mainline module uses the stable Floral Wi-Fi AIDL client to
+publish framework state changes to the vendor simulation service. Add the
+generated Java library to the Android 12 APEX dependency allowlist.
+
+---
+ build/allowed_deps.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/build/allowed_deps.txt b/build/allowed_deps.txt
+index 4567deefdb28..ad589700a3d1 100644
+--- a/build/allowed_deps.txt
++++ b/build/allowed_deps.txt
+@@ -192,6 +192,7 @@ ExtServices(minSdkVersion:current)
+ ExtServices-core(minSdkVersion:30)
+ ExtServices-core(minSdkVersion:current)
+ flatbuffer_headers(minSdkVersion:(no version))
++floral.device.wifi-V1-java(minSdkVersion:30)
+ fmtlib(minSdkVersion:29)
+ fmtlib_ndk(minSdkVersion:29)
+ framework-mediaprovider(minSdkVersion:30)
+-- 
+2.47.3
+
