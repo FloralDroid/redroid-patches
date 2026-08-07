@@ -372,7 +372,7 @@ index 55e89c6478bf5996916455fe3bf05fd67e0b5832..a02e5e8c514e96d7f43f5e406e056621
  constexpr auto LEGACY_ID_PROP = "ro.build.legacy.id";
  constexpr auto VBMETA_DIGEST_PROP = "ro.boot.vbmeta.digest";
  constexpr auto DIGEST_SIZE_USED = 8;
-+constexpr auto FLORAL_DEVICE_PROFILE_PATH = "/mnt/vendor/floral_stream/device.prop";
++constexpr auto FLORAL_DEVICE_PROFILE_PATH = "/ipc/floral_stream/device.prop";
  
  static bool persistent_properties_loaded = false;
  
