@@ -1,0 +1,525 @@
+From bc13c8b7db735d5218cd109ffd3156c5c7cfc392 Mon Sep 17 00:00:00 2001
+From: FloralDroid <opensource@floraldroid.dev>
+Date: Wed, 12 Aug 2026 23:57:14 +0800
+Subject: [PATCH] =?UTF-8?q?frameworks:=20=E6=94=AF=E6=8C=81=20NativeBridge?=
+ =?UTF-8?q?=20=E6=97=A9=E6=9C=9F=E5=B4=A9=E6=BA=83=E5=9B=9E=E9=80=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+在系统内部维护每进程的自动候选状态。ARM 转译进程启动后十五秒内发生 native crash 时切换尚未失败的候选，并恢复原任务。显式后端、非 native crash 与窗口外崩溃保持原行为。
+
+Change-Id: Id5ba7ddfae243c2266fcfcfff9a263d7dd937c54
+---
+ core/jni/com_android_internal_os_Zygote.cpp   |   8 +
+ .../server/am/ActivityManagerService.java     |   3 +
+ .../java/com/android/server/am/AppErrors.java |   8 +
+ .../server/am/FloralNativeBridgeManager.java  | 408 ++++++++++++++++++
+ .../com/android/server/am/ProcessList.java    |   3 +
+ 5 files changed, 430 insertions(+)
+ create mode 100644 services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+
+diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
+index bed0aae074a4..625b718c29af 100644
+--- a/core/jni/com_android_internal_os_Zygote.cpp
++++ b/core/jni/com_android_internal_os_Zygote.cpp
+@@ -95,6 +95,11 @@
+ 
+ #include "nativebridge/native_bridge.h"
+ 
++namespace android {
++// Private Floral extension; it is intentionally absent from the stable NativeBridge headers.
++void SetFloralNativeBridgeProcessContext(const char* process_name, const char* app_data_dir);
++}  // namespace android
++
+ namespace {
+ 
+ // TODO (chriswailes): Add a function to initialize native Zygote data.
+@@ -1624,6 +1629,9 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+     if (need_pre_initialize_native_bridge) {
+         // Due to the logic behind need_pre_initialize_native_bridge we know that
+         // instruction_set contains a value.
++        android::SetFloralNativeBridgeProcessContext(
++                nice_name.has_value() ? nice_name.value().c_str() : nullptr,
++                app_data_dir.has_value() ? app_data_dir.value().c_str() : nullptr);
+         android::PreInitializeNativeBridge(app_data_dir.has_value() ? app_data_dir.value().c_str()
+                                                                     : nullptr,
+                                            instruction_set.value().c_str());
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index c78d5d538f8d..1a5480ddf06b 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -667,6 +667,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+     public final PendingIntentController mPendingIntentController;
+ 
+     final AppErrors mAppErrors;
++    final FloralNativeBridgeManager mFloralNativeBridgeManager;
+     final PackageWatchdog mPackageWatchdog;
+ 
+     /**
+@@ -2179,6 +2180,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+         mContext = mInjector.getContext();
+         mUiContext = null;
+         mAppErrors = null;
++        mFloralNativeBridgeManager = null;
+         mPackageWatchdog = null;
+         mAppOpsService = mInjector.getAppOpsService(null /* file */, null /* handler */);
+         mBatteryStatsService = null;
+@@ -2322,6 +2324,7 @@ public class ActivityManagerService extends IActivityManager.Stub
+         mActivityTaskManager.initialize(mIntentFirewall, mPendingIntentController,
+                 DisplayThread.get().getLooper());
+         mAtmInternal = LocalServices.getService(ActivityTaskManagerInternal.class);
++        mFloralNativeBridgeManager = new FloralNativeBridgeManager(this);
+ 
+         mHiddenApiBlacklist = new HiddenApiSettings(mHandler, mContext);
+ 
+diff --git a/services/core/java/com/android/server/am/AppErrors.java b/services/core/java/com/android/server/am/AppErrors.java
+index bcb42bb38495..7a071cc4c615 100644
+--- a/services/core/java/com/android/server/am/AppErrors.java
++++ b/services/core/java/com/android/server/am/AppErrors.java
+@@ -571,6 +571,14 @@ class AppErrors {
+             longMsg = shortMsg;
+         }
+ 
++        if (r != null && "Native crash".equals(shortMsg)) {
++            synchronized (mService) {
++                if (mService.mFloralNativeBridgeManager.handleEarlyNativeCrash(r)) {
++                    return;
++                }
++            }
++        }
++
+         if (r != null) {
+             mPackageWatchdog.onPackageFailure(r.getPackageListWithVersionCode(),
+                     PackageWatchdog.FAILURE_REASON_APP_CRASH);
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+new file mode 100644
+index 000000000000..c514a3140f24
+--- /dev/null
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -0,0 +1,408 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.am;
++
++import static android.app.ActivityTaskManager.INVALID_TASK_ID;
++
++import android.app.ActivityOptions;
++import android.app.ApplicationExitInfo;
++import android.os.FileUtils;
++import android.os.SystemClock;
++import android.os.UserHandle;
++import android.util.ArrayMap;
++import android.util.ArraySet;
++import android.util.AtomicFile;
++import android.util.Slog;
++
++import org.json.JSONArray;
++import org.json.JSONException;
++import org.json.JSONObject;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++
++/** Coordinates per-process recovery for Floral's aggregate NativeBridge. */
++final class FloralNativeBridgeManager {
++    private static final String TAG = "FloralNativeBridge";
++    private static final String POLICY_PATH =
++            "/data/system/floral/nativebridge-policy.json";
++    private static final String STATE_PATH =
++            "/data/system/floral/nativebridge-state.json";
++    private static final long EARLY_CRASH_WINDOW_MS = 15_000L;
++    private static final long RESTART_DELAY_MS = 300L;
++    private static final int MAX_JSON_BYTES = 256 * 1024;
++
++    private static final String BACKEND_AUTO = "auto";
++    private static final String BACKEND_NDK = "ndk";
++    private static final String BACKEND_HOUDINI = "houdini";
++
++    private final ActivityManagerService mService;
++    private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
++    private final ArrayMap<ProcessRecord, Launch> mLaunches = new ArrayMap<>();
++    private JSONObject mState;
++
++    FloralNativeBridgeManager(ActivityManagerService service) {
++        mService = service;
++        mState = readJsonFile(mStateFile.getBaseFile());
++        if (mState == null) {
++            mState = emptyState();
++        }
++    }
++
++    /** Called while holding the ActivityManagerService lock, before zygote fork. */
++    void onProcessStarting(ProcessRecord app) {
++        mLaunches.remove(app);
++        if (!isTranslatedApp(app)) {
++            return;
++        }
++
++        final PolicyRule rule = resolvePolicy(app.processName, app.info.packageName);
++        if (!rule.automatic || rule.candidates.isEmpty()) {
++            return;
++        }
++
++        final String processName = app.processName;
++        final long versionCode = app.info.longVersionCode;
++        final JSONObject packages = packagesState();
++        JSONObject state = packages.optJSONObject(processName);
++        boolean changed = false;
++        if (state == null || state.optLong("version_code", Long.MIN_VALUE) != versionCode
++                || !sameCandidates(state.optJSONArray("candidates"), rule.candidates)) {
++            state = new JSONObject();
++            put(state, "version_code", versionCode);
++            put(state, "candidates", toJsonArray(rule.candidates));
++            put(state, "failed_backends", new JSONArray());
++            put(state, "selected_backend", rule.candidates.get(0));
++            put(state, "stable", false);
++            put(packages, processName, state);
++            changed = true;
++        }
++
++        final ArraySet<String> failed = readBackends(state.optJSONArray("failed_backends"));
++        String selected = state.optString("selected_backend", "");
++        if (!rule.candidates.contains(selected) || failed.contains(selected)) {
++            final String replacement = firstAvailable(rule.candidates, failed);
++            if (replacement == null) {
++                if (changed) {
++                    writeState();
++                }
++                Slog.w(TAG, "NativeBridge candidates exhausted for " + processName);
++                return;
++            }
++            selected = replacement;
++            put(state, "selected_backend", selected);
++            changed = true;
++        }
++        if (selected.isEmpty()) {
++            return;
++        }
++        if (state.optBoolean("stable", false)) {
++            put(state, "stable", false);
++            changed = true;
++        }
++        if (changed) {
++            writeState();
++        }
++
++        final Launch launch = new Launch(processName, versionCode, selected,
++                rule.candidates, app.getStartTime());
++        mLaunches.put(app, launch);
++        mService.mHandler.postDelayed(() -> finishStabilityWindow(app, launch),
++                EARLY_CRASH_WINDOW_MS);
++        Slog.i(TAG, "Starting " + processName + " with " + selected);
++    }
++
++    private void finishStabilityWindow(ProcessRecord app, Launch launch) {
++        synchronized (mService) {
++            if (mLaunches.get(app) != launch) {
++                return;
++            }
++            if (app.getThread() != null && !app.isKilled() && app.getPid() > 0) {
++                final JSONObject state = packagesState().optJSONObject(launch.processName);
++                if (matchesLaunch(state, launch)) {
++                    put(state, "stable", true);
++                    writeState();
++                    Slog.i(TAG, "NativeBridge stable for " + launch.processName
++                            + " with " + launch.backend);
++                }
++            }
++            mLaunches.remove(app);
++        }
++    }
++
++    /** Handles only an early translated native crash with an unused fallback. */
++    boolean handleEarlyNativeCrash(ProcessRecord app) {
++        final Launch launch = mLaunches.get(app);
++        if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
++                > EARLY_CRASH_WINDOW_MS) {
++            return false;
++        }
++
++        final JSONObject state = packagesState().optJSONObject(launch.processName);
++        if (!matchesLaunch(state, launch)) {
++            return false;
++        }
++        final ArraySet<String> failed = readBackends(state.optJSONArray("failed_backends"));
++        failed.add(launch.backend);
++        final String replacement = firstAvailable(launch.candidates, failed);
++        put(state, "failed_backends", toJsonArray(failed));
++        put(state, "stable", false);
++        if (replacement == null) {
++            writeState();
++            mLaunches.remove(app);
++            Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
++                    + " crashed with " + launch.backend);
++            return false;
++        }
++
++        put(state, "selected_backend", replacement);
++        writeState();
++        mLaunches.remove(app);
++
++        final int taskId = mService.mAtmInternal.finishTopCrashedActivities(
++                app.getWindowProcessController(), "floral-nativebridge-fallback");
++        mService.mProcessList.removeProcessLocked(app, false, true,
++                ApplicationExitInfo.REASON_CRASH_NATIVE, "native bridge fallback");
++        Slog.w(TAG, "Early native crash in " + launch.processName + "; switching "
++                + launch.backend + " to " + replacement);
++
++        if (taskId != INVALID_TASK_ID) {
++            mService.mHandler.postDelayed(() -> restartTask(taskId), RESTART_DELAY_MS);
++        }
++        return true;
++    }
++
++    private void restartTask(int taskId) {
++        try {
++            mService.startActivityFromRecents(taskId,
++                    ActivityOptions.makeBasic().toBundle());
++        } catch (IllegalArgumentException e) {
++            Slog.w(TAG, "Unable to restart task " + taskId + " after fallback", e);
++        }
++    }
++
++    private static boolean isTranslatedApp(ProcessRecord app) {
++        if (app.info == null || !UserHandle.isApp(app.uid) || app.isolated) {
++            return false;
++        }
++        final String instructionSet = app.getInstructionSet();
++        return "arm".equals(instructionSet) || "arm64".equals(instructionSet);
++    }
++
++    private PolicyRule resolvePolicy(String processName, String packageName) {
++        final JSONObject root = readJsonFile(new File(POLICY_PATH));
++        if (root == null) {
++            return PolicyRule.automaticDefaults();
++        }
++        final JSONObject packages = root.optJSONObject("packages");
++        Object value = packages == null ? null : packages.opt(processName);
++        if (value == null && packages != null) {
++            value = packages.opt(packageName);
++        }
++        if (value == null) {
++            value = root.opt("default_backend");
++        }
++        return PolicyRule.parse(value);
++    }
++
++    private JSONObject packagesState() {
++        JSONObject packages = mState.optJSONObject("packages");
++        if (packages == null) {
++            packages = new JSONObject();
++            put(mState, "packages", packages);
++        }
++        return packages;
++    }
++
++    private void writeState() {
++        FileOutputStream output = null;
++        try {
++            output = mStateFile.startWrite();
++            output.write(mState.toString().getBytes(StandardCharsets.UTF_8));
++            mStateFile.finishWrite(output);
++            FileUtils.setPermissions(STATE_PATH,
++                    FileUtils.S_IRUSR | FileUtils.S_IWUSR, -1, -1);
++        } catch (IOException e) {
++            if (output != null) {
++                mStateFile.failWrite(output);
++            }
++            Slog.e(TAG, "Unable to persist NativeBridge state", e);
++        }
++    }
++
++    private static JSONObject readJsonFile(File file) {
++        if (!file.isFile()) {
++            return null;
++        }
++        try {
++            return new JSONObject(FileUtils.readTextFile(file, MAX_JSON_BYTES, null));
++        } catch (IOException | JSONException e) {
++            Slog.w(TAG, "Ignoring invalid NativeBridge JSON at " + file, e);
++            return null;
++        }
++    }
++
++    private static JSONObject emptyState() {
++        final JSONObject root = new JSONObject();
++        put(root, "version", 1);
++        put(root, "packages", new JSONObject());
++        return root;
++    }
++
++    private static boolean matchesLaunch(JSONObject state, Launch launch) {
++        return state != null
++                && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
++                && launch.backend.equals(state.optString("selected_backend"));
++    }
++
++    private static boolean sameCandidates(JSONArray json, ArrayList<String> candidates) {
++        if (json == null || json.length() != candidates.size()) {
++            return false;
++        }
++        for (int i = 0; i < candidates.size(); i++) {
++            if (!candidates.get(i).equals(json.optString(i))) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private static ArraySet<String> readBackends(JSONArray json) {
++        final ArraySet<String> backends = new ArraySet<>();
++        if (json == null) {
++            return backends;
++        }
++        for (int i = 0; i < json.length(); i++) {
++            final String backend = json.optString(i);
++            if (isBackend(backend)) {
++                backends.add(backend);
++            }
++        }
++        return backends;
++    }
++
++    private static String firstAvailable(ArrayList<String> candidates, ArraySet<String> failed) {
++        for (String candidate : candidates) {
++            if (!failed.contains(candidate)) {
++                return candidate;
++            }
++        }
++        return null;
++    }
++
++    private static JSONArray toJsonArray(Iterable<String> values) {
++        final JSONArray result = new JSONArray();
++        for (String value : values) {
++            result.put(value);
++        }
++        return result;
++    }
++
++    private static boolean isBackend(String value) {
++        return BACKEND_NDK.equals(value) || BACKEND_HOUDINI.equals(value);
++    }
++
++    private static void put(JSONObject object, String key, Object value) {
++        try {
++            object.put(key, value);
++        } catch (JSONException e) {
++            throw new IllegalStateException("Unable to construct NativeBridge state", e);
++        }
++    }
++
++    private static final class Launch {
++        final String processName;
++        final long versionCode;
++        final String backend;
++        final ArrayList<String> candidates;
++        final long startUptime;
++
++        Launch(String processName, long versionCode, String backend,
++                ArrayList<String> candidates, long startUptime) {
++            this.processName = processName;
++            this.versionCode = versionCode;
++            this.backend = backend;
++            this.candidates = new ArrayList<>(candidates);
++            this.startUptime = startUptime;
++        }
++    }
++
++    private static final class PolicyRule {
++        final boolean automatic;
++        final ArrayList<String> candidates;
++
++        PolicyRule(boolean automatic, ArrayList<String> candidates) {
++            this.automatic = automatic;
++            this.candidates = candidates;
++        }
++
++        static PolicyRule automaticDefaults() {
++            final ArrayList<String> candidates = new ArrayList<>();
++            candidates.add(BACKEND_NDK);
++            candidates.add(BACKEND_HOUDINI);
++            return new PolicyRule(true, candidates);
++        }
++
++        static PolicyRule parse(Object value) {
++            if (value instanceof String) {
++                final String backend = (String) value;
++                return BACKEND_AUTO.equals(backend) ? automaticDefaults()
++                        : explicit(backend);
++            }
++            if (!(value instanceof JSONObject)) {
++                return automaticDefaults();
++            }
++
++            final JSONObject object = (JSONObject) value;
++            String backend = object.optString("selected_backend", "");
++            if (backend.isEmpty()) {
++                backend = object.optString("backend", "");
++            }
++            if (backend.isEmpty()) {
++                backend = object.optString("mode", BACKEND_AUTO);
++            }
++            if (!BACKEND_AUTO.equals(backend)) {
++                return explicit(backend);
++            }
++
++            final ArrayList<String> candidates = new ArrayList<>();
++            final JSONArray array = object.optJSONArray("candidates");
++            if (array != null) {
++                for (int i = 0; i < array.length(); i++) {
++                    final String candidate = array.optString(i);
++                    if (isBackend(candidate) && !candidates.contains(candidate)) {
++                        candidates.add(candidate);
++                    }
++                }
++            }
++            return candidates.isEmpty() ? automaticDefaults()
++                    : new PolicyRule(true, candidates);
++        }
++
++        private static PolicyRule explicit(String backend) {
++            final ArrayList<String> candidates = new ArrayList<>();
++            if (isBackend(backend)) {
++                candidates.add(backend);
++                return new PolicyRule(false, candidates);
++            }
++            return automaticDefaults();
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index b77270f5963b..edb5ca3aeb97 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -2066,6 +2066,9 @@ public final class ProcessList {
+         final long startSeq = ++mProcStartSeqCounter;
+         app.setStartSeq(startSeq);
+         app.setStartParams(uid, hostingRecord, seInfo, startTime);
++        if (mService.mFloralNativeBridgeManager != null) {
++            mService.mFloralNativeBridgeManager.onProcessStarting(app);
++        }
+         app.setUsingWrapper(invokeWith != null
+                 || Zygote.getWrapProperty(app.processName) != null);
+         mPendingStarts.put(startSeq, app);
+-- 
+2.47.3
+

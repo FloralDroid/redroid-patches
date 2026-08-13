@@ -1,0 +1,101 @@
+From c093349b168405cf3206c074bd851cdd489a1b5c Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 12 Aug 2026 23:55:47 +0800
+Subject: [PATCH] abi-dumps: add Floral NativeBridge private symbols
+
+---
+ 31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump    | 3 +++
+ 31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump | 3 +++
+ 31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump      | 3 +++
+ 31/64/x86/source-based/libnativebridge.so.lsdump              | 3 +++
+ 31/64/x86_64/source-based/libnativebridge.so.lsdump           | 3 +++
+ 31/64/x86_x86_64/source-based/libnativebridge.so.lsdump       | 3 +++
+ 6 files changed, 18 insertions(+)
+
+diff --git a/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump b/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump
+index 63981bb..c416d0c 100644
+--- a/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump
++++ b/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump
+@@ -140,6 +140,9 @@
+   },
+   {
+    "name" : "PreInitializeNativeBridge"
++  },
++  {
++   "name" : "SetFloralNativeBridgeProcessContext"
+   }
+  ],
+  "elf_objects" : [],
+diff --git a/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump b/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump
+index 1ec9f55..7de5999 100644
+--- a/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump
++++ b/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump
+@@ -140,6 +140,9 @@
+   },
+   {
+    "name" : "PreInitializeNativeBridge"
++  },
++  {
++   "name" : "SetFloralNativeBridgeProcessContext"
+   }
+  ],
+  "elf_objects" : [],
+diff --git a/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump b/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump
+index 1ec9f55..7de5999 100644
+--- a/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump
++++ b/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump
+@@ -140,6 +140,9 @@
+   },
+   {
+    "name" : "PreInitializeNativeBridge"
++  },
++  {
++   "name" : "SetFloralNativeBridgeProcessContext"
+   }
+  ],
+  "elf_objects" : [],
+diff --git a/31/64/x86/source-based/libnativebridge.so.lsdump b/31/64/x86/source-based/libnativebridge.so.lsdump
+index e4443f1..3c51919 100644
+--- a/31/64/x86/source-based/libnativebridge.so.lsdump
++++ b/31/64/x86/source-based/libnativebridge.so.lsdump
+@@ -139,6 +139,9 @@
+   },
+   {
+    "name" : "PreInitializeNativeBridge"
++  },
++  {
++   "name" : "SetFloralNativeBridgeProcessContext"
+   }
+  ],
+  "elf_objects" : [],
+diff --git a/31/64/x86_64/source-based/libnativebridge.so.lsdump b/31/64/x86_64/source-based/libnativebridge.so.lsdump
+index e9b8708..852a9a0 100644
+--- a/31/64/x86_64/source-based/libnativebridge.so.lsdump
++++ b/31/64/x86_64/source-based/libnativebridge.so.lsdump
+@@ -139,6 +139,9 @@
+   },
+   {
+    "name" : "PreInitializeNativeBridge"
++  },
++  {
++   "name" : "SetFloralNativeBridgeProcessContext"
+   }
+  ],
+  "elf_objects" : [],
+diff --git a/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump b/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump
+index e4443f1..3c51919 100644
+--- a/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump
++++ b/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump
+@@ -139,6 +139,9 @@
+   },
+   {
+    "name" : "PreInitializeNativeBridge"
++  },
++  {
++   "name" : "SetFloralNativeBridgeProcessContext"
+   }
+  ],
+  "elf_objects" : [],
+-- 
+2.47.3
+

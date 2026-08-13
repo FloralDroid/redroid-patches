@@ -1,0 +1,73 @@
+From a88e37eddcf200067d140aedba1a7dae9496dee0 Mon Sep 17 00:00:00 2001
+From: FloralDroid <opensource@floraldroid.dev>
+Date: Wed, 12 Aug 2026 23:55:47 +0800
+Subject: [PATCH] =?UTF-8?q?art:=20=E5=90=91=20Floral=20NativeBridge=20?=
+ =?UTF-8?q?=E4=BC=A0=E9=80=92=E8=BF=9B=E7=A8=8B=E8=BA=AB=E4=BB=BD?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+zygote 子进程在降权前将真实 nice name 和应用数据目录传给可选的 Floral 扩展。普通 NativeBridge 无需实现该符号，现有稳定接口保持不变。
+
+Change-Id: Ia9f0097fc2b17ed3c9f273b2738d4918cfe1975d
+---
+ libnativebridge/libnativebridge.map.txt |  1 +
+ libnativebridge/native_bridge.cc        | 13 +++++++++++++
+ libnativebridge/native_bridge_lazy.cc   |  5 +++++
+ 3 files changed, 19 insertions(+)
+
+diff --git a/libnativebridge/libnativebridge.map.txt b/libnativebridge/libnativebridge.map.txt
+index 8b51ab8..5ac4b3d 100644
+--- a/libnativebridge/libnativebridge.map.txt
++++ b/libnativebridge/libnativebridge.map.txt
+@@ -26,6 +26,7 @@ LIBNATIVEBRIDGE_1 {
+     PreInitializeNativeBridge;
+     NativeBridgeAvailable;
+     NeedsNativeBridge;
++    SetFloralNativeBridgeProcessContext;
+   local:
+     *;
+ };
+diff --git a/libnativebridge/native_bridge.cc b/libnativebridge/native_bridge.cc
+index fb13d62..0d99711 100644
+--- a/libnativebridge/native_bridge.cc
++++ b/libnativebridge/native_bridge.cc
+@@ -383,6 +383,19 @@ bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
+   return true;
+ }
+ 
++void SetFloralNativeBridgeProcessContext(const char* process_name, const char* app_data_dir) {
++  if (state != NativeBridgeState::kOpened || native_bridge_handle == nullptr) {
++    return;
++  }
++
++  using SetProcessContextFn = void (*)(const char*, const char*);
++  auto set_process_context = reinterpret_cast<SetProcessContextFn>(
++      dlsym(native_bridge_handle, "FloralNativeBridgeSetProcessContext"));
++  if (set_process_context != nullptr) {
++    set_process_context(process_name, app_data_dir);
++  }
++}
++
+ void PreZygoteForkNativeBridge() {
+   if (NativeBridgeInitialized()) {
+     if (isCompatibleWith(PRE_ZYGOTE_FORK_VERSION)) {
+diff --git a/libnativebridge/native_bridge_lazy.cc b/libnativebridge/native_bridge_lazy.cc
+index dd8a806..2927623 100644
+--- a/libnativebridge/native_bridge_lazy.cc
++++ b/libnativebridge/native_bridge_lazy.cc
+@@ -54,6 +54,11 @@ bool PreInitializeNativeBridge(const char* app_data_dir, const char* instruction
+   return f(app_data_dir, instruction_set);
+ }
+ 
++void SetFloralNativeBridgeProcessContext(const char* process_name, const char* app_data_dir) {
++  static auto f = GET_FUNC_PTR(SetFloralNativeBridgeProcessContext);
++  f(process_name, app_data_dir);
++}
++
+ bool NativeBridgeAvailable() {
+   static auto f = GET_FUNC_PTR(NativeBridgeAvailable);
+   return f();
+-- 
+2.47.3
+
