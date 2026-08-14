@@ -10,14 +10,14 @@ Keep build-owned loader ABI and hardware compatibility properties unchanged.
 Change-Id: I05cf8f58a369ffab3604c3e64aa917bde35c0770
 ---
  init/Android.bp                          |   5 +
- init/floral_device_profile.cpp           | 246 +++++++++++++++++++++++
+ init/floral_device_profile.cpp           | 244 +++++++++++++++++++++++
  init/floral_device_profile.h             |  52 +++++
- init/floral_device_profile_test.cpp      | 128 ++++++++++++
+ init/floral_device_profile_test.cpp      | 129 ++++++++++++
  init/floral_nativebridge_config.cpp      | 206 +++++++++++++++++++
  init/floral_nativebridge_config.h        |  48 +++++
  init/floral_nativebridge_config_test.cpp |  75 +++++++
  init/property_service.cpp                |  42 ++++
- 8 files changed, 802 insertions(+)
+ 8 files changed, 801 insertions(+)
  create mode 100644 init/floral_device_profile.cpp
  create mode 100644 init/floral_device_profile.h
  create mode 100644 init/floral_device_profile_test.cpp
@@ -60,7 +60,7 @@ new file mode 100644
 index 000000000..147effd22
 --- /dev/null
 +++ b/init/floral_device_profile.cpp
-@@ -0,0 +1,246 @@
+@@ -0,0 +1,244 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -181,10 +181,8 @@ index 000000000..147effd22
 +
 +        std::string key = android::base::Trim(line.substr(0, separator));
 +        std::string value = android::base::Trim(line.substr(separator + 1));
-+        if (!IsRequiredField(key)) {
-+            return android::base::Error()
-+                   << "line " << line_number << " contains unknown field '" << key << "'";
-+        }
++        // Other consumers share this versioned file and own their fields independently.
++        if (!IsRequiredField(key)) continue;
 +        if (value.empty()) {
 +            return android::base::Error() << "line " << line_number << " has an empty value";
 +        }
@@ -370,7 +368,7 @@ new file mode 100644
 index 000000000..8f02c2ed6
 --- /dev/null
 +++ b/init/floral_device_profile_test.cpp
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,129 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -432,10 +430,11 @@ index 000000000..8f02c2ed6
 +    EXPECT_FALSE(ParseFloralDeviceProfile("version=1\nbrand=Floral\n").ok());
 +}
 +
-+TEST(floral_device_profile, RejectsUnknownAndDuplicateFields) {
-+    std::string unknown(kValidProfile);
-+    unknown.append("unexpected=value\n");
-+    EXPECT_FALSE(ParseFloralDeviceProfile(unknown).ok());
++TEST(floral_device_profile, IgnoresUnknownFieldsAndRejectsKnownDuplicates) {
++    std::string extended(kValidProfile);
++    extended.append("cpu_feature_view=sm8550\n");
++    extended.append("cpu_cores=auto\n");
++    EXPECT_TRUE(ParseFloralDeviceProfile(extended).ok());
 +
 +    std::string duplicate(kValidProfile);
 +    duplicate.append("model=Other\n");
@@ -915,4 +914,3 @@ index 55e89c647..7e203c52d 100755
          if (PropertySet(name, value, &error) != PROP_SUCCESS) {
 -- 
 2.47.3
-
