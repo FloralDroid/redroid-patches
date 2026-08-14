@@ -14,9 +14,9 @@ Change-Id: Id5ba7ddfae243c2266fcfcfff9a263d7dd937c54
  core/jni/com_android_internal_os_Zygote.cpp   |   8 +
  .../server/am/ActivityManagerService.java     |   3 +
  .../java/com/android/server/am/AppErrors.java |   8 +
- .../server/am/FloralNativeBridgeManager.java  | 412 ++++++++++++++++++
+ .../server/am/FloralNativeBridgeManager.java  | 422 ++++++++++++++++++
  .../com/android/server/am/ProcessList.java    |   3 +
- 5 files changed, 434 insertions(+)
+ 5 files changed, 444 insertions(+)
  create mode 100644 services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 
 diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
@@ -97,7 +97,7 @@ new file mode 100644
 index 000000000000..c514a3140f24
 --- /dev/null
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-@@ -0,0 +1,412 @@
+@@ -0,0 +1,422 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -317,13 +317,13 @@ index 000000000000..c514a3140f24
 +        if (value == null && packages != null) {
 +            value = packages.opt(packageName);
 +        }
-+        if (value == null) {
-+            value = root.opt("default_backend");
++        if (value != null) {
++            return PolicyRule.parse(value);
 +        }
-+        if (value == null) {
-+            value = root.opt("preferred_backend");
++        if (root.has("default_backend")) {
++            return PolicyRule.parse(root.opt("default_backend"));
 +        }
-+        return PolicyRule.parse(value);
++        return PolicyRule.preferred(root.optString("preferred_backend", ""));
 +    }
 +
 +    private JSONObject packagesState() {
@@ -462,6 +462,16 @@ index 000000000000..c514a3140f24
 +            candidates.add(BACKEND_NDK);
 +            candidates.add(BACKEND_HOUDINI);
 +            return new PolicyRule(true, candidates);
++        }
++
++        static PolicyRule preferred(String backend) {
++            final PolicyRule rule = automaticDefaults();
++            if (BACKEND_HOUDINI.equals(backend)) {
++                rule.candidates.clear();
++                rule.candidates.add(BACKEND_HOUDINI);
++                rule.candidates.add(BACKEND_NDK);
++            }
++            return rule;
 +        }
 +
 +        static PolicyRule parse(Object value) {

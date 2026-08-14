@@ -365,7 +365,7 @@ new file mode 100644
 index 000000000..692fdce08
 --- /dev/null
 +++ b/init/floral_nativebridge_config.cpp
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,206 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -483,12 +483,19 @@ index 000000000..692fdce08
 +        return android::base::Error() << "unsupported nativebridge.json version";
 +    }
 +
-+    const Json::Value backend = root.isMember("default_backend")
-+            ? root["default_backend"] : root["preferred_backend"];
-+    if ((!backend.isNull() && !backend.isString() && !backend.isObject()) ||
-+        (backend.isString() && !IsKnownBackend(backend.asString()))) {
-+        return android::base::Error()
-+                << "default_backend or preferred_backend must be auto, ndk, or houdini";
++    if (root.isMember("default_backend")) {
++        const Json::Value backend = root["default_backend"];
++        if ((!backend.isString() && !backend.isObject()) ||
++            (backend.isString() && !IsKnownBackend(backend.asString()))) {
++            return android::base::Error()
++                    << "default_backend must be auto, ndk, houdini, or a rule object";
++        }
++    } else if (root.isMember("preferred_backend")) {
++        const Json::Value preferred = root["preferred_backend"];
++        if (!preferred.isString() ||
++            (preferred.asString() != "ndk" && preferred.asString() != "houdini")) {
++            return android::base::Error() << "preferred_backend must be ndk or houdini";
++        }
 +    }
 +
 +    FloralNativeBridgeConfig config = DefaultFloralNativeBridgeConfig();
@@ -624,7 +631,7 @@ new file mode 100644
 index 000000000..cd52d5175
 --- /dev/null
 +++ b/init/floral_nativebridge_config_test.cpp
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,75 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -667,6 +674,14 @@ index 000000000..cd52d5175
 +        "version": 1,
 +        "default_backend": "ndk",
 +        "abi": {"public": {"64": ["mips64"]}}
++    })");
++    EXPECT_FALSE(config.ok());
++}
++
++TEST(FloralNativeBridgeConfig, RejectsNonSpecificPreferredBackend) {
++    const auto config = ParseFloralNativeBridgeConfig(R"({
++        "version": 1,
++        "preferred_backend": "auto"
 +    })");
 +    EXPECT_FALSE(config.ok());
 +}
