@@ -1,4 +1,4 @@
-From bc13c8b7db735d5218cd109ffd3156c5c7cfc392 Mon Sep 17 00:00:00 2001
+From 837c821f2fae5eff7e2641bd944389a9dd9aca46 Mon Sep 17 00:00:00 2001
 From: FloralDroid <opensource@floraldroid.dev>
 Date: Wed, 12 Aug 2026 23:57:14 +0800
 Subject: [PATCH] =?UTF-8?q?frameworks:=20=E6=94=AF=E6=8C=81=20NativeBridge?=
@@ -14,9 +14,9 @@ Change-Id: Id5ba7ddfae243c2266fcfcfff9a263d7dd937c54
  core/jni/com_android_internal_os_Zygote.cpp   |   8 +
  .../server/am/ActivityManagerService.java     |   3 +
  .../java/com/android/server/am/AppErrors.java |   8 +
- .../server/am/FloralNativeBridgeManager.java  | 422 ++++++++++++++++++
+ .../server/am/FloralNativeBridgeManager.java  | 423 ++++++++++++++++++
  .../com/android/server/am/ProcessList.java    |   3 +
- 5 files changed, 444 insertions(+)
+ 5 files changed, 445 insertions(+)
  create mode 100644 services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 
 diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
@@ -94,10 +94,10 @@ index bcb42bb38495..7a071cc4c615 100644
                      PackageWatchdog.FAILURE_REASON_APP_CRASH);
 diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 new file mode 100644
-index 000000000000..c514a3140f24
+index 000000000000..702d6e276c3d
 --- /dev/null
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,423 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -147,7 +147,6 @@ index 000000000000..c514a3140f24
 +            "/data/system/floral/nativebridge-state.json";
 +    // Translated games commonly initialize optional native SDKs well after their first frame.
 +    private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
-+    private static final long RESTART_DELAY_MS = 300L;
 +    private static final int MAX_JSON_BYTES = 256 * 1024;
 +
 +    private static final String BACKEND_AUTO = "auto";
@@ -285,7 +284,9 @@ index 000000000000..c514a3140f24
 +                + launch.backend + " to " + replacement);
 +
 +        if (taskId != INVALID_TASK_ID) {
-+            mService.mHandler.postDelayed(() -> restartTask(taskId), RESTART_DELAY_MS);
++            // Restart on the next AMS turn after process cleanup, without exposing a
++            // fixed blank interval between the old and replacement process.
++            mService.mHandler.post(() -> restartTask(taskId));
 +        }
 +        return true;
 +    }

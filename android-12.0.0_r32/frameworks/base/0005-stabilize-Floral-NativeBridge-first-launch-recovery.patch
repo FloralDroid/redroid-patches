@@ -1,4 +1,4 @@
-From 507bd41e6726272fcb0728c7bb9211e0b1a57d4c Mon Sep 17 00:00:00 2001
+From 9643f137c6d8cdc636e3c6ea88d265a1f46521da Mon Sep 17 00:00:00 2001
 From: FloralDroid <opensource@floraldroid.dev>
 Date: Fri, 14 Aug 2026 20:00:14 +0800
 Subject: [PATCH] =?UTF-8?q?frameworks:=20=E5=AE=8C=E5=96=84=20NativeBridge?=
@@ -18,7 +18,7 @@ Content-Transfer-Encoding: 8bit
  3 files changed, 110 insertions(+), 18 deletions(-)
 
 diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-index 7918b925394c..92fba3101a6a 100644
+index 702d6e276c3d..751abb1cc3ce 100644
 --- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 @@ -20,6 +20,7 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
@@ -38,15 +38,15 @@ index 7918b925394c..92fba3101a6a 100644
  final class FloralNativeBridgeManager {
      private static final String TAG = "FloralNativeBridge";
      private static final String POLICY_PATH =
-@@ -49,6 +50,7 @@ final class FloralNativeBridgeManager {
+@@ -48,6 +49,7 @@ final class FloralNativeBridgeManager {
+     // Translated games commonly initialize optional native SDKs well after their first frame.
      private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
-     private static final long RESTART_DELAY_MS = 300L;
      private static final int MAX_JSON_BYTES = 256 * 1024;
 +    private static final int STATE_VERSION = 2;
  
      private static final String BACKEND_AUTO = "auto";
      private static final String BACKEND_NDK = "ndk";
-@@ -57,12 +59,17 @@ final class FloralNativeBridgeManager {
+@@ -56,12 +58,17 @@ final class FloralNativeBridgeManager {
      private final ActivityManagerService mService;
      private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
      private final ArrayMap<ProcessRecord, Launch> mLaunches = new ArrayMap<>();
@@ -65,7 +65,7 @@ index 7918b925394c..92fba3101a6a 100644
              mState = emptyState();
          }
      }
-@@ -85,25 +92,37 @@ final class FloralNativeBridgeManager {
+@@ -84,25 +91,37 @@ final class FloralNativeBridgeManager {
          JSONObject state = packages.optJSONObject(processName);
          boolean changed = false;
          if (state == null || state.optLong("version_code", Long.MIN_VALUE) != versionCode
@@ -106,7 +106,7 @@ index 7918b925394c..92fba3101a6a 100644
                  Slog.w(TAG, "NativeBridge candidates exhausted for " + processName);
                  return;
              }
-@@ -114,15 +133,19 @@ final class FloralNativeBridgeManager {
+@@ -113,15 +132,19 @@ final class FloralNativeBridgeManager {
          if (selected.isEmpty()) {
              return;
          }
@@ -131,7 +131,7 @@ index 7918b925394c..92fba3101a6a 100644
                  rule.candidates, app.getStartTime());
          mLaunches.put(app, launch);
          mService.mHandler.postDelayed(() -> finishStabilityWindow(app, launch),
-@@ -148,7 +171,7 @@ final class FloralNativeBridgeManager {
+@@ -147,7 +170,7 @@ final class FloralNativeBridgeManager {
          }
      }
  
@@ -140,7 +140,7 @@ index 7918b925394c..92fba3101a6a 100644
      boolean handleEarlyNativeCrash(ProcessRecord app) {
          final Launch launch = mLaunches.get(app);
          if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
-@@ -165,7 +188,11 @@ final class FloralNativeBridgeManager {
+@@ -164,7 +187,11 @@ final class FloralNativeBridgeManager {
          final String replacement = firstAvailable(launch.candidates, failed);
          put(state, "failed_backends", toJsonArray(failed));
          put(state, "stable", false);
@@ -152,7 +152,7 @@ index 7918b925394c..92fba3101a6a 100644
              writeState();
              mLaunches.remove(app);
              Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
-@@ -174,11 +201,20 @@ final class FloralNativeBridgeManager {
+@@ -173,11 +200,20 @@ final class FloralNativeBridgeManager {
          }
  
          put(state, "selected_backend", replacement);
@@ -175,7 +175,7 @@ index 7918b925394c..92fba3101a6a 100644
          mService.mProcessList.removeProcessLocked(app, false, true,
                  ApplicationExitInfo.REASON_CRASH_NATIVE, "native bridge fallback");
          Slog.w(TAG, "Early native crash in " + launch.processName + "; switching "
-@@ -208,7 +244,7 @@ final class FloralNativeBridgeManager {
+@@ -209,7 +245,7 @@ final class FloralNativeBridgeManager {
      }
  
      private PolicyRule resolvePolicy(String processName, String packageName) {
@@ -184,7 +184,7 @@ index 7918b925394c..92fba3101a6a 100644
          if (root == null) {
              return PolicyRule.automaticDefaults();
          }
-@@ -265,13 +301,15 @@ final class FloralNativeBridgeManager {
+@@ -266,13 +302,15 @@ final class FloralNativeBridgeManager {
  
      private static JSONObject emptyState() {
          final JSONObject root = new JSONObject();
@@ -201,7 +201,7 @@ index 7918b925394c..92fba3101a6a 100644
                  && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
                  && launch.backend.equals(state.optString("selected_backend"));
      }
-@@ -333,14 +371,16 @@ final class FloralNativeBridgeManager {
+@@ -334,14 +372,16 @@ final class FloralNativeBridgeManager {
  
      private static final class Launch {
          final String processName;
@@ -219,7 +219,7 @@ index 7918b925394c..92fba3101a6a 100644
              this.versionCode = versionCode;
              this.backend = backend;
              this.candidates = new ArrayList<>(candidates);
-@@ -389,6 +429,19 @@ final class FloralNativeBridgeManager {
+@@ -390,6 +430,19 @@ final class FloralNativeBridgeManager {
              if (backend.isEmpty()) {
                  backend = object.optString("backend", "");
              }
@@ -239,7 +239,7 @@ index 7918b925394c..92fba3101a6a 100644
              if (backend.isEmpty()) {
                  backend = object.optString("mode", BACKEND_AUTO);
              }
-@@ -396,8 +449,11 @@ final class FloralNativeBridgeManager {
+@@ -397,8 +450,11 @@ final class FloralNativeBridgeManager {
                  return explicit(backend);
              }
  
