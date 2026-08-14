@@ -1,9 +1,29 @@
-From 3275e7a9e36315cdc6e1dad8a080242f78b76e03 Mon Sep 17 00:00:00 2001
+From 457b26b9c3ebcab2828ed821252a992cf8b89061 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 14 Aug 2026 02:16:05 +0800
-Subject: [PATCH] init: virtualize Floral NativeBridge ABI view
+Subject: [PATCH] init: virtualize Floral device and NativeBridge identity
 
-Load the host NativeBridge policy during boot and expose configured application ABI lists separately from the build-owned loader ABI lists.
+Load host device and NativeBridge policies during boot.
+Expose configured public product, build, and application ABI identities.
+Keep build-owned loader ABI and hardware compatibility properties unchanged.
+
+Change-Id: I05cf8f58a369ffab3604c3e64aa917bde35c0770
+---
+ init/Android.bp                          |   5 +
+ init/floral_device_profile.cpp           | 246 +++++++++++++++++++++++
+ init/floral_device_profile.h             |  52 +++++
+ init/floral_device_profile_test.cpp      | 128 ++++++++++++
+ init/floral_nativebridge_config.cpp      | 206 +++++++++++++++++++
+ init/floral_nativebridge_config.h        |  48 +++++
+ init/floral_nativebridge_config_test.cpp |  75 +++++++
+ init/property_service.cpp                |  42 ++++
+ 8 files changed, 802 insertions(+)
+ create mode 100644 init/floral_device_profile.cpp
+ create mode 100644 init/floral_device_profile.h
+ create mode 100644 init/floral_device_profile_test.cpp
+ create mode 100644 init/floral_nativebridge_config.cpp
+ create mode 100644 init/floral_nativebridge_config.h
+ create mode 100644 init/floral_nativebridge_config_test.cpp
 
 diff --git a/init/Android.bp b/init/Android.bp
 index 7eeafa24b..6b13c9775 100644
@@ -37,10 +57,10 @@ index 7eeafa24b..6b13c9775 100644
          "oneshot_on_test.cpp",
 diff --git a/init/floral_device_profile.cpp b/init/floral_device_profile.cpp
 new file mode 100644
-index 000000000..515535a24
+index 000000000..147effd22
 --- /dev/null
 +++ b/init/floral_device_profile.cpp
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,246 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -81,9 +101,10 @@ index 000000000..515535a24
 +constexpr size_t kMaximumIdentityLength = 64;
 +constexpr size_t kMaximumIdentifierLength = 32;
 +
-+constexpr std::array<std::string_view, 10> kRequiredFields = {
-+        "version",          "brand",     "manufacturer", "model",     "device", "product",
-+        "soc_manufacturer", "soc_model", "gpu_vendor",   "gpu_model",
++constexpr std::array<std::string_view, 15> kRequiredFields = {
++        "version",   "brand",    "manufacturer",     "model",           "device",
++        "product",   "board",    "soc_manufacturer", "soc_model",       "gpu_vendor",
++        "gpu_model", "build_id", "build_display",    "version_release", "security_patch",
 +};
 +
 +bool IsRequiredField(std::string_view key) {
@@ -93,15 +114,23 @@ index 000000000..515535a24
 +    return false;
 +}
 +
-+bool IsDisplayValueValid(const std::string& value) {
-+    if (value.empty() || value.size() > kMaximumIdentityLength ||
-+        !IsLegalPropertyValue("ro.product.model", value).ok()) {
++bool IsPropertyTextValid(const std::string& property, const std::string& value) {
++    if (value.empty() || !IsLegalPropertyValue(property, value).ok()) {
 +        return false;
 +    }
 +    for (unsigned char character : value) {
 +        if (std::iscntrl(character)) return false;
 +    }
 +    return true;
++}
++
++bool IsDisplayValueValid(const std::string& value) {
++    return value.size() <= kMaximumIdentityLength && IsPropertyTextValid("ro.product.model", value);
++}
++
++bool IsVersionReleaseValid(const std::string& value) {
++    return value.size() <= kMaximumIdentityLength &&
++           IsPropertyTextValid("ro.build.version.release", value);
 +}
 +
 +bool IsIdentifierValid(const std::string& value) {
@@ -115,6 +144,26 @@ index 000000000..515535a24
 +        }
 +    }
 +    return true;
++}
++
++bool IsSecurityPatchValid(std::string_view value) {
++    if (value.size() != 10 || value[4] != '-' || value[7] != '-') return false;
++    for (size_t index = 0; index < value.size(); ++index) {
++        if (index == 4 || index == 7) continue;
++        if (!std::isdigit(static_cast<unsigned char>(value[index]))) return false;
++    }
++
++    const int year = (value[0] - '0') * 1000 + (value[1] - '0') * 100 + (value[2] - '0') * 10 +
++                     value[3] - '0';
++    const int month = (value[5] - '0') * 10 + value[6] - '0';
++    const int day = (value[8] - '0') * 10 + value[9] - '0';
++    if (year < 1970 || month < 1 || month > 12) return false;
++
++    constexpr std::array<int, 12> kDaysPerMonth = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
++    int maximum_day = kDaysPerMonth[month - 1];
++    const bool leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
++    if (month == 2 && leap_year) ++maximum_day;
++    return day >= 1 && day <= maximum_day;
 +}
 +
 +android::base::Result<std::map<std::string, std::string>> ParseFields(std::string_view content) {
@@ -154,8 +203,20 @@ index 000000000..515535a24
 +}  // namespace
 +
 +FloralDeviceProfile DefaultFloralDeviceProfile() {
-+    return {"Floral",      "FloralDroid", "Floral F12",  "floral_f12", "floral_f12",
-+            "FloralDroid", "Floral S12",  "FloralDroid", "Floral GPU"};
++    return {"Floral",
++            "FloralDroid",
++            "Floral F12",
++            "floral_f12",
++            "floral_f12",
++            "",
++            "FloralDroid",
++            "Floral S12",
++            "FloralDroid",
++            "Floral GPU",
++            "",
++            "",
++            "",
++            ""};
 +}
 +
 +android::base::Result<FloralDeviceProfile> ParseFloralDeviceProfile(std::string_view content) {
@@ -168,16 +229,31 @@ index 000000000..515535a24
 +    }
 +
 +    FloralDeviceProfile profile = {
-+            fields.at("brand"),     fields.at("manufacturer"), fields.at("model"),
-+            fields.at("device"),    fields.at("product"),      fields.at("soc_manufacturer"),
-+            fields.at("soc_model"), fields.at("gpu_vendor"),   fields.at("gpu_model"),
++            fields.at("brand"),
++            fields.at("manufacturer"),
++            fields.at("model"),
++            fields.at("device"),
++            fields.at("product"),
++            fields.at("board"),
++            fields.at("soc_manufacturer"),
++            fields.at("soc_model"),
++            fields.at("gpu_vendor"),
++            fields.at("gpu_model"),
++            fields.at("build_id"),
++            fields.at("build_display"),
++            fields.at("version_release"),
++            fields.at("security_patch"),
 +    };
 +
 +    if (!IsDisplayValueValid(profile.brand) || !IsDisplayValueValid(profile.manufacturer) ||
 +        !IsDisplayValueValid(profile.model) || !IsIdentifierValid(profile.device) ||
-+        !IsIdentifierValid(profile.product) || !IsDisplayValueValid(profile.soc_manufacturer) ||
-+        !IsDisplayValueValid(profile.soc_model) || !IsDisplayValueValid(profile.gpu_vendor) ||
-+        !IsDisplayValueValid(profile.gpu_model)) {
++        !IsIdentifierValid(profile.product) || !IsIdentifierValid(profile.board) ||
++        !IsDisplayValueValid(profile.soc_manufacturer) || !IsDisplayValueValid(profile.soc_model) ||
++        !IsDisplayValueValid(profile.gpu_vendor) || !IsDisplayValueValid(profile.gpu_model) ||
++        !IsIdentifierValid(profile.build_id) ||
++        !IsPropertyTextValid("ro.build.display.id", profile.build_display) ||
++        !IsVersionReleaseValid(profile.version_release) ||
++        !IsSecurityPatchValid(profile.security_patch)) {
 +        return android::base::Error() << "profile contains an invalid identity value";
 +    }
 +    return profile;
@@ -203,7 +279,7 @@ index 000000000..515535a24
 +
 +std::map<std::string, std::string> FloralDeviceProfileProperties(
 +        const FloralDeviceProfile& profile) {
-+    return {
++    std::map<std::string, std::string> properties = {
 +            {"ro.product.brand", profile.brand},
 +            {"ro.product.manufacturer", profile.manufacturer},
 +            {"ro.product.model", profile.model},
@@ -214,16 +290,29 @@ index 000000000..515535a24
 +            {"ro.boot.floral_gpu_vendor", profile.gpu_vendor},
 +            {"ro.boot.floral_gpu_model", profile.gpu_model},
 +    };
++    if (!profile.board.empty()) properties.emplace("ro.product.board", profile.board);
++    if (!profile.build_id.empty()) properties.emplace("ro.build.id", profile.build_id);
++    if (!profile.build_display.empty()) {
++        properties.emplace("ro.build.display.id", profile.build_display);
++    }
++    if (!profile.version_release.empty()) {
++        properties.emplace("ro.build.version.release", profile.version_release);
++        properties.emplace("ro.build.version.release_or_codename", profile.version_release);
++    }
++    if (!profile.security_patch.empty()) {
++        properties.emplace("ro.build.version.security_patch", profile.security_patch);
++    }
++    return properties;
 +}
 +
 +}  // namespace init
 +}  // namespace android
 diff --git a/init/floral_device_profile.h b/init/floral_device_profile.h
 new file mode 100644
-index 000000000..c0e71a7fb
+index 000000000..aa5687e32
 --- /dev/null
 +++ b/init/floral_device_profile.h
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,52 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -257,10 +346,15 @@ index 000000000..c0e71a7fb
 +    std::string model;
 +    std::string device;
 +    std::string product;
++    std::string board;
 +    std::string soc_manufacturer;
 +    std::string soc_model;
 +    std::string gpu_vendor;
 +    std::string gpu_model;
++    std::string build_id;
++    std::string build_display;
++    std::string version_release;
++    std::string security_patch;
 +};
 +
 +FloralDeviceProfile DefaultFloralDeviceProfile();
@@ -273,10 +367,10 @@ index 000000000..c0e71a7fb
 +}  // namespace android
 diff --git a/init/floral_device_profile_test.cpp b/init/floral_device_profile_test.cpp
 new file mode 100644
-index 000000000..1ae95e135
+index 000000000..8f02c2ed6
 --- /dev/null
 +++ b/init/floral_device_profile_test.cpp
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,128 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -308,10 +402,15 @@ index 000000000..1ae95e135
 +model=Find X6 Pro
 +device=PGEM10
 +product=PGEM10
++board=kalama
 +soc_manufacturer=Qualcomm
 +soc_model=SM8550
 +gpu_vendor=Qualcomm
 +gpu_model=Adreno (TM) 740
++build_id=SQ1D.220205.004
++build_display=PGEM10-userdebug 12 SQ1D.220205.004 test-keys
++version_release=12
++security_patch=2022-02-05
 +)";
 +
 +TEST(floral_device_profile, ParsesCompleteProfile) {
@@ -321,8 +420,12 @@ index 000000000..1ae95e135
 +    EXPECT_EQ(result->brand, "OPPO");
 +    EXPECT_EQ(result->model, "Find X6 Pro");
 +    EXPECT_EQ(result->device, "PGEM10");
++    EXPECT_EQ(result->board, "kalama");
 +    EXPECT_EQ(result->soc_model, "SM8550");
 +    EXPECT_EQ(result->gpu_model, "Adreno (TM) 740");
++    EXPECT_EQ(result->build_id, "SQ1D.220205.004");
++    EXPECT_EQ(result->version_release, "12");
++    EXPECT_EQ(result->security_patch, "2022-02-05");
 +}
 +
 +TEST(floral_device_profile, RejectsPartialProfile) {
@@ -348,6 +451,36 @@ index 000000000..1ae95e135
 +    EXPECT_FALSE(ParseFloralDeviceProfile(invalid).ok());
 +}
 +
++TEST(floral_device_profile, RejectsInvalidBuildMetadata) {
++    std::string invalid_board(kValidProfile);
++    size_t board_position = invalid_board.find("board=kalama");
++    ASSERT_NE(board_position, std::string::npos);
++    invalid_board.replace(board_position, std::string("board=kalama").size(),
++                          "board=invalid board");
++    EXPECT_FALSE(ParseFloralDeviceProfile(invalid_board).ok());
++
++    std::string invalid_patch(kValidProfile);
++    size_t patch_position = invalid_patch.find("security_patch=2022-02-05");
++    ASSERT_NE(patch_position, std::string::npos);
++    invalid_patch.replace(patch_position, std::string("security_patch=2022-02-05").size(),
++                          "security_patch=2023-02-29");
++    EXPECT_FALSE(ParseFloralDeviceProfile(invalid_patch).ok());
++}
++
++TEST(floral_device_profile, MapsConfiguredBuildIdentityToAndroidProperties) {
++    auto profile = ParseFloralDeviceProfile(kValidProfile);
++    ASSERT_TRUE(profile.ok()) << profile.error();
++
++    auto properties = FloralDeviceProfileProperties(*profile);
++    EXPECT_EQ(properties.at("ro.product.board"), "kalama");
++    EXPECT_EQ(properties.at("ro.build.id"), "SQ1D.220205.004");
++    EXPECT_EQ(properties.at("ro.build.display.id"),
++              "PGEM10-userdebug 12 SQ1D.220205.004 test-keys");
++    EXPECT_EQ(properties.at("ro.build.version.release"), "12");
++    EXPECT_EQ(properties.at("ro.build.version.release_or_codename"), "12");
++    EXPECT_EQ(properties.at("ro.build.version.security_patch"), "2022-02-05");
++}
++
 +TEST(floral_device_profile, MapsDefaultIdentityToAndroidProperties) {
 +    auto properties = FloralDeviceProfileProperties(DefaultFloralDeviceProfile());
 +
@@ -355,6 +488,12 @@ index 000000000..1ae95e135
 +    EXPECT_EQ(properties.at("ro.product.model"), "Floral F12");
 +    EXPECT_EQ(properties.at("ro.soc.model"), "Floral S12");
 +    EXPECT_EQ(properties.at("ro.boot.floral_gpu_model"), "Floral GPU");
++    EXPECT_EQ(properties.find("ro.product.board"), properties.end());
++    EXPECT_EQ(properties.find("ro.build.id"), properties.end());
++    EXPECT_EQ(properties.find("ro.build.display.id"), properties.end());
++    EXPECT_EQ(properties.find("ro.build.version.release"), properties.end());
++    EXPECT_EQ(properties.find("ro.build.version.release_or_codename"), properties.end());
++    EXPECT_EQ(properties.find("ro.build.version.security_patch"), properties.end());
 +}
 +
 +}  // namespace
@@ -362,7 +501,7 @@ index 000000000..1ae95e135
 +}  // namespace android
 diff --git a/init/floral_nativebridge_config.cpp b/init/floral_nativebridge_config.cpp
 new file mode 100644
-index 000000000..692fdce08
+index 000000000..f78c416b0
 --- /dev/null
 +++ b/init/floral_nativebridge_config.cpp
 @@ -0,0 +1,206 @@
@@ -628,7 +767,7 @@ index 000000000..2f7c53ccc
 +}  // namespace android
 diff --git a/init/floral_nativebridge_config_test.cpp b/init/floral_nativebridge_config_test.cpp
 new file mode 100644
-index 000000000..cd52d5175
+index 000000000..4ba25cc65
 --- /dev/null
 +++ b/init/floral_nativebridge_config_test.cpp
 @@ -0,0 +1,75 @@
@@ -774,3 +913,6 @@ index 55e89c647..7e203c52d 100755
      for (const auto& [name, value] : properties) {
          std::string error;
          if (PropertySet(name, value, &error) != PROP_SUCCESS) {
+-- 
+2.47.3
+
