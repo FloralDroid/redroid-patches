@@ -1,0 +1,246 @@
+From ae2a5e9fbe6520d30e75a3f2d38f4400e417b980 Mon Sep 17 00:00:00 2001
+From: FloralDroid <opensource@floraldroid.dev>
+Date: Fri, 14 Aug 2026 14:38:03 +0800
+Subject: [PATCH] =?UTF-8?q?frameworks:=20=E5=AE=8C=E5=96=84=20NativeBridge?=
+ =?UTF-8?q?=20=E9=A6=96=E6=AC=A1=E5=90=AF=E5=8A=A8=E6=81=A2=E5=A4=8D?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+持久化每个应用版本和系统版本的候选结果，通过稳定窗口固定已验证后端，并在候选耗尽后熔断。helper/service 进程崩溃只切换自身后端，不再关闭前台任务。
+---
+ .../server/am/FloralNativeBridgeManager.java  | 87 +++++++++++++++----
+ 1 file changed, 70 insertions(+), 17 deletions(-)
+
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+index 7918b92..4204d91 100644
+--- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -20,6 +20,7 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
+ 
+ import android.app.ActivityOptions;
+ import android.app.ApplicationExitInfo;
++import android.os.Build;
+ import android.os.FileUtils;
+ import android.os.SystemClock;
+ import android.os.UserHandle;
+@@ -38,7 +39,7 @@ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ 
+-/** Coordinates per-process recovery for Floral's aggregate NativeBridge. */
++/** Coordinates deterministic backend selection and bounded recovery. */
+ final class FloralNativeBridgeManager {
+     private static final String TAG = "FloralNativeBridge";
+     private static final String POLICY_PATH =
+@@ -49,6 +50,7 @@ final class FloralNativeBridgeManager {
+     private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
+     private static final long RESTART_DELAY_MS = 300L;
+     private static final int MAX_JSON_BYTES = 256 * 1024;
++    private static final int STATE_VERSION = 2;
+ 
+     private static final String BACKEND_AUTO = "auto";
+     private static final String BACKEND_NDK = "ndk";
+@@ -57,12 +59,17 @@ final class FloralNativeBridgeManager {
+     private final ActivityManagerService mService;
+     private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
+     private final ArrayMap<ProcessRecord, Launch> mLaunches = new ArrayMap<>();
++    private final JSONObject mPolicy;
+     private JSONObject mState;
+ 
+     FloralNativeBridgeManager(ActivityManagerService service) {
+         mService = service;
++        // The host policy is refreshed by init at boot. Keep parsing out of the
++        // AMS lock so starting a translated process stays deterministic and cheap.
++        mPolicy = readJsonFile(new File(POLICY_PATH));
+         mState = readJsonFile(mStateFile.getBaseFile());
+-        if (mState == null) {
++        if (mState == null || mState.optInt("version", 0) != STATE_VERSION
++                || !Build.FINGERPRINT.equals(mState.optString("build_fingerprint"))) {
+             mState = emptyState();
+         }
+     }
+@@ -85,25 +92,37 @@ final class FloralNativeBridgeManager {
+         JSONObject state = packages.optJSONObject(processName);
+         boolean changed = false;
+         if (state == null || state.optLong("version_code", Long.MIN_VALUE) != versionCode
++                || !app.info.packageName.equals(state.optString("package_name"))
+                 || !sameCandidates(state.optJSONArray("candidates"), rule.candidates)) {
+             state = new JSONObject();
++            put(state, "package_name", app.info.packageName);
+             put(state, "version_code", versionCode);
+             put(state, "candidates", toJsonArray(rule.candidates));
+             put(state, "failed_backends", new JSONArray());
+             put(state, "selected_backend", rule.candidates.get(0));
+             put(state, "stable", false);
++            put(state, "exhausted", false);
++            put(state, "failure_count", 0);
+             put(packages, processName, state);
+             changed = true;
+         }
+ 
++        if (state.optBoolean("exhausted", false)) {
++            if (changed) {
++                writeState();
++            }
++            Slog.w(TAG, "NativeBridge recovery exhausted for " + processName);
++            return;
++        }
++
+         final ArraySet<String> failed = readBackends(state.optJSONArray("failed_backends"));
+         String selected = state.optString("selected_backend", "");
+         if (!rule.candidates.contains(selected) || failed.contains(selected)) {
+             final String replacement = firstAvailable(rule.candidates, failed);
+             if (replacement == null) {
+-                if (changed) {
+-                    writeState();
+-                }
++                put(state, "selected_backend", "");
++                put(state, "exhausted", true);
++                writeState();
+                 Slog.w(TAG, "NativeBridge candidates exhausted for " + processName);
+                 return;
+             }
+@@ -114,15 +133,19 @@ final class FloralNativeBridgeManager {
+         if (selected.isEmpty()) {
+             return;
+         }
+-        if (state.optBoolean("stable", false)) {
+-            put(state, "stable", false);
+-            changed = true;
+-        }
+         if (changed) {
+             writeState();
+         }
+ 
+-        final Launch launch = new Launch(processName, versionCode, selected,
++        // A backend that already survived the probation window is a learned
++        // result. Later application crashes must not poison that result.
++        if (state.optBoolean("stable", false)) {
++            Slog.i(TAG, "Using stable NativeBridge backend " + selected
++                    + " for " + processName);
++            return;
++        }
++
++        final Launch launch = new Launch(processName, app.info.packageName, versionCode, selected,
+                 rule.candidates, app.getStartTime());
+         mLaunches.put(app, launch);
+         mService.mHandler.postDelayed(() -> finishStabilityWindow(app, launch),
+@@ -148,7 +171,7 @@ final class FloralNativeBridgeManager {
+         }
+     }
+ 
+-    /** Handles only an early translated native crash with an unused fallback. */
++    /** Handles only an early translated native crash with an available fallback. */
+     boolean handleEarlyNativeCrash(ProcessRecord app) {
+         final Launch launch = mLaunches.get(app);
+         if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
+@@ -165,7 +188,11 @@ final class FloralNativeBridgeManager {
+         final String replacement = firstAvailable(launch.candidates, failed);
+         put(state, "failed_backends", toJsonArray(failed));
+         put(state, "stable", false);
++        put(state, "failure_count", state.optInt("failure_count", 0) + 1);
++        put(state, "last_failure_timestamp_ms", System.currentTimeMillis());
+         if (replacement == null) {
++            put(state, "selected_backend", "");
++            put(state, "exhausted", true);
+             writeState();
+             mLaunches.remove(app);
+             Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
+@@ -174,11 +201,17 @@ final class FloralNativeBridgeManager {
+         }
+ 
+         put(state, "selected_backend", replacement);
++        put(state, "exhausted", false);
+         writeState();
+         mLaunches.remove(app);
+ 
+-        final int taskId = mService.mAtmInternal.finishTopCrashedActivities(
+-                app.getWindowProcessController(), "floral-nativebridge-fallback");
++        // Child services and helper processes must not tear down the user's
++        // task. Only the actual top application process gets task recovery.
++        final boolean restartTask = app == mService.getTopApp() && app.hasActivities();
++        final int taskId = restartTask
++                ? mService.mAtmInternal.finishTopCrashedActivities(
++                        app.getWindowProcessController(), "floral-nativebridge-fallback")
++                : INVALID_TASK_ID;
+         mService.mProcessList.removeProcessLocked(app, false, true,
+                 ApplicationExitInfo.REASON_CRASH_NATIVE, "native bridge fallback");
+         Slog.w(TAG, "Early native crash in " + launch.processName + "; switching "
+@@ -208,7 +241,7 @@ final class FloralNativeBridgeManager {
+     }
+ 
+     private PolicyRule resolvePolicy(String processName, String packageName) {
+-        final JSONObject root = readJsonFile(new File(POLICY_PATH));
++        final JSONObject root = mPolicy;
+         if (root == null) {
+             return PolicyRule.automaticDefaults();
+         }
+@@ -265,13 +298,15 @@ final class FloralNativeBridgeManager {
+ 
+     private static JSONObject emptyState() {
+         final JSONObject root = new JSONObject();
+-        put(root, "version", 1);
++        put(root, "version", STATE_VERSION);
++        put(root, "build_fingerprint", Build.FINGERPRINT);
+         put(root, "packages", new JSONObject());
+         return root;
+     }
+ 
+     private static boolean matchesLaunch(JSONObject state, Launch launch) {
+         return state != null
++                && launch.packageName.equals(state.optString("package_name"))
+                 && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
+                 && launch.backend.equals(state.optString("selected_backend"));
+     }
+@@ -333,14 +368,16 @@ final class FloralNativeBridgeManager {
+ 
+     private static final class Launch {
+         final String processName;
++        final String packageName;
+         final long versionCode;
+         final String backend;
+         final ArrayList<String> candidates;
+         final long startUptime;
+ 
+-        Launch(String processName, long versionCode, String backend,
++        Launch(String processName, String packageName, long versionCode, String backend,
+                 ArrayList<String> candidates, long startUptime) {
+             this.processName = processName;
++            this.packageName = packageName;
+             this.versionCode = versionCode;
+             this.backend = backend;
+             this.candidates = new ArrayList<>(candidates);
+@@ -389,6 +426,19 @@ final class FloralNativeBridgeManager {
+             if (backend.isEmpty()) {
+                 backend = object.optString("backend", "");
+             }
++            if (backend.isEmpty()) {
++                final String preferred = object.optString("preferred_backend", "");
++                if (BACKEND_NDK.equals(preferred) || BACKEND_HOUDINI.equals(preferred)) {
++                    final JSONArray array = object.optJSONArray("candidates");
++                    if (array == null || array.length() == 0) {
++                        return preferred(preferred);
++                    }
++                    final PolicyRule rule = fromCandidates(array);
++                    rule.candidates.remove(preferred);
++                    rule.candidates.add(0, preferred);
++                    return rule;
++                }
++            }
+             if (backend.isEmpty()) {
+                 backend = object.optString("mode", BACKEND_AUTO);
+             }
+@@ -396,8 +446,11 @@ final class FloralNativeBridgeManager {
+                 return explicit(backend);
+             }
+ 
++            return fromCandidates(object.optJSONArray("candidates"));
++        }
++
++        private static PolicyRule fromCandidates(JSONArray array) {
+             final ArrayList<String> candidates = new ArrayList<>();
+-            final JSONArray array = object.optJSONArray("candidates");
+             if (array != null) {
+                 for (int i = 0; i < array.length(); i++) {
+                     final String candidate = array.optString(i);
