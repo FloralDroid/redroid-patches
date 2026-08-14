@@ -7,16 +7,16 @@ MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-在系统内部维护每进程的自动候选状态。ARM 转译进程启动后十五秒内发生 native crash 时切换尚未失败的候选，并恢复原任务。显式后端、非 native crash 与窗口外崩溃保持原行为。
+在系统内部维护每进程的自动候选状态。ARM 转译进程启动后六十秒内发生 native crash 时切换尚未失败的候选，并恢复原任务。显式后端、非 native crash 与窗口外崩溃保持原行为。
 
 Change-Id: Id5ba7ddfae243c2266fcfcfff9a263d7dd937c54
 ---
  core/jni/com_android_internal_os_Zygote.cpp   |   8 +
  .../server/am/ActivityManagerService.java     |   3 +
  .../java/com/android/server/am/AppErrors.java |   8 +
- .../server/am/FloralNativeBridgeManager.java  | 408 ++++++++++++++++++
+ .../server/am/FloralNativeBridgeManager.java  | 412 ++++++++++++++++++
  .../com/android/server/am/ProcessList.java    |   3 +
- 5 files changed, 430 insertions(+)
+ 5 files changed, 434 insertions(+)
  create mode 100644 services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 
 diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
@@ -97,7 +97,7 @@ new file mode 100644
 index 000000000000..c514a3140f24
 --- /dev/null
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,412 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -145,7 +145,8 @@ index 000000000000..c514a3140f24
 +            "/data/system/floral/nativebridge-policy.json";
 +    private static final String STATE_PATH =
 +            "/data/system/floral/nativebridge-state.json";
-+    private static final long EARLY_CRASH_WINDOW_MS = 15_000L;
++    // Translated games commonly initialize optional native SDKs well after their first frame.
++    private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
 +    private static final long RESTART_DELAY_MS = 300L;
 +    private static final int MAX_JSON_BYTES = 256 * 1024;
 +
@@ -318,6 +319,9 @@ index 000000000000..c514a3140f24
 +        }
 +        if (value == null) {
 +            value = root.opt("default_backend");
++        }
++        if (value == null) {
++            value = root.opt("preferred_backend");
 +        }
 +        return PolicyRule.parse(value);
 +    }
@@ -522,4 +526,3 @@ index b77270f5963b..edb5ca3aeb97 100644
          mPendingStarts.put(startSeq, app);
 -- 
 2.47.3
-
