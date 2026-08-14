@@ -1,6 +1,6 @@
-From ae2a5e9fbe6520d30e75a3f2d38f4400e417b980 Mon Sep 17 00:00:00 2001
+From 507bd41e6726272fcb0728c7bb9211e0b1a57d4c Mon Sep 17 00:00:00 2001
 From: FloralDroid <opensource@floraldroid.dev>
-Date: Fri, 14 Aug 2026 14:38:03 +0800
+Date: Fri, 14 Aug 2026 20:00:14 +0800
 Subject: [PATCH] =?UTF-8?q?frameworks:=20=E5=AE=8C=E5=96=84=20NativeBridge?=
  =?UTF-8?q?=20=E9=A6=96=E6=AC=A1=E5=90=AF=E5=8A=A8=E6=81=A2=E5=A4=8D?=
 MIME-Version: 1.0
@@ -8,12 +8,17 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 持久化每个应用版本和系统版本的候选结果，通过稳定窗口固定已验证后端，并在候选耗尽后熔断。helper/service 进程崩溃只切换自身后端，不再关闭前台任务。
+
+识别尚未绑定 ActivityRecord 的 pre-top 启动进程，清理残留启动窗口并使用原任务 ID 重新拉起已选中的回退后端。
+
 ---
- .../server/am/FloralNativeBridgeManager.java  | 87 +++++++++++++++----
- 1 file changed, 70 insertions(+), 17 deletions(-)
+ .../server/am/FloralNativeBridgeManager.java  | 90 +++++++++++++++----
+ .../core/java/com/android/server/wm/Task.java | 13 ++-
+ .../server/wm/RootWindowContainerTests.java   | 25 ++++++
+ 3 files changed, 110 insertions(+), 18 deletions(-)
 
 diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-index 7918b92..4204d91 100644
+index 7918b925394c..92fba3101a6a 100644
 --- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 @@ -20,6 +20,7 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
@@ -147,7 +152,7 @@ index 7918b92..4204d91 100644
              writeState();
              mLaunches.remove(app);
              Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
-@@ -174,11 +201,17 @@ final class FloralNativeBridgeManager {
+@@ -174,11 +201,20 @@ final class FloralNativeBridgeManager {
          }
  
          put(state, "selected_backend", replacement);
@@ -157,9 +162,12 @@ index 7918b92..4204d91 100644
  
 -        final int taskId = mService.mAtmInternal.finishTopCrashedActivities(
 -                app.getWindowProcessController(), "floral-nativebridge-fallback");
-+        // Child services and helper processes must not tear down the user's
-+        // task. Only the actual top application process gets task recovery.
-+        final boolean restartTask = app == mService.getTopApp() && app.hasActivities();
++        // A pre-top activity can crash before WindowManager attaches its ActivityRecord to this
++        // process. Preserve that launch identity so the starting window does not remain forever.
++        // Child services and helper processes still must not tear down the user's task.
++        final HostingRecord hostingRecord = app.getHostingRecord();
++        final boolean restartTask = (hostingRecord != null && hostingRecord.isTopApp())
++                || (app == mService.getTopApp() && app.hasActivities());
 +        final int taskId = restartTask
 +                ? mService.mAtmInternal.finishTopCrashedActivities(
 +                        app.getWindowProcessController(), "floral-nativebridge-fallback")
@@ -167,7 +175,7 @@ index 7918b92..4204d91 100644
          mService.mProcessList.removeProcessLocked(app, false, true,
                  ApplicationExitInfo.REASON_CRASH_NATIVE, "native bridge fallback");
          Slog.w(TAG, "Early native crash in " + launch.processName + "; switching "
-@@ -208,7 +241,7 @@ final class FloralNativeBridgeManager {
+@@ -208,7 +244,7 @@ final class FloralNativeBridgeManager {
      }
  
      private PolicyRule resolvePolicy(String processName, String packageName) {
@@ -176,7 +184,7 @@ index 7918b92..4204d91 100644
          if (root == null) {
              return PolicyRule.automaticDefaults();
          }
-@@ -265,13 +298,15 @@ final class FloralNativeBridgeManager {
+@@ -265,13 +301,15 @@ final class FloralNativeBridgeManager {
  
      private static JSONObject emptyState() {
          final JSONObject root = new JSONObject();
@@ -193,7 +201,7 @@ index 7918b92..4204d91 100644
                  && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
                  && launch.backend.equals(state.optString("selected_backend"));
      }
-@@ -333,14 +368,16 @@ final class FloralNativeBridgeManager {
+@@ -333,14 +371,16 @@ final class FloralNativeBridgeManager {
  
      private static final class Launch {
          final String processName;
@@ -211,7 +219,7 @@ index 7918b92..4204d91 100644
              this.versionCode = versionCode;
              this.backend = backend;
              this.candidates = new ArrayList<>(candidates);
-@@ -389,6 +426,19 @@ final class FloralNativeBridgeManager {
+@@ -389,6 +429,19 @@ final class FloralNativeBridgeManager {
              if (backend.isEmpty()) {
                  backend = object.optString("backend", "");
              }
@@ -231,7 +239,7 @@ index 7918b92..4204d91 100644
              if (backend.isEmpty()) {
                  backend = object.optString("mode", BACKEND_AUTO);
              }
-@@ -396,8 +446,11 @@ final class FloralNativeBridgeManager {
+@@ -396,8 +449,11 @@ final class FloralNativeBridgeManager {
                  return explicit(backend);
              }
  
@@ -244,3 +252,70 @@ index 7918b92..4204d91 100644
              if (array != null) {
                  for (int i = 0; i < array.length(); i++) {
                      final String candidate = array.optString(i);
+diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
+index c068fd1a5f6e..a223336ca5b8 100644
+--- a/services/core/java/com/android/server/wm/Task.java
++++ b/services/core/java/com/android/server/wm/Task.java
+@@ -6775,7 +6775,7 @@ class Task extends WindowContainer<WindowContainer> {
+      */
+     final Task finishTopCrashedActivityLocked(WindowProcessController app, String reason) {
+         final ActivityRecord r = topRunningActivity();
+-        if (r == null || r.app != app) {
++        if (r == null || !belongsToCrashedProcess(r, app)) {
+             return null;
+         }
+         if (r.isActivityTypeHome() && mAtmService.mHomeProcess == app) {
+@@ -6809,6 +6809,17 @@ class Task extends WindowContainer<WindowContainer> {
+         return finishedTask;
+     }
+ 
++    private static boolean belongsToCrashedProcess(ActivityRecord r,
++            WindowProcessController app) {
++        if (r.app == app) {
++            return true;
++        }
++        // During an asynchronous pre-top launch, native initialization may fail before the
++        // ActivityRecord is attached. Process name and uid uniquely identify that pending process.
++        return r.app == null && r.isState(ActivityState.INITIALIZING)
++                && r.getUid() == app.mUid && app.mName.equals(r.processName);
++    }
++
+     void finishVoiceTask(IVoiceInteractionSession session) {
+         final PooledConsumer c = PooledLambda.obtainConsumer(Task::finishIfVoiceTask,
+                 PooledLambda.__(Task.class), session.asBinder());
+diff --git a/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java b/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java
+index 9cf29d4dcc50..28b032e51a1e 100644
+--- a/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java
++++ b/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java
+@@ -421,6 +421,31 @@ public class RootWindowContainerTests extends WindowTestsBase {
+         assertEquals(originalRootTaskCount, defaultTaskDisplayArea.getRootTaskCount());
+     }
+ 
++    /**
++     * Verifies that a native crash during asynchronous process startup removes the pending
++     * activity even though it has not attached to its process yet.
++     */
++    @Test
++    public void testRemovingPendingRootTaskOnAppCrash() {
++        final TaskDisplayArea defaultTaskDisplayArea = mRootWindowContainer
++                .getDefaultTaskDisplayArea();
++        final int originalRootTaskCount = defaultTaskDisplayArea.getRootTaskCount();
++        final Task rootTask = defaultTaskDisplayArea.createRootTask(
++                WINDOWING_MODE_FULLSCREEN, ACTIVITY_TYPE_STANDARD, false /* onTop */);
++        final ActivityRecord firstActivity = new ActivityBuilder(mAtm).setTask(rootTask).build();
++        final WindowProcessController startingApp = firstActivity.app;
++        final int crashedTaskId = rootTask.mTaskId;
++
++        assertEquals(originalRootTaskCount + 1, defaultTaskDisplayArea.getRootTaskCount());
++
++        // A pre-top process can die before realStartActivityLocked attaches this record.
++        firstActivity.app = null;
++        assertEquals(crashedTaskId,
++                mRootWindowContainer.finishTopCrashedActivities(startingApp, "test"));
++
++        assertEquals(originalRootTaskCount, defaultTaskDisplayArea.getRootTaskCount());
++    }
++
+     /**
+      * Verifies that removal of activities with task and root task is done correctly when there are
+      * several task display areas.
