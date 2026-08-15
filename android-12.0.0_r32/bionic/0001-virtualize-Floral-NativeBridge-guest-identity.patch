@@ -1,0 +1,348 @@
+From 0b44b707be80a298f51d0e9d21b3a865c83a8b76 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sat, 15 Aug 2026 14:05:15 +0800
+Subject: [PATCH] bionic: virtualize ARM identity for NativeBridge guests
+
+Change-Id: Iebec5484573d6b07c6d53d2770ef044739745276
+---
+ libc/Android.bp                     |  2 +
+ libc/SYSCALLS.TXT                   |  2 +-
+ libc/bionic/floral_nativebridge.cpp | 82 +++++++++++++++++++++++++++++
+ libc/bionic/getauxval.cpp           | 46 +++++++++++++++-
+ libc/bionic/system_property_api.cpp | 32 ++++++++++-
+ libc/bionic/uname.cpp               | 23 ++++++++
+ libc/libc.map.txt                   |  1 +
+ libc/private/floral_nativebridge.h  | 28 ++++++++++
+ 8 files changed, 212 insertions(+), 4 deletions(-)
+ create mode 100644 libc/bionic/floral_nativebridge.cpp
+ create mode 100644 libc/bionic/uname.cpp
+ create mode 100644 libc/private/floral_nativebridge.h
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index 2c0656f..93db505 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1066,6 +1066,7 @@ cc_library_static {
+         "bionic/ftruncate.cpp",
+         "bionic/ftw.cpp",
+         "bionic/futimens.cpp",
++        "bionic/floral_nativebridge.cpp",
+         "bionic/getcwd.cpp",
+         "bionic/getdomainname.cpp",
+         "bionic/getentropy.cpp",
+@@ -1174,6 +1175,7 @@ cc_library_static {
+         "bionic/timespec_get.cpp",
+         "bionic/tmpfile.cpp",
+         "bionic/umount.cpp",
++        "bionic/uname.cpp",
+         "bionic/unlink.cpp",
+         "bionic/usleep.cpp",
+         "bionic/utmp.cpp",
+diff --git a/libc/SYSCALLS.TXT b/libc/SYSCALLS.TXT
+index 391e7af..a7dcb63 100644
+--- a/libc/SYSCALLS.TXT
++++ b/libc/SYSCALLS.TXT
+@@ -296,7 +296,7 @@ int __sched_getaffinity:sched_getaffinity(pid_t pid, size_t setsize, cpu_set_t*
+ int __getcpu:getcpu(unsigned*, unsigned*, void*) all
+ 
+ # other
+-int     uname(struct utsname*)  all
++int     __uname:uname(struct utsname*)  all
+ mode_t  umask(mode_t)  all
+ int     __reboot:reboot(int, int, int, void*)  all
+ int     init_module(void*, unsigned long, const char*)  all
+diff --git a/libc/bionic/floral_nativebridge.cpp b/libc/bionic/floral_nativebridge.cpp
+new file mode 100644
+index 0000000..e0a4fe3
+--- /dev/null
++++ b/libc/bionic/floral_nativebridge.cpp
+@@ -0,0 +1,82 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#include "private/floral_nativebridge.h"
++
++#include <string.h>
++
++#include "private/bionic_defs.h"
++
++namespace {
++
++int g_floral_nativebridge_guest_arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
++
++struct PropertyOverride {
++  const char* name;
++  const char* arm;
++  const char* arm64;
++};
++
++constexpr PropertyOverride kPropertyOverrides[] = {
++    {"ro.product.cpu.abi", "armeabi-v7a", "arm64-v8a"},
++    {"ro.product.cpu.abi2", "armeabi", ""},
++    {"ro.product.cpu.abilist", "armeabi-v7a,armeabi",
++     "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.product.cpu.abilist32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
++    {"ro.product.cpu.abilist64", "", "arm64-v8a"},
++    {"ro.dalvik.vm.isa.arm", "arm", "arm"},
++    {"ro.dalvik.vm.isa.arm64", "arm64", "arm64"},
++    {"ro.floral.nb.pubabi", "armeabi-v7a,armeabi",
++     "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.floral.nb.pubabi32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
++    {"ro.floral.nb.pubabi64", "", "arm64-v8a"},
++    {"ro.floral.nb.loadabi", "armeabi-v7a,armeabi",
++     "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.floral.nb.loadabi32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
++    {"ro.floral.nb.loadabi64", "", "arm64-v8a"},
++};
++
++}  // namespace
++
++extern "C" void __floral_nativebridge_set_guest_arch(int arch) {
++  if (arch < FLORAL_NATIVEBRIDGE_GUEST_NONE || arch > FLORAL_NATIVEBRIDGE_GUEST_ARM64) {
++    arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
++  }
++  __atomic_store_n(&g_floral_nativebridge_guest_arch, arch, __ATOMIC_RELEASE);
++}
++
++extern "C" __LIBC_HIDDEN__ int __floral_nativebridge_guest_arch() {
++  return __atomic_load_n(&g_floral_nativebridge_guest_arch, __ATOMIC_ACQUIRE);
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_machine() {
++  switch (__floral_nativebridge_guest_arch()) {
++    case FLORAL_NATIVEBRIDGE_GUEST_ARM:
++      return "armv7l";
++    case FLORAL_NATIVEBRIDGE_GUEST_ARM64:
++      return "aarch64";
++    default:
++      return nullptr;
++  }
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(
++    const char* name) {
++  if (name == nullptr) {
++    return nullptr;
++  }
++  const int arch = __floral_nativebridge_guest_arch();
++  if (arch == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    return nullptr;
++  }
++  for (const PropertyOverride& property : kPropertyOverrides) {
++    if (strcmp(name, property.name) == 0) {
++      return arch == FLORAL_NATIVEBRIDGE_GUEST_ARM64 ? property.arm64 : property.arm;
++    }
++  }
++  return nullptr;
++}
+diff --git a/libc/bionic/getauxval.cpp b/libc/bionic/getauxval.cpp
+index a3c6b19..312f782 100644
+--- a/libc/bionic/getauxval.cpp
++++ b/libc/bionic/getauxval.cpp
+@@ -35,6 +35,41 @@
+ #include <elf.h>
+ #include <errno.h>
+ 
++#include "private/floral_nativebridge.h"
++
++namespace {
++
++constexpr unsigned long kArm64BaselineHwcap = (1UL << 0) | (1UL << 1);  // FP, ASIMD.
++constexpr unsigned long kArmBaselineHwcap =
++    (1UL << 0) | (1UL << 1) | (1UL << 2) | (1UL << 4) | (1UL << 6) |
++    (1UL << 7) | (1UL << 12) | (1UL << 13) | (1UL << 15) | (1UL << 16) |
++    (1UL << 17) | (1UL << 18);  // ARMv7 with VFPv4, NEON and integer divide.
++
++unsigned long FloralGuestAuxValue(unsigned long type, int arch, bool* exists) {
++  static const char kArmPlatform[] = "v7l";
++  static const char kArm64Platform[] = "aarch64";
++
++  *exists = false;
++  switch (type) {
++    case AT_PLATFORM:
++    case AT_BASE_PLATFORM:
++      *exists = true;
++      return reinterpret_cast<unsigned long>(
++          arch == FLORAL_NATIVEBRIDGE_GUEST_ARM64 ? kArm64Platform : kArmPlatform);
++    case AT_HWCAP:
++      *exists = true;
++      return arch == FLORAL_NATIVEBRIDGE_GUEST_ARM64 ? kArm64BaselineHwcap
++                                                      : kArmBaselineHwcap;
++    case AT_HWCAP2:
++      *exists = true;
++      return 0;
++    default:
++      return 0;
++  }
++}
++
++}  // namespace
++
+ // This function needs to be safe to call before TLS is set up, so it can't
+ // access errno or the stack protector.
+ __LIBC_HIDDEN__ unsigned long __bionic_getauxval(unsigned long type, bool* exists) {
+@@ -50,7 +85,16 @@ __LIBC_HIDDEN__ unsigned long __bionic_getauxval(unsigned long type, bool* exist
+ 
+ extern "C" unsigned long getauxval(unsigned long type) {
+   bool exists;
+-  unsigned long result = __bionic_getauxval(type, &exists);
++  unsigned long result = 0;
++  const int guest_arch = __floral_nativebridge_guest_arch();
++  if (guest_arch != FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    result = FloralGuestAuxValue(type, guest_arch, &exists);
++  } else {
++    exists = false;
++  }
++  if (!exists) {
++    result = __bionic_getauxval(type, &exists);
++  }
+   if (!exists) errno = ENOENT;
+   return result;
+ }
+diff --git a/libc/bionic/system_property_api.cpp b/libc/bionic/system_property_api.cpp
+index a641f12..0bbd875 100644
+--- a/libc/bionic/system_property_api.cpp
++++ b/libc/bionic/system_property_api.cpp
+@@ -29,10 +29,13 @@
+ #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
+ #include <sys/_system_properties.h>
+ 
++#include <string.h>
++
+ #include <system_properties/prop_area.h>
+ #include <system_properties/system_properties.h>
+ 
+ #include "private/bionic_defs.h"
++#include "private/floral_nativebridge.h"
+ 
+ static SystemProperties system_properties;
+ static_assert(__is_trivially_constructible(SystemProperties),
+@@ -71,7 +74,17 @@ const prop_info* __system_property_find(const char* name) {
+ 
+ __BIONIC_WEAK_FOR_NATIVE_BRIDGE
+ int __system_property_read(const prop_info* pi, char* name, char* value) {
+-  return system_properties.Read(pi, name, value);
++  char local_name[PROP_NAME_MAX];
++  char* property_name = name == nullptr ? local_name : name;
++  const int result = system_properties.Read(pi, property_name, value);
++  if (result < 0) {
++    return result;
++  }
++  const char* override = __floral_nativebridge_property_override(property_name);
++  if (override == nullptr) {
++    return result;
++  }
++  return static_cast<int>(strlcpy(value, override, PROP_VALUE_MAX));
+ }
+ 
+ __BIONIC_WEAK_FOR_NATIVE_BRIDGE
+@@ -79,11 +92,26 @@ void __system_property_read_callback(const prop_info* pi,
+                                      void (*callback)(void* cookie, const char* name,
+                                                       const char* value, uint32_t serial),
+                                      void* cookie) {
+-  return system_properties.ReadCallback(pi, callback, cookie);
++  char name[PROP_NAME_MAX];
++  char value[PROP_VALUE_MAX];
++  if (system_properties.Read(pi, name, value) < 0) {
++    system_properties.ReadCallback(pi, callback, cookie);
++    return;
++  }
++  const char* override = __floral_nativebridge_property_override(name);
++  if (override == nullptr) {
++    system_properties.ReadCallback(pi, callback, cookie);
++    return;
++  }
++  callback(cookie, name, override, atomic_load_explicit(&pi->serial, memory_order_acquire));
+ }
+ 
+ __BIONIC_WEAK_FOR_NATIVE_BRIDGE
+ int __system_property_get(const char* name, char* value) {
++  const char* override = __floral_nativebridge_property_override(name);
++  if (override != nullptr) {
++    return static_cast<int>(strlcpy(value, override, PROP_VALUE_MAX));
++  }
+   return system_properties.Get(name, value);
+ }
+ 
+diff --git a/libc/bionic/uname.cpp b/libc/bionic/uname.cpp
+new file mode 100644
+index 0000000..1280ed6
+--- /dev/null
++++ b/libc/bionic/uname.cpp
+@@ -0,0 +1,23 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#include <sys/utsname.h>
++
++#include <string.h>
++
++#include "private/floral_nativebridge.h"
++
++extern "C" int __uname(utsname*);
++
++extern "C" int uname(utsname* buffer) {
++  const int result = __uname(buffer);
++  const char* machine = __floral_nativebridge_guest_machine();
++  if (result == 0 && machine != nullptr) {
++    strlcpy(buffer->machine, machine, sizeof(buffer->machine));
++  }
++  return result;
++}
+diff --git a/libc/libc.map.txt b/libc/libc.map.txt
+index c31e306..5859b6b 100644
+--- a/libc/libc.map.txt
++++ b/libc/libc.map.txt
+@@ -1566,6 +1566,7 @@ LIBC_S { # introduced=S
+ 
+ LIBC_PRIVATE {
+   global:
++    __floral_nativebridge_set_guest_arch;
+     __accept4; # arm x86
+     __adddf3; # arm
+     __addsf3; # arm
+diff --git a/libc/private/floral_nativebridge.h b/libc/private/floral_nativebridge.h
+new file mode 100644
+index 0000000..8406f96
+--- /dev/null
++++ b/libc/private/floral_nativebridge.h
+@@ -0,0 +1,28 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#pragma once
++
++#include <sys/cdefs.h>
++
++enum FloralNativeBridgeGuestArch {
++  FLORAL_NATIVEBRIDGE_GUEST_NONE = 0,
++  FLORAL_NATIVEBRIDGE_GUEST_ARM = 1,
++  FLORAL_NATIVEBRIDGE_GUEST_ARM64 = 2,
++};
++
++__BEGIN_DECLS
++
++// Called by Floral's NativeBridge router in the forked application process.
++void __floral_nativebridge_set_guest_arch(int arch);
++
++// Internal libc accessors used by architecture-reporting APIs.
++int __floral_nativebridge_guest_arch();
++const char* __floral_nativebridge_guest_machine();
++const char* __floral_nativebridge_property_override(const char* name);
++
++__END_DECLS
+-- 
+2.47.3
+
