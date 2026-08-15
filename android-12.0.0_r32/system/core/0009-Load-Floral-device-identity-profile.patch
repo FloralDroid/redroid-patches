@@ -10,14 +10,14 @@ Keep build-owned loader ABI and hardware compatibility properties unchanged.
 Change-Id: I05cf8f58a369ffab3604c3e64aa917bde35c0770
 ---
  init/Android.bp                          |   5 +
- init/floral_device_profile.cpp           | 244 +++++++++++++++++++++++
- init/floral_device_profile.h             |  52 +++++
- init/floral_device_profile_test.cpp      | 129 ++++++++++++
+ init/floral_device_profile.cpp           | 277 ++++++++++++++++++++++++++++
+ init/floral_device_profile.h             |  54 +++++
+ init/floral_device_profile_test.cpp      | 164 ++++++++++++++++
  init/floral_nativebridge_config.cpp      | 206 +++++++++++++++++++
  init/floral_nativebridge_config.h        |  48 +++++
  init/floral_nativebridge_config_test.cpp |  75 +++++++
  init/property_service.cpp                |  42 ++++
- 8 files changed, 801 insertions(+)
+ 8 files changed, 871 insertions(+)
  create mode 100644 init/floral_device_profile.cpp
  create mode 100644 init/floral_device_profile.h
  create mode 100644 init/floral_device_profile_test.cpp
@@ -60,7 +60,7 @@ new file mode 100644
 index 000000000..147effd22
 --- /dev/null
 +++ b/init/floral_device_profile.cpp
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,277 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -100,6 +100,7 @@ index 000000000..147effd22
 +constexpr size_t kMaximumProfileSize = 4096;
 +constexpr size_t kMaximumIdentityLength = 64;
 +constexpr size_t kMaximumIdentifierLength = 32;
++constexpr size_t kMaximumKernelFieldLength = 64;
 +
 +constexpr std::array<std::string_view, 15> kRequiredFields = {
 +        "version",   "brand",    "manufacturer",     "model",           "device",
@@ -112,6 +113,10 @@ index 000000000..147effd22
 +        if (key == required) return true;
 +    }
 +    return false;
++}
++
++bool IsKnownField(std::string_view key) {
++    return IsRequiredField(key) || key == "kernel_release" || key == "kernel_version";
 +}
 +
 +bool IsPropertyTextValid(const std::string& property, const std::string& value) {
@@ -166,6 +171,14 @@ index 000000000..147effd22
 +    return day >= 1 && day <= maximum_day;
 +}
 +
++bool IsKernelFieldValid(const std::string& value) {
++    if (value.empty() || value.size() > kMaximumKernelFieldLength) return false;
++    for (unsigned char character : value) {
++        if (std::iscntrl(character)) return false;
++    }
++    return true;
++}
++
 +android::base::Result<std::map<std::string, std::string>> ParseFields(std::string_view content) {
 +    std::map<std::string, std::string> fields;
 +    size_t line_number = 0;
@@ -182,7 +195,7 @@ index 000000000..147effd22
 +        std::string key = android::base::Trim(line.substr(0, separator));
 +        std::string value = android::base::Trim(line.substr(separator + 1));
 +        // Other consumers share this versioned file and own their fields independently.
-+        if (!IsRequiredField(key)) continue;
++        if (!IsKnownField(key)) continue;
 +        if (value.empty()) {
 +            return android::base::Error() << "line " << line_number << " has an empty value";
 +        }
@@ -192,10 +205,18 @@ index 000000000..147effd22
 +        }
 +    }
 +
-+    if (fields.size() != kRequiredFields.size()) {
-+        return android::base::Error() << "profile must contain all required fields";
++    for (std::string_view required : kRequiredFields) {
++        if (fields.find(std::string(required)) == fields.end()) {
++            return android::base::Error() << "profile must contain all required fields";
++        }
 +    }
 +    return fields;
++}
++
++std::string OptionalField(const std::map<std::string, std::string>& fields,
++                          std::string_view key) {
++    const auto found = fields.find(std::string(key));
++    return found == fields.end() ? "" : found->second;
 +}
 +
 +}  // namespace
@@ -211,6 +232,8 @@ index 000000000..147effd22
 +            "Floral S12",
 +            "FloralDroid",
 +            "Floral GPU",
++            "",
++            "",
 +            "",
 +            "",
 +            "",
@@ -241,6 +264,8 @@ index 000000000..147effd22
 +            fields.at("build_display"),
 +            fields.at("version_release"),
 +            fields.at("security_patch"),
++            OptionalField(fields, "kernel_release"),
++            OptionalField(fields, "kernel_version"),
 +    };
 +
 +    if (!IsDisplayValueValid(profile.brand) || !IsDisplayValueValid(profile.manufacturer) ||
@@ -251,7 +276,9 @@ index 000000000..147effd22
 +        !IsIdentifierValid(profile.build_id) ||
 +        !IsPropertyTextValid("ro.build.display.id", profile.build_display) ||
 +        !IsVersionReleaseValid(profile.version_release) ||
-+        !IsSecurityPatchValid(profile.security_patch)) {
++        !IsSecurityPatchValid(profile.security_patch) ||
++        (!profile.kernel_release.empty() && !IsKernelFieldValid(profile.kernel_release)) ||
++        (!profile.kernel_version.empty() && !IsKernelFieldValid(profile.kernel_version))) {
 +        return android::base::Error() << "profile contains an invalid identity value";
 +    }
 +    return profile;
@@ -300,6 +327,12 @@ index 000000000..147effd22
 +    if (!profile.security_patch.empty()) {
 +        properties.emplace("ro.build.version.security_patch", profile.security_patch);
 +    }
++    if (!profile.kernel_release.empty()) {
++        properties.emplace("ro.boot.floral_kernel_release", profile.kernel_release);
++    }
++    if (!profile.kernel_version.empty()) {
++        properties.emplace("ro.boot.floral_kernel_version", profile.kernel_version);
++    }
 +    return properties;
 +}
 +
@@ -310,7 +343,7 @@ new file mode 100644
 index 000000000..aa5687e32
 --- /dev/null
 +++ b/init/floral_device_profile.h
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,54 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -353,6 +386,8 @@ index 000000000..aa5687e32
 +    std::string build_display;
 +    std::string version_release;
 +    std::string security_patch;
++    std::string kernel_release;
++    std::string kernel_version;
 +};
 +
 +FloralDeviceProfile DefaultFloralDeviceProfile();
@@ -368,7 +403,7 @@ new file mode 100644
 index 000000000..8f02c2ed6
 --- /dev/null
 +++ b/init/floral_device_profile_test.cpp
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,164 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -409,6 +444,8 @@ index 000000000..8f02c2ed6
 +build_display=PGEM10-userdebug 12 SQ1D.220205.004 test-keys
 +version_release=12
 +security_patch=2022-02-05
++kernel_release=5.10.66-android12-9-g123456789abc
++kernel_version=#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022
 +)";
 +
 +TEST(floral_device_profile, ParsesCompleteProfile) {
@@ -424,6 +461,8 @@ index 000000000..8f02c2ed6
 +    EXPECT_EQ(result->build_id, "SQ1D.220205.004");
 +    EXPECT_EQ(result->version_release, "12");
 +    EXPECT_EQ(result->security_patch, "2022-02-05");
++    EXPECT_EQ(result->kernel_release, "5.10.66-android12-9-g123456789abc");
++    EXPECT_EQ(result->kernel_version, "#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022");
 +}
 +
 +TEST(floral_device_profile, RejectsPartialProfile) {
@@ -466,6 +505,31 @@ index 000000000..8f02c2ed6
 +    EXPECT_FALSE(ParseFloralDeviceProfile(invalid_patch).ok());
 +}
 +
++TEST(floral_device_profile, AcceptsMissingKernelIdentityForCompatibility) {
++    std::string legacy(kValidProfile);
++    size_t release_position = legacy.find("kernel_release=");
++    ASSERT_NE(release_position, std::string::npos);
++    legacy.erase(release_position, legacy.find('\n', release_position) - release_position + 1);
++    size_t version_position = legacy.find("kernel_version=");
++    ASSERT_NE(version_position, std::string::npos);
++    legacy.erase(version_position, legacy.find('\n', version_position) - version_position + 1);
++
++    auto profile = ParseFloralDeviceProfile(legacy);
++    ASSERT_TRUE(profile.ok()) << profile.error();
++    EXPECT_TRUE(profile->kernel_release.empty());
++    EXPECT_TRUE(profile->kernel_version.empty());
++}
++
++TEST(floral_device_profile, RejectsOversizedKernelIdentity) {
++    std::string invalid(kValidProfile);
++    size_t position = invalid.find("kernel_release=5.10.66-android12-9-g123456789abc");
++    ASSERT_NE(position, std::string::npos);
++    invalid.replace(position, std::string("kernel_release=5.10.66-android12-9-g123456789abc").size(),
++                    "kernel_release=" + std::string(65, 'a'));
++
++    EXPECT_FALSE(ParseFloralDeviceProfile(invalid).ok());
++}
++
 +TEST(floral_device_profile, MapsConfiguredBuildIdentityToAndroidProperties) {
 +    auto profile = ParseFloralDeviceProfile(kValidProfile);
 +    ASSERT_TRUE(profile.ok()) << profile.error();
@@ -478,6 +542,10 @@ index 000000000..8f02c2ed6
 +    EXPECT_EQ(properties.at("ro.build.version.release"), "12");
 +    EXPECT_EQ(properties.at("ro.build.version.release_or_codename"), "12");
 +    EXPECT_EQ(properties.at("ro.build.version.security_patch"), "2022-02-05");
++    EXPECT_EQ(properties.at("ro.boot.floral_kernel_release"),
++              "5.10.66-android12-9-g123456789abc");
++    EXPECT_EQ(properties.at("ro.boot.floral_kernel_version"),
++              "#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022");
 +}
 +
 +TEST(floral_device_profile, MapsDefaultIdentityToAndroidProperties) {
@@ -493,6 +561,8 @@ index 000000000..8f02c2ed6
 +    EXPECT_EQ(properties.find("ro.build.version.release"), properties.end());
 +    EXPECT_EQ(properties.find("ro.build.version.release_or_codename"), properties.end());
 +    EXPECT_EQ(properties.find("ro.build.version.security_patch"), properties.end());
++    EXPECT_EQ(properties.find("ro.boot.floral_kernel_release"), properties.end());
++    EXPECT_EQ(properties.find("ro.boot.floral_kernel_version"), properties.end());
 +}
 +
 +}  // namespace

@@ -7,13 +7,13 @@ Change-Id: Iebec5484573d6b07c6d53d2770ef044739745276
 ---
  libc/Android.bp                     |  2 +
  libc/SYSCALLS.TXT                   |  2 +-
- libc/bionic/floral_nativebridge.cpp | 82 +++++++++++++++++++++++++++++
+ libc/bionic/floral_nativebridge.cpp | 133 ++++++++++++++++++++++++++++++++++++
  libc/bionic/getauxval.cpp           | 46 +++++++++++++++-
  libc/bionic/system_property_api.cpp | 32 ++++++++++-
- libc/bionic/uname.cpp               | 23 ++++++++
+ libc/bionic/uname.cpp               | 31 +++++++++
  libc/libc.map.txt                   |  1 +
- libc/private/floral_nativebridge.h  | 28 ++++++++++
- 8 files changed, 212 insertions(+), 4 deletions(-)
+ libc/private/floral_nativebridge.h  | 30 ++++++++
+ 8 files changed, 273 insertions(+), 4 deletions(-)
  create mode 100644 libc/bionic/floral_nativebridge.cpp
  create mode 100644 libc/bionic/uname.cpp
  create mode 100644 libc/private/floral_nativebridge.h
@@ -56,7 +56,7 @@ new file mode 100644
 index 0000000..e0a4fe3
 --- /dev/null
 +++ b/libc/bionic/floral_nativebridge.cpp
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,133 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -66,6 +66,8 @@ index 0000000..e0a4fe3
 +
 +#include "private/floral_nativebridge.h"
 +
++#include <sys/system_properties.h>
++
 +#include <string.h>
 +
 +#include "private/bionic_defs.h"
@@ -73,6 +75,32 @@ index 0000000..e0a4fe3
 +namespace {
 +
 +int g_floral_nativebridge_guest_arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
++constexpr size_t kUtsnameFieldLength = 64;
++constexpr char kDefaultGuestKernelRelease[] = "5.10.66-android12-9";
++constexpr char kDefaultGuestKernelVersion[] = "#1 SMP PREEMPT";
++char g_floral_nativebridge_kernel_release[kUtsnameFieldLength + 1] = {};
++char g_floral_nativebridge_kernel_version[kUtsnameFieldLength + 1] = {};
++
++void LoadKernelIdentity() {
++  char value[PROP_VALUE_MAX] = {};
++  if (__system_property_get("ro.boot.floral_kernel_release", value) > 0 &&
++      strlen(value) <= kUtsnameFieldLength) {
++    strlcpy(g_floral_nativebridge_kernel_release, value,
++            sizeof(g_floral_nativebridge_kernel_release));
++  }
++
++  memset(value, 0, sizeof(value));
++  if (__system_property_get("ro.boot.floral_kernel_version", value) > 0 &&
++      strlen(value) <= kUtsnameFieldLength) {
++    strlcpy(g_floral_nativebridge_kernel_version, value,
++            sizeof(g_floral_nativebridge_kernel_version));
++  }
++}
++
++void ClearKernelIdentity() {
++  g_floral_nativebridge_kernel_release[0] = '\0';
++  g_floral_nativebridge_kernel_version[0] = '\0';
++}
 +
 +struct PropertyOverride {
 +  const char* name;
@@ -105,6 +133,11 @@ index 0000000..e0a4fe3
 +  if (arch < FLORAL_NATIVEBRIDGE_GUEST_NONE || arch > FLORAL_NATIVEBRIDGE_GUEST_ARM64) {
 +    arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
 +  }
++  if (arch == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    ClearKernelIdentity();
++  } else {
++    LoadKernelIdentity();
++  }
 +  __atomic_store_n(&g_floral_nativebridge_guest_arch, arch, __ATOMIC_RELEASE);
 +}
 +
@@ -121,6 +154,24 @@ index 0000000..e0a4fe3
 +    default:
 +      return nullptr;
 +  }
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_release() {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    return nullptr;
++  }
++  return g_floral_nativebridge_kernel_release[0] == '\0'
++             ? kDefaultGuestKernelRelease
++             : g_floral_nativebridge_kernel_release;
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_version() {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    return nullptr;
++  }
++  return g_floral_nativebridge_kernel_version[0] == '\0'
++             ? kDefaultGuestKernelVersion
++             : g_floral_nativebridge_kernel_version;
 +}
 +
 +extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(
@@ -273,7 +324,7 @@ new file mode 100644
 index 0000000..1280ed6
 --- /dev/null
 +++ b/libc/bionic/uname.cpp
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,31 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -294,6 +345,14 @@ index 0000000..1280ed6
 +  const char* machine = __floral_nativebridge_guest_machine();
 +  if (result == 0 && machine != nullptr) {
 +    strlcpy(buffer->machine, machine, sizeof(buffer->machine));
++    const char* release = __floral_nativebridge_guest_kernel_release();
++    if (release != nullptr) {
++      strlcpy(buffer->release, release, sizeof(buffer->release));
++    }
++    const char* version = __floral_nativebridge_guest_kernel_version();
++    if (version != nullptr) {
++      strlcpy(buffer->version, version, sizeof(buffer->version));
++    }
 +  }
 +  return result;
 +}
@@ -314,7 +373,7 @@ new file mode 100644
 index 0000000..8406f96
 --- /dev/null
 +++ b/libc/private/floral_nativebridge.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,30 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -340,9 +399,10 @@ index 0000000..8406f96
 +// Internal libc accessors used by architecture-reporting APIs.
 +int __floral_nativebridge_guest_arch();
 +const char* __floral_nativebridge_guest_machine();
++const char* __floral_nativebridge_guest_kernel_release();
++const char* __floral_nativebridge_guest_kernel_version();
 +const char* __floral_nativebridge_property_override(const char* name);
 +
 +__END_DECLS
 -- 
 2.47.3
-
