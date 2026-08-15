@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FloralDroid <opensource@floraldroid.dev>
+Date: Sat, 15 Aug 2026 11:26:00 +0800
+Subject: [PATCH] sepolicy: label Floral WebView size properties
+
+Label the read-only WebView address-space tuning properties as system
+properties so zygote and framework code can read product-provided values.
+---
+ private/property_contexts | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/private/property_contexts b/private/property_contexts
+index 2d8b4d5..30e9151 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -727,6 +727,8 @@ ro.floral.nb.pubabi64     u:object_r:build_prop:s0 exact string
+ ro.floral.nb.loadabi      u:object_r:system_prop:s0 exact string
+ ro.floral.nb.loadabi32    u:object_r:system_prop:s0 exact string
+ ro.floral.nb.loadabi64    u:object_r:system_prop:s0 exact string
++ro.floral.webview.vmsize32 u:object_r:system_prop:s0 exact int
++ro.floral.webview.vmsize64 u:object_r:system_prop:s0 exact int
+ 
+ ro.product.system.brand        u:object_r:build_prop:s0 exact string
+ ro.product.system.device       u:object_r:build_prop:s0 exact string
+-- 
+2.39.5
