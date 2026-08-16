@@ -1,18 +1,19 @@
-From 9eaf0bcb25c7422fb5752927833cab48c94ce722 Mon Sep 17 00:00:00 2001
+From 73415392d1611c856f5f97d167e54963a31d36b4 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
-Date: Sun, 16 Aug 2026 21:12:32 +0800
-Subject: [PATCH] art: add Floral NativeBridge loader-mode compatibility
+Date: Mon, 17 Aug 2026 01:14:27 +0800
+Subject: [PATCH] art: restore Floral NativeBridge direct loader mode
 
+Change-Id: I1e0e138392adaab26b718cbb626c637814e65986
 ---
- libnativebridge/Android.bp                    | 22 +++++++++++
- .../nativebridge/native_bridge_private.h      | 21 ++++++++++
- libnativebridge/libnativebridge.map.txt       |  1 +
- libnativebridge/native_bridge.cc              | 15 +++++++
- libnativebridge/native_bridge_lazy.cc         |  6 +++
+ libnativebridge/Android.bp                    | 22 +++++++++++++
+ .../nativebridge/native_bridge_private.h      | 24 ++++++++++++++
+ libnativebridge/libnativebridge.map.txt       |  2 ++
+ libnativebridge/native_bridge.cc              | 24 ++++++++++++++
+ libnativebridge/native_bridge_lazy.cc         | 10 ++++++
  libnativeloader/Android.bp                    |  1 +
- libnativeloader/native_loader_namespace.cpp   | 39 +++++++++++++++++--
- libnativeloader/native_loader_test.h          |  6 +++
- 8 files changed, 108 insertions(+), 3 deletions(-)
+ libnativeloader/native_loader_namespace.cpp   | 31 ++++++++++++-------
+ libnativeloader/native_loader_test.h          |  6 ++++
+ 8 files changed, 109 insertions(+), 11 deletions(-)
  create mode 100644 libnativebridge/include-private/nativebridge/native_bridge_private.h
 
 diff --git a/libnativebridge/Android.bp b/libnativebridge/Android.bp
@@ -64,10 +65,10 @@ index 64dd0e2..1972c58 100644
  }
 diff --git a/libnativebridge/include-private/nativebridge/native_bridge_private.h b/libnativebridge/include-private/nativebridge/native_bridge_private.h
 new file mode 100644
-index 0000000..e608a61
+index 0000000..6ffdbcf
 --- /dev/null
 +++ b/libnativebridge/include-private/nativebridge/native_bridge_private.h
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,24 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -81,8 +82,11 @@ index 0000000..e608a61
 +namespace android {
 +extern "C" {
 +
-+// Returns true only for the selected per-process compatibility loader mode.
++// Returns true for the selected per-process bridged-only direct loader mode.
 +// This extension is internal to ART and is not part of the stable VNDK header.
++bool NativeBridgeUseDirectLoader();
++
++// Legacy name retained for incremental images.
 +bool NativeBridgeUseCompatibilityLoader();
 +
 +}  // extern "C"
@@ -90,19 +94,20 @@ index 0000000..e608a61
 +
 +#endif  // ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
 diff --git a/libnativebridge/libnativebridge.map.txt b/libnativebridge/libnativebridge.map.txt
-index 5ac4b3d..f1c3382 100644
+index 5ac4b3d..c541a8e 100644
 --- a/libnativebridge/libnativebridge.map.txt
 +++ b/libnativebridge/libnativebridge.map.txt
-@@ -27,6 +27,7 @@ LIBNATIVEBRIDGE_1 {
+@@ -27,6 +27,8 @@ LIBNATIVEBRIDGE_1 {
      NativeBridgeAvailable;
      NeedsNativeBridge;
      SetFloralNativeBridgeProcessContext;
++    NativeBridgeUseDirectLoader;
 +    NativeBridgeUseCompatibilityLoader;
    local:
      *;
  };
 diff --git a/libnativebridge/native_bridge.cc b/libnativebridge/native_bridge.cc
-index 0d99711..670c2f9 100644
+index 0d99711..42df9fa 100644
 --- a/libnativebridge/native_bridge.cc
 +++ b/libnativebridge/native_bridge.cc
 @@ -17,6 +17,7 @@
@@ -113,11 +118,11 @@ index 0d99711..670c2f9 100644
  
  #include <dlfcn.h>
  #include <errno.h>
-@@ -396,6 +397,20 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
+@@ -396,6 +397,29 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
    }
  }
  
-+bool NativeBridgeUseCompatibilityLoader() {
++bool NativeBridgeUseDirectLoader() {
 +  if ((state != NativeBridgeState::kOpened &&
 +       state != NativeBridgeState::kPreInitialized &&
 +       state != NativeBridgeState::kInitialized) ||
@@ -125,17 +130,26 @@ index 0d99711..670c2f9 100644
 +    return false;
 +  }
 +
-+  using CompatibilityLoaderFn = bool (*)();
-+  auto use_compatibility_loader = reinterpret_cast<CompatibilityLoaderFn>(
++  using DirectLoaderFn = bool (*)();
++  auto use_direct_loader = reinterpret_cast<DirectLoaderFn>(
++      dlsym(native_bridge_handle, "FloralNativeBridgeUseDirectLoader"));
++  if (use_direct_loader != nullptr) {
++    return use_direct_loader();
++  }
++  auto use_legacy_loader = reinterpret_cast<DirectLoaderFn>(
 +      dlsym(native_bridge_handle, "FloralNativeBridgeUseCompatibilityLoader"));
-+  return use_compatibility_loader != nullptr && use_compatibility_loader();
++  return use_legacy_loader != nullptr && use_legacy_loader();
++}
++
++bool NativeBridgeUseCompatibilityLoader() {
++  return NativeBridgeUseDirectLoader();
 +}
 +
  void PreZygoteForkNativeBridge() {
    if (NativeBridgeInitialized()) {
      if (isCompatibleWith(PRE_ZYGOTE_FORK_VERSION)) {
 diff --git a/libnativebridge/native_bridge_lazy.cc b/libnativebridge/native_bridge_lazy.cc
-index 2927623..8cbfb33 100644
+index 2927623..3727d0a 100644
 --- a/libnativebridge/native_bridge_lazy.cc
 +++ b/libnativebridge/native_bridge_lazy.cc
 @@ -15,6 +15,7 @@
@@ -146,13 +160,17 @@ index 2927623..8cbfb33 100644
  #define LOG_TAG "nativebridge"
  
  #include <dlfcn.h>
-@@ -59,6 +60,11 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
+@@ -59,6 +60,15 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
    f(process_name, app_data_dir);
  }
  
-+bool NativeBridgeUseCompatibilityLoader() {
-+  static auto f = GET_FUNC_PTR(NativeBridgeUseCompatibilityLoader);
++bool NativeBridgeUseDirectLoader() {
++  static auto f = GET_FUNC_PTR(NativeBridgeUseDirectLoader);
 +  return f();
++}
++
++bool NativeBridgeUseCompatibilityLoader() {
++  return NativeBridgeUseDirectLoader();
 +}
 +
  bool NativeBridgeAvailable() {
@@ -171,7 +189,7 @@ index 3f13506..92e18d2 100644
      shared_libs: [
          "liblog",
 diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
-index fd1138b..885ac72 100644
+index fd1138b..f81dd9a 100644
 --- a/libnativeloader/native_loader_namespace.cpp
 +++ b/libnativeloader/native_loader_namespace.cpp
 @@ -34,6 +34,7 @@
@@ -182,42 +200,68 @@ index fd1138b..885ac72 100644
  
  #include "nativeloader/dlext_namespaces.h"
  
-@@ -57,6 +58,20 @@ bool HybridElfRoutingEnabled() {
-   return android::base::GetBoolProperty(kHybridElfProperty, false);
- }
- 
-+bool IsPlatformLibraryPath(const char* path) {
-+  if (path == nullptr || path[0] != '/') {
-+    return false;
-+  }
-+  constexpr const char* kPlatformRoots[] = {
-+      "/apex/", "/odm/", "/product/", "/system/", "/system_ext/", "/vendor/"};
-+  for (const char* root : kPlatformRoots) {
-+    if (android::base::StartsWith(path, root)) {
-+      return true;
+@@ -112,7 +113,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetExportedNamespace(const
+   } else {
+     auto bridged_raw = NativeBridgeGetExportedNamespace(name.c_str());
+     if (bridged_raw != nullptr) {
+-      if (HybridElfRoutingEnabled()) {
++      if (HybridElfRoutingEnabled() && !NativeBridgeUseDirectLoader()) {
+         auto native_raw = android_get_exported_namespace(name.c_str());
+         return NativeLoaderNamespace(name, native_raw, bridged_raw);
+       }
+@@ -136,7 +137,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+   if (!is_bridged) {
+     return NativeLoaderNamespace(kDefaultNamespaceName, static_cast<android_namespace_t*>(nullptr));
+   } else {
+-    if (HybridElfRoutingEnabled()) {
++    if (HybridElfRoutingEnabled() && !NativeBridgeUseDirectLoader()) {
+       return NativeLoaderNamespace(kDefaultNamespaceName,
+                                    static_cast<android_namespace_t*>(nullptr),
+                                    static_cast<native_bridge_namespace_t*>(nullptr));
+@@ -150,11 +151,16 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+     const std::string& name, const std::string& search_paths, const std::string& permitted_paths,
+     const NativeLoaderNamespace* parent, bool is_shared, bool is_exempt_list_enabled,
+     bool also_used_as_anonymous) {
+-  bool is_bridged = false;
+-  if (parent != nullptr) {
+-    is_bridged = parent->IsBridged();
+-  } else if (!search_paths.empty()) {
+-    is_bridged = NativeBridgeIsPathSupported(search_paths.c_str());
++  // Direct is a process-level ownership decision. Do not let a native-looking
++  // search path turn the classloader back into a host namespace before direct
++  // routing gets a chance to handle the load.
++  bool is_bridged = NativeBridgeUseDirectLoader();
++  if (!is_bridged) {
++    if (parent != nullptr) {
++      is_bridged = parent->IsBridged();
++    } else if (!search_paths.empty()) {
++      is_bridged = NativeBridgeIsPathSupported(search_paths.c_str());
 +    }
-+  }
-+  return false;
-+}
-+
- ElfTarget ReadElfTarget(const char* path) {
-   if (path == nullptr || path[0] != '/') {
-     return ElfTarget::kUnknown;
-@@ -253,7 +268,12 @@ Result<NativeLoaderNamespace::LoadResult> NativeLoaderNamespace::Load(const char
+   }
+ 
+   // Fall back to the system namespace if no parent is set.
+@@ -191,7 +197,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+     }
+   } else {
+     android_namespace_t* native_raw = nullptr;
+-    if (HybridElfRoutingEnabled()) {
++    if (HybridElfRoutingEnabled() && !NativeBridgeUseDirectLoader()) {
+       const std::string native_name = name + "-native";
+       native_raw = android_create_namespace(
+           native_name.c_str(), nullptr, search_paths.c_str(), type, permitted_paths.c_str(),
+@@ -253,7 +259,10 @@ Result<NativeLoaderNamespace::LoadResult> NativeLoaderNamespace::Load(const char
        return LoadResult{handle, false};
      }
    } else {
 -    if (IsHybrid() && ReadElfTarget(lib_name) == ElfTarget::kNative) {
 +    const bool native_elf = ReadElfTarget(lib_name) == ElfTarget::kNative;
-+    const bool compatibility_mode = NativeBridgeUseCompatibilityLoader();
-+    // Platform ELF remains host-owned. In compatibility mode app-private
-+    // native ELF is offered to the selected backend before host fallback.
-+    if (IsHybrid() && native_elf &&
-+        (!compatibility_mode || IsPlatformLibraryPath(lib_name))) {
++    // Hybrid keeps native ELF in the host namespace. Direct mode never has a
++    // host namespace, so every bridged load is owned by NativeBridge.
++    if (IsHybrid() && native_elf) {
        android_dlextinfo extinfo;
        extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
        extinfo.library_namespace = this->ToRawAndroidNamespace();
-@@ -263,11 +283,24 @@ Result<NativeLoaderNamespace::LoadResult> NativeLoaderNamespace::Load(const char
+@@ -263,8 +272,8 @@ Result<NativeLoaderNamespace::LoadResult> NativeLoaderNamespace::Load(const char
        }
        return Error() << GetLinkerError(false);
      }
@@ -228,31 +272,15 @@ index fd1138b..885ac72 100644
      if (handle != nullptr) {
        return LoadResult{handle, true};
      }
-+    if (IsHybrid() && native_elf && compatibility_mode &&
-+        !IsPlatformLibraryPath(lib_name)) {
-+      const std::string backend_error = GetLinkerError(true);
-+      android_dlextinfo extinfo;
-+      extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
-+      extinfo.library_namespace = this->ToRawAndroidNamespace();
-+      handle = android_dlopen_ext(lib_name, RTLD_NOW, &extinfo);
-+      if (handle != nullptr) {
-+        return LoadResult{handle, false};
-+      }
-+      return Error() << "NativeBridge compatibility load failed: backend="
-+                     << backend_error << "; host=" << GetLinkerError(false);
-+    }
-   }
-   return Error() << GetLinkerError(IsBridged());
- }
 diff --git a/libnativeloader/native_loader_test.h b/libnativeloader/native_loader_test.h
-index 09c56e5..d623fa7 100644
+index 09c56e5..0f623c3 100644
 --- a/libnativeloader/native_loader_test.h
 +++ b/libnativeloader/native_loader_test.h
 @@ -56,6 +56,7 @@ class Platform {
  
    // libnativebridge APIs for which libdl_android has no corresponding APIs
    virtual bool NativeBridgeInitialized() = 0;
-+  virtual bool NativeBridgeUseCompatibilityLoader() = 0;
++  virtual bool NativeBridgeUseDirectLoader() = 0;
    virtual const char* NativeBridgeGetError() = 0;
    virtual bool NativeBridgeIsPathSupported(const char*) = 0;
    virtual bool NativeBridgeIsSupported(const char*) = 0;
@@ -260,7 +288,7 @@ index 09c56e5..d623fa7 100644
  
    // Mocking libnativebridge APIs
    MOCK_METHOD0(NativeBridgeInitialized, bool());
-+  MOCK_METHOD0(NativeBridgeUseCompatibilityLoader, bool());
++  MOCK_METHOD0(NativeBridgeUseDirectLoader, bool());
    MOCK_METHOD0(NativeBridgeGetError, const char*());
    MOCK_METHOD1(NativeBridgeIsPathSupported, bool(const char*));
    MOCK_METHOD1(NativeBridgeIsSupported, bool(const char*));
@@ -268,8 +296,8 @@ index 09c56e5..d623fa7 100644
    return mock->NativeBridgeInitialized();
  }
  
-+bool NativeBridgeUseCompatibilityLoader() {
-+  return mock->NativeBridgeUseCompatibilityLoader();
++bool NativeBridgeUseDirectLoader() {
++  return mock->NativeBridgeUseDirectLoader();
 +}
 +
  bool NativeBridgeInitAnonymousNamespace(const char* public_ns_sonames,
@@ -277,3 +305,4 @@ index 09c56e5..d623fa7 100644
    return mock->mock_init_anonymous_namespace(true, public_ns_sonames, anon_ns_library_path);
 -- 
 2.47.3
+

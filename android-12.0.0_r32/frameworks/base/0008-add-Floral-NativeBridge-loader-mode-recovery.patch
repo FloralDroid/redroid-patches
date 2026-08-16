@@ -1,15 +1,16 @@
-From d6e4e70c0b7d2bb3a51c3a6eaa0be468a09a460f Mon Sep 17 00:00:00 2001
+From 14ad227787868b1fe576fcfc76e443f36e7abbcc Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
-Date: Sun, 16 Aug 2026 21:07:24 +0800
-Subject: [PATCH] frameworks: add NativeBridge loader-mode recovery
+Date: Mon, 17 Aug 2026 01:15:46 +0800
+Subject: [PATCH] frameworks: restore NativeBridge direct loader recovery
 
+Change-Id: Ieeabec6b5da591bb5c388c9363812955ee1a515c
 ---
  .../java/com/android/server/am/AppErrors.java |   9 +
- .../server/am/FloralNativeBridgeManager.java  | 184 ++++++++++++++----
- 2 files changed, 155 insertions(+), 38 deletions(-)
+ .../server/am/FloralNativeBridgeManager.java  | 193 ++++++++++++++----
+ 2 files changed, 164 insertions(+), 38 deletions(-)
 
 diff --git a/services/core/java/com/android/server/am/AppErrors.java b/services/core/java/com/android/server/am/AppErrors.java
-index 7a071cc..ccbc9e9 100644
+index 7a071cc4c615..ccbc9e965aae 100644
 --- a/services/core/java/com/android/server/am/AppErrors.java
 +++ b/services/core/java/com/android/server/am/AppErrors.java
 @@ -579,6 +579,15 @@ class AppErrors {
@@ -29,7 +30,7 @@ index 7a071cc..ccbc9e9 100644
              mPackageWatchdog.onPackageFailure(r.getPackageListWithVersionCode(),
                      PackageWatchdog.FAILURE_REASON_APP_CRASH);
 diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-index 1f1255e..052a1f4 100644
+index 1f1255e3456b..5a42384b6c53 100644
 --- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 @@ -20,6 +20,7 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
@@ -40,7 +41,7 @@ index 1f1255e..052a1f4 100644
  import android.os.Build;
  import android.os.FileUtils;
  import android.os.SystemClock;
-@@ -49,11 +50,13 @@ final class FloralNativeBridgeManager {
+@@ -49,11 +50,16 @@ final class FloralNativeBridgeManager {
      // Translated games commonly initialize optional native SDKs well after their first frame.
      private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
      private static final int MAX_JSON_BYTES = 256 * 1024;
@@ -51,11 +52,14 @@ index 1f1255e..052a1f4 100644
      private static final String BACKEND_NDK = "ndk";
      private static final String BACKEND_HOUDINI = "houdini";
 +    private static final String MODE_HYBRID = "hybrid";
-+    private static final String MODE_COMPAT = "compat";
++    private static final String MODE_DIRECT = "direct";
++    // State written by older images used this name for the same second-stage
++    // candidate. It is normalized when read and is never emitted again.
++    private static final String MODE_COMPAT_LEGACY = "compat";
  
      private final ActivityManagerService mService;
      private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
-@@ -67,7 +70,8 @@ final class FloralNativeBridgeManager {
+@@ -67,7 +73,8 @@ final class FloralNativeBridgeManager {
          // AMS lock so starting a translated process stays deterministic and cheap.
          mPolicy = readJsonFile(new File(POLICY_PATH));
          mState = readJsonFile(mStateFile.getBaseFile());
@@ -65,7 +69,7 @@ index 1f1255e..052a1f4 100644
                  || !Build.FINGERPRINT.equals(mState.optString("build_fingerprint"))) {
              mState = emptyState();
          }
-@@ -97,8 +101,9 @@ final class FloralNativeBridgeManager {
+@@ -97,8 +104,9 @@ final class FloralNativeBridgeManager {
              put(state, "package_name", app.info.packageName);
              put(state, "version_code", versionCode);
              put(state, "candidates", toJsonArray(rule.candidates));
@@ -76,7 +80,7 @@ index 1f1255e..052a1f4 100644
              put(state, "stable", false);
              put(state, "exhausted", false);
              put(state, "failure_count", 0);
-@@ -114,19 +119,20 @@ final class FloralNativeBridgeManager {
+@@ -114,19 +122,20 @@ final class FloralNativeBridgeManager {
              return;
          }
  
@@ -100,7 +104,7 @@ index 1f1255e..052a1f4 100644
              changed = true;
          }
          if (selected.isEmpty()) {
-@@ -163,7 +169,7 @@ final class FloralNativeBridgeManager {
+@@ -163,7 +172,7 @@ final class FloralNativeBridgeManager {
                      put(state, "stable", true);
                      writeState();
                      Slog.i(TAG, "NativeBridge stable for " + launch.processName
@@ -109,7 +113,7 @@ index 1f1255e..052a1f4 100644
                  }
              }
              mLaunches.remove(app);
-@@ -172,6 +178,29 @@ final class FloralNativeBridgeManager {
+@@ -172,6 +181,29 @@ final class FloralNativeBridgeManager {
  
      /** Handles only an early translated native crash with an available fallback. */
      boolean handleEarlyNativeCrash(ProcessRecord app) {
@@ -139,7 +143,7 @@ index 1f1255e..052a1f4 100644
          final Launch launch = mLaunches.get(app);
          if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
                  > EARLY_CRASH_WINDOW_MS) {
-@@ -182,24 +211,25 @@ final class FloralNativeBridgeManager {
+@@ -182,24 +214,25 @@ final class FloralNativeBridgeManager {
          if (!matchesLaunch(state, launch)) {
              return false;
          }
@@ -170,7 +174,7 @@ index 1f1255e..052a1f4 100644
          put(state, "exhausted", false);
          writeState();
          mLaunches.remove(app);
-@@ -220,9 +250,9 @@ final class FloralNativeBridgeManager {
+@@ -220,9 +253,9 @@ final class FloralNativeBridgeManager {
                      app.getWindowProcessController(), "floral-nativebridge-fallback");
          }
          mService.mProcessList.removeProcessLocked(app, false, true,
@@ -183,7 +187,7 @@ index 1f1255e..052a1f4 100644
  
          if (taskId != INVALID_TASK_ID) {
              // Restart on the next AMS turn after process cleanup. A zero-duration task
-@@ -320,7 +350,7 @@ final class FloralNativeBridgeManager {
+@@ -320,7 +353,7 @@ final class FloralNativeBridgeManager {
          return state != null
                  && launch.packageName.equals(state.optString("package_name"))
                  && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
@@ -192,7 +196,7 @@ index 1f1255e..052a1f4 100644
      }
  
      private static boolean sameCandidates(JSONArray json, ArrayList<String> candidates) {
-@@ -335,18 +365,70 @@ final class FloralNativeBridgeManager {
+@@ -335,18 +368,76 @@ final class FloralNativeBridgeManager {
          return true;
      }
  
@@ -211,8 +215,9 @@ index 1f1255e..052a1f4 100644
 +            final String candidate = json.optString(i);
 +            if (isCandidate(candidate)) {
 +                candidates.add(candidate);
-+            }
-+        }
+             }
+         }
+-        return backends;
 +        return candidates;
 +    }
 +
@@ -220,7 +225,7 @@ index 1f1255e..052a1f4 100644
 +        final ArraySet<String> failed = readCandidates(
 +                state.optJSONArray("failed_candidates"));
 +        // State version 2 only knew about backends. Treat those records as a
-+        // failed hybrid attempt so the new compat candidate can still run.
++        // failed hybrid attempt so the new direct candidate can still run.
 +        final JSONArray legacy = state.optJSONArray("failed_backends");
 +        if (legacy != null) {
 +            for (int i = 0; i < legacy.length(); i++) {
@@ -228,9 +233,8 @@ index 1f1255e..052a1f4 100644
 +                if (isBackend(backend)) {
 +                    failed.add(candidateName(backend, MODE_HYBRID));
 +                }
-             }
-         }
--        return backends;
++            }
++        }
 +        return failed;
 +    }
 +
@@ -239,7 +243,8 @@ index 1f1255e..052a1f4 100644
 +            return "";
 +        }
 +        final String backend = state.optString("selected_backend", "");
-+        final String mode = state.optString("selected_loader_mode", MODE_HYBRID);
++        final String mode = normalizeMode(
++                state.optString("selected_loader_mode", MODE_HYBRID));
 +        return isBackend(backend) && isMode(mode) ? candidateName(backend, mode) : "";
 +    }
 +
@@ -266,11 +271,16 @@ index 1f1255e..052a1f4 100644
 +    }
 +
 +    private static boolean isMode(String value) {
-+        return MODE_HYBRID.equals(value) || MODE_COMPAT.equals(value);
++        return MODE_HYBRID.equals(value) || MODE_DIRECT.equals(value)
++                || MODE_COMPAT_LEGACY.equals(value);
++    }
++
++    private static String normalizeMode(String value) {
++        return MODE_COMPAT_LEGACY.equals(value) ? MODE_DIRECT : value;
      }
  
      private static String firstAvailable(ArrayList<String> candidates, ArraySet<String> failed) {
-@@ -382,17 +464,17 @@ final class FloralNativeBridgeManager {
+@@ -382,17 +473,17 @@ final class FloralNativeBridgeManager {
          final String processName;
          final String packageName;
          final long versionCode;
@@ -291,7 +301,7 @@ index 1f1255e..052a1f4 100644
              this.candidates = new ArrayList<>(candidates);
              this.preserveTaskSurface = preserveTaskSurface;
              this.startUptime = startUptime;
-@@ -412,8 +494,8 @@ final class FloralNativeBridgeManager {
+@@ -412,8 +503,8 @@ final class FloralNativeBridgeManager {
  
          static PolicyRule automaticDefaults() {
              final ArrayList<String> candidates = new ArrayList<>();
@@ -302,7 +312,7 @@ index 1f1255e..052a1f4 100644
              return new PolicyRule(true, candidates, true);
          }
  
-@@ -421,8 +503,8 @@ final class FloralNativeBridgeManager {
+@@ -421,8 +512,8 @@ final class FloralNativeBridgeManager {
              final PolicyRule rule = automaticDefaults();
              if (BACKEND_HOUDINI.equals(backend)) {
                  rule.candidates.clear();
@@ -313,7 +323,7 @@ index 1f1255e..052a1f4 100644
              }
              return rule;
          }
-@@ -459,8 +541,7 @@ final class FloralNativeBridgeManager {
+@@ -459,8 +550,7 @@ final class FloralNativeBridgeManager {
                          return preferred(preferred);
                      }
                      final PolicyRule rule = fromCandidates(array);
@@ -323,7 +333,7 @@ index 1f1255e..052a1f4 100644
                      return rule;
                  }
              }
-@@ -475,26 +556,53 @@ final class FloralNativeBridgeManager {
+@@ -475,26 +565,53 @@ final class FloralNativeBridgeManager {
          }
  
          private static PolicyRule fromCandidates(JSONArray array) {
@@ -363,7 +373,7 @@ index 1f1255e..052a1f4 100644
 +
 +        private static void addBackendCandidates(ArrayList<String> candidates, String backend) {
 +            candidates.add(candidateName(backend, MODE_HYBRID));
-+            candidates.add(candidateName(backend, MODE_COMPAT));
++            candidates.add(candidateName(backend, MODE_DIRECT));
 +        }
 +
 +        private static void reorderBackendFirst(ArrayList<String> candidates, String backend) {
