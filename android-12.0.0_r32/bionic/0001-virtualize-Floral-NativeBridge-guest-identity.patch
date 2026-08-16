@@ -1,4 +1,4 @@
-From 200e871b54212ed1ff56205bc91696bc65dae80d Mon Sep 17 00:00:00 2001
+From a5379bcc1a7aa449a92e651bf3839b57ae68e5f5 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Sat, 15 Aug 2026 14:05:15 +0800
 Subject: [PATCH] bionic: virtualize ARM identity for NativeBridge guests
@@ -7,14 +7,14 @@ Change-Id: Iebec5484573d6b07c6d53d2770ef044739745276
 ---
  libc/Android.bp                     |   2 +
  libc/SYSCALLS.TXT                   |   4 +-
- libc/bionic/floral_nativebridge.cpp | 127 ++++++++++++++++++++++++++++
- libc/bionic/getauxval.cpp           |  46 +++++++++-
- libc/bionic/sysinfo.cpp             | 103 +++++++++++++++++++++-
- libc/bionic/system_property_api.cpp |  32 ++++++-
- libc/bionic/uname.cpp               |  31 +++++++
+ libc/bionic/floral_nativebridge.cpp | 127 ++++++++++
+ libc/bionic/getauxval.cpp           |  46 +++-
+ libc/bionic/sysinfo.cpp             | 377 +++++++++++++++++++++++++++-
+ libc/bionic/system_property_api.cpp |  32 ++-
+ libc/bionic/uname.cpp               |  31 +++
  libc/libc.map.txt                   |   1 +
- libc/private/floral_nativebridge.h  |  30 +++++++
- 9 files changed, 370 insertions(+), 6 deletions(-)
+ libc/private/floral_nativebridge.h  |  30 +++
+ 9 files changed, 644 insertions(+), 6 deletions(-)
  create mode 100644 libc/bionic/floral_nativebridge.cpp
  create mode 100644 libc/bionic/uname.cpp
  create mode 100644 libc/private/floral_nativebridge.h
@@ -257,13 +257,14 @@ index a3c6b19..312f782 100644
    return result;
  }
 diff --git a/libc/bionic/sysinfo.cpp b/libc/bionic/sysinfo.cpp
-index 7ab8e9e..d5ad347 100644
+index 7ab8e9e..515554b 100644
 --- a/libc/bionic/sysinfo.cpp
 +++ b/libc/bionic/sysinfo.cpp
-@@ -29,12 +29,113 @@
+@@ -29,12 +29,387 @@
  #include <sys/sysinfo.h>
  
  #include <dirent.h>
++#include <errno.h>
 +#include <inttypes.h>
 +#include <limits.h>
 +#include <stdint.h>
@@ -290,11 +291,282 @@ index 7ab8e9e..d5ad347 100644
 +  bool valid = false;
 +};
 +
++struct FloralCgroupMemory {
++  uint64_t total_bytes = 0;
++  uint64_t current_bytes = 0;
++  uint64_t swap_total_bytes = 0;
++  uint64_t swap_current_bytes = 0;
++  bool valid = false;
++};
++
++// Cgroup paths can approach PATH_MAX; keep their buffers off libc's small stack.
++class FloralPathBuffer {
++ public:
++  FloralPathBuffer() : data_(static_cast<char*>(malloc(PATH_MAX))) {
++    if (data_ != nullptr) data_[0] = '\0';
++  }
++
++  ~FloralPathBuffer() {
++    free(data_);
++  }
++
++  FloralPathBuffer(const FloralPathBuffer&) = delete;
++  FloralPathBuffer& operator=(const FloralPathBuffer&) = delete;
++
++  bool valid() const {
++    return data_ != nullptr;
++  }
++
++  char* get() {
++    return data_;
++  }
++
++ private:
++  char* data_;
++};
++
 +unsigned long ToSysinfoUnits(uint64_t kibibytes, unsigned int unit) {
 +  if (unit == 0) unit = 1;
 +  if (kibibytes > UINT64_MAX / 1024) return ULONG_MAX;
 +  const uint64_t value = kibibytes * 1024 / unit;
 +  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++unsigned long BytesToSysinfoUnits(uint64_t bytes, unsigned int unit) {
++  if (unit == 0) unit = 1;
++  const uint64_t value = bytes / unit;
++  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++bool IsSafeCgroupPath(const char* path) {
++  if (path == nullptr || path[0] != '/') return false;
++
++  const char* component = path + 1;
++  while (*component != '\0') {
++    const char* slash = strchr(component, '/');
++    const size_t length = slash == nullptr ? strlen(component) : slash - component;
++    if ((length == 1 && component[0] == '.') ||
++        (length == 2 && component[0] == '.' && component[1] == '.')) {
++      return false;
++    }
++    if (slash == nullptr) break;
++    component = slash + 1;
++  }
++  return true;
++}
++
++bool ControllerListContains(const char* controllers, const char* expected) {
++  const size_t expected_length = strlen(expected);
++  const char* cursor = controllers;
++  while (*cursor != '\0') {
++    const char* comma = strchr(cursor, ',');
++    const size_t length = comma == nullptr ? strlen(cursor) : comma - cursor;
++    if (length == expected_length && strncmp(cursor, expected, length) == 0) return true;
++    if (comma == nullptr) break;
++    cursor = comma + 1;
++  }
++  return false;
++}
++
++bool ReadSelfCgroupPaths(char* unified, size_t unified_size, char* memory, size_t memory_size) {
++  FILE* file = fopen("/proc/self/cgroup", "re");
++  if (file == nullptr) return false;
++
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    char* first_colon = strchr(line, ':');
++    if (first_colon == nullptr) continue;
++    char* second_colon = strchr(first_colon + 1, ':');
++    if (second_colon == nullptr) continue;
++
++    *first_colon = '\0';
++    *second_colon = '\0';
++    char* path = second_colon + 1;
++    path[strcspn(path, "\r\n")] = '\0';
++    if (!IsSafeCgroupPath(path)) continue;
++
++    if (strcmp(line, "0") == 0 && first_colon[1] == '\0') {
++      if (strlcpy(unified, path, unified_size) >= unified_size) unified[0] = '\0';
++    } else if (ControllerListContains(first_colon + 1, "memory")) {
++      if (strlcpy(memory, path, memory_size) >= memory_size) memory[0] = '\0';
++    }
++  }
++  free(line);
++  fclose(file);
++  return unified[0] != '\0' || memory[0] != '\0';
++}
++
++bool ReadCgroupValue(const char* path, uint64_t* value, bool* unlimited) {
++  FILE* file = fopen(path, "re");
++  if (file == nullptr) return false;
++
++  char text[64];
++  const bool read = fgets(text, sizeof(text), file) != nullptr;
++  fclose(file);
++  if (!read) return false;
++
++  text[strcspn(text, "\r\n")] = '\0';
++  if (strcmp(text, "max") == 0) {
++    *unlimited = true;
++    *value = 0;
++    return true;
++  }
++
++  char* end = nullptr;
++  errno = 0;
++  const uint64_t parsed = strtoull(text, &end, 10);
++  if (errno != 0 || end == text || *end != '\0') return false;
++  *unlimited = false;
++  *value = parsed;
++  return true;
++}
++
++bool BuildCgroupFilePath(char* output, size_t output_size, const char* root, const char* cgroup,
++                         const char* file) {
++  const char* separator = strcmp(cgroup, "/") == 0 ? "" : cgroup;
++  const int length = snprintf(output, output_size, "%s%s/%s", root, separator, file);
++  return length >= 0 && static_cast<size_t>(length) < output_size;
++}
++
++bool ParentCgroupPath(char* path) {
++  if (strcmp(path, "/") == 0) return false;
++  char* slash = strrchr(path, '/');
++  if (slash == path) {
++    path[1] = '\0';
++  } else if (slash != nullptr) {
++    *slash = '\0';
++  }
++  return true;
++}
++
++bool ReadCgroupLimit(const char* root, const char* cgroup, const char* file, uint64_t* limit) {
++  FloralPathBuffer current;
++  FloralPathBuffer path;
++  if (!current.valid() || !path.valid() || strlcpy(current.get(), cgroup, PATH_MAX) >= PATH_MAX) {
++    return false;
++  }
++
++  bool found = false;
++  uint64_t minimum = UINT64_MAX;
++  do {
++    uint64_t value = 0;
++    bool unlimited = false;
++    if (BuildCgroupFilePath(path.get(), PATH_MAX, root, current.get(), file) &&
++        ReadCgroupValue(path.get(), &value, &unlimited) && !unlimited && value != 0) {
++      if (value < minimum) minimum = value;
++      found = true;
++    }
++  } while (ParentCgroupPath(current.get()));
++
++  if (!found) return false;
++  *limit = minimum;
++  return true;
++}
++
++bool ReadCgroupV2Memory(const char* cgroup, FloralCgroupMemory* memory) {
++  FloralPathBuffer path;
++  if (!path.valid()) return false;
++  bool swap_unlimited = false;
++
++  if (!ReadCgroupLimit("/sys/fs/cgroup", cgroup, "memory.max", &memory->total_bytes)) {
++    return false;
++  }
++  bool current_unlimited = false;
++  if (!BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup, "memory.current") ||
++      !ReadCgroupValue(path.get(), &memory->current_bytes, &current_unlimited) ||
++      current_unlimited) {
++    return false;
++  }
++
++  if (BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup, "memory.swap.max") &&
++      ReadCgroupValue(path.get(), &memory->swap_total_bytes, &swap_unlimited) &&
++      !swap_unlimited &&
++      BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup,
++                          "memory.swap.current")) {
++    bool current_unlimited = false;
++    if (!ReadCgroupValue(path.get(), &memory->swap_current_bytes, &current_unlimited) ||
++        current_unlimited) {
++      memory->swap_total_bytes = 0;
++      memory->swap_current_bytes = 0;
++    }
++  } else {
++    memory->swap_total_bytes = 0;
++    memory->swap_current_bytes = 0;
++  }
++  memory->valid = true;
++  return true;
++}
++
++bool ReadCgroupV1Memory(const char* cgroup, FloralCgroupMemory* memory) {
++  constexpr char kRoot[] = "/sys/fs/cgroup/memory";
++  FloralPathBuffer path;
++  if (!path.valid()) return false;
++  bool unlimited = false;
++
++  if (!ReadCgroupLimit(kRoot, cgroup, "memory.limit_in_bytes", &memory->total_bytes)) {
++    return false;
++  }
++  if (!BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup, "memory.usage_in_bytes") ||
++      !ReadCgroupValue(path.get(), &memory->current_bytes, &unlimited) || unlimited) {
++    return false;
++  }
++
++  uint64_t memory_and_swap_limit = 0;
++  uint64_t memory_and_swap_usage = 0;
++  if (BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup, "memory.memsw.limit_in_bytes") &&
++      ReadCgroupValue(path.get(), &memory_and_swap_limit, &unlimited) && !unlimited &&
++      BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup,
++                          "memory.memsw.usage_in_bytes") &&
++      ReadCgroupValue(path.get(), &memory_and_swap_usage, &unlimited) && !unlimited) {
++    memory->swap_total_bytes = memory_and_swap_limit > memory->total_bytes
++                                   ? memory_and_swap_limit - memory->total_bytes
++                                   : 0;
++    memory->swap_current_bytes = memory_and_swap_usage > memory->current_bytes
++                                     ? memory_and_swap_usage - memory->current_bytes
++                                     : 0;
++  }
++  memory->valid = true;
++  return true;
++}
++
++FloralCgroupMemory ReadFloralCgroupMemory() {
++  FloralCgroupMemory memory;
++  FloralPathBuffer unified_path;
++  FloralPathBuffer memory_path;
++  if (!unified_path.valid() || !memory_path.valid() ||
++      !ReadSelfCgroupPaths(unified_path.get(), PATH_MAX, memory_path.get(), PATH_MAX)) {
++    return memory;
++  }
++
++  if (unified_path.get()[0] != '\0' && ReadCgroupV2Memory(unified_path.get(), &memory)) {
++    return memory;
++  }
++  if (memory_path.get()[0] != '\0') ReadCgroupV1Memory(memory_path.get(), &memory);
++  return memory;
++}
++
++bool ApplyFloralCgroupMemory(struct sysinfo* info) {
++  FloralCgroupMemory memory = ReadFloralCgroupMemory();
++  if (!memory.valid) return false;
++
++  const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++  const uint64_t host_total = static_cast<uint64_t>(info->totalram) * unit;
++  if (host_total != 0 && memory.total_bytes > host_total) memory.total_bytes = host_total;
++  if (memory.current_bytes > memory.total_bytes) memory.current_bytes = memory.total_bytes;
++  if (memory.swap_current_bytes > memory.swap_total_bytes) {
++    memory.swap_current_bytes = memory.swap_total_bytes;
++  }
++
++  info->totalram = BytesToSysinfoUnits(memory.total_bytes, unit);
++  info->freeram = BytesToSysinfoUnits(memory.total_bytes - memory.current_bytes, unit);
++  info->sharedram = 0;
++  info->bufferram = 0;
++  info->totalswap = BytesToSysinfoUnits(memory.swap_total_bytes, unit);
++  info->freeswap = BytesToSysinfoUnits(memory.swap_total_bytes - memory.swap_current_bytes, unit);
++  info->totalhigh = 0;
++  info->freehigh = 0;
++  return true;
 +}
 +
 +FloralMeminfo ReadFloralMeminfo() {
@@ -327,17 +599,19 @@ index 7ab8e9e..d5ad347 100644
 +}
 +
 +void ApplyFloralProcView(struct sysinfo* info) {
-+  const FloralMeminfo memory = ReadFloralMeminfo();
-+  if (memory.valid) {
-+    const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
-+    info->totalram = ToSysinfoUnits(memory.total_kb, unit);
-+    info->freeram = ToSysinfoUnits(memory.free_kb, unit);
-+    info->bufferram = ToSysinfoUnits(memory.buffers_kb, unit);
-+    info->sharedram = ToSysinfoUnits(memory.shared_kb, unit);
-+    info->totalswap = ToSysinfoUnits(memory.swap_total_kb, unit);
-+    info->freeswap = ToSysinfoUnits(memory.swap_free_kb, unit);
-+    info->totalhigh = 0;
-+    info->freehigh = 0;
++  if (!ApplyFloralCgroupMemory(info)) {
++    const FloralMeminfo memory = ReadFloralMeminfo();
++    if (memory.valid) {
++      const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++      info->totalram = ToSysinfoUnits(memory.total_kb, unit);
++      info->freeram = ToSysinfoUnits(memory.free_kb, unit);
++      info->bufferram = ToSysinfoUnits(memory.buffers_kb, unit);
++      info->sharedram = ToSysinfoUnits(memory.shared_kb, unit);
++      info->totalswap = ToSysinfoUnits(memory.swap_total_kb, unit);
++      info->freeswap = ToSysinfoUnits(memory.swap_free_kb, unit);
++      info->totalhigh = 0;
++      info->freehigh = 0;
++    }
 +  }
 +
 +  FILE* file = fopen("/proc/uptime", "re");
@@ -366,8 +640,8 @@ index 7ab8e9e..d5ad347 100644
 +extern "C" int sysinfo(struct sysinfo* info) {
 +  const int result = __sysinfo(info);
 +  if (result == 0 && info != nullptr) {
-+    // Keep direct libc queries consistent with the current procfs namespace.
-+    // Without Floral LXCFS these files contain the same host values as the syscall.
++    // Prefer the current memory cgroup so direct libc queries stay container-scoped.
++    // Fall back to procfs for kernels without readable cgroup memory limits.
 +    ApplyFloralProcView(info);
 +  }
 +  return result;
@@ -527,4 +801,3 @@ index 0000000..4015596
 +__END_DECLS
 -- 
 2.47.3
-
