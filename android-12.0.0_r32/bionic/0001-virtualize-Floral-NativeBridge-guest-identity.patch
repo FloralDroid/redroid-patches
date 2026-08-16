@@ -1,19 +1,20 @@
-From 0b44b707be80a298f51d0e9d21b3a865c83a8b76 Mon Sep 17 00:00:00 2001
+From 200e871b54212ed1ff56205bc91696bc65dae80d Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Sat, 15 Aug 2026 14:05:15 +0800
 Subject: [PATCH] bionic: virtualize ARM identity for NativeBridge guests
 
 Change-Id: Iebec5484573d6b07c6d53d2770ef044739745276
 ---
- libc/Android.bp                     |  2 +
- libc/SYSCALLS.TXT                   |  2 +-
- libc/bionic/floral_nativebridge.cpp | 133 ++++++++++++++++++++++++++++++++++++
- libc/bionic/getauxval.cpp           | 46 +++++++++++++++-
- libc/bionic/system_property_api.cpp | 32 ++++++++++-
- libc/bionic/uname.cpp               | 31 +++++++++
- libc/libc.map.txt                   |  1 +
- libc/private/floral_nativebridge.h  | 30 ++++++++
- 8 files changed, 273 insertions(+), 4 deletions(-)
+ libc/Android.bp                     |   2 +
+ libc/SYSCALLS.TXT                   |   4 +-
+ libc/bionic/floral_nativebridge.cpp | 127 ++++++++++++++++++++++++++++
+ libc/bionic/getauxval.cpp           |  46 +++++++++-
+ libc/bionic/sysinfo.cpp             | 103 +++++++++++++++++++++-
+ libc/bionic/system_property_api.cpp |  32 ++++++-
+ libc/bionic/uname.cpp               |  31 +++++++
+ libc/libc.map.txt                   |   1 +
+ libc/private/floral_nativebridge.h  |  30 +++++++
+ 9 files changed, 370 insertions(+), 6 deletions(-)
  create mode 100644 libc/bionic/floral_nativebridge.cpp
  create mode 100644 libc/bionic/uname.cpp
  create mode 100644 libc/private/floral_nativebridge.h
@@ -39,10 +40,10 @@ index 2c0656f..93db505 100644
          "bionic/usleep.cpp",
          "bionic/utmp.cpp",
 diff --git a/libc/SYSCALLS.TXT b/libc/SYSCALLS.TXT
-index 391e7af..a7dcb63 100644
+index 391e7af..ce2b779 100644
 --- a/libc/SYSCALLS.TXT
 +++ b/libc/SYSCALLS.TXT
-@@ -296,7 +296,7 @@ int __sched_getaffinity:sched_getaffinity(pid_t pid, size_t setsize, cpu_set_t*
+@@ -296,13 +296,13 @@ int __sched_getaffinity:sched_getaffinity(pid_t pid, size_t setsize, cpu_set_t*
  int __getcpu:getcpu(unsigned*, unsigned*, void*) all
  
  # other
@@ -51,12 +52,19 @@ index 391e7af..a7dcb63 100644
  mode_t  umask(mode_t)  all
  int     __reboot:reboot(int, int, int, void*)  all
  int     init_module(void*, unsigned long, const char*)  all
+ int     delete_module(const char*, unsigned int)   all
+ int     klogctl:syslog(int, char*, int)   all
+-int     sysinfo(struct sysinfo*)  all
++int     __sysinfo:sysinfo(struct sysinfo*)  all
+ int     personality(unsigned long)  all
+ 
+ ssize_t tee(int, int, size_t, unsigned int)  all
 diff --git a/libc/bionic/floral_nativebridge.cpp b/libc/bionic/floral_nativebridge.cpp
 new file mode 100644
-index 0000000..e0a4fe3
+index 0000000..5e31a8c
 --- /dev/null
 +++ b/libc/bionic/floral_nativebridge.cpp
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,127 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -111,18 +119,15 @@ index 0000000..e0a4fe3
 +constexpr PropertyOverride kPropertyOverrides[] = {
 +    {"ro.product.cpu.abi", "armeabi-v7a", "arm64-v8a"},
 +    {"ro.product.cpu.abi2", "armeabi", ""},
-+    {"ro.product.cpu.abilist", "armeabi-v7a,armeabi",
-+     "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.product.cpu.abilist", "armeabi-v7a,armeabi", "arm64-v8a,armeabi-v7a,armeabi"},
 +    {"ro.product.cpu.abilist32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
 +    {"ro.product.cpu.abilist64", "", "arm64-v8a"},
 +    {"ro.dalvik.vm.isa.arm", "arm", "arm"},
 +    {"ro.dalvik.vm.isa.arm64", "arm64", "arm64"},
-+    {"ro.floral.nb.pubabi", "armeabi-v7a,armeabi",
-+     "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.floral.nb.pubabi", "armeabi-v7a,armeabi", "arm64-v8a,armeabi-v7a,armeabi"},
 +    {"ro.floral.nb.pubabi32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
 +    {"ro.floral.nb.pubabi64", "", "arm64-v8a"},
-+    {"ro.floral.nb.loadabi", "armeabi-v7a,armeabi",
-+     "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.floral.nb.loadabi", "armeabi-v7a,armeabi", "arm64-v8a,armeabi-v7a,armeabi"},
 +    {"ro.floral.nb.loadabi32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
 +    {"ro.floral.nb.loadabi64", "", "arm64-v8a"},
 +};
@@ -160,22 +165,19 @@ index 0000000..e0a4fe3
 +  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
 +    return nullptr;
 +  }
-+  return g_floral_nativebridge_kernel_release[0] == '\0'
-+             ? kDefaultGuestKernelRelease
-+             : g_floral_nativebridge_kernel_release;
++  return g_floral_nativebridge_kernel_release[0] == '\0' ? kDefaultGuestKernelRelease
++                                                         : g_floral_nativebridge_kernel_release;
 +}
 +
 +extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_version() {
 +  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
 +    return nullptr;
 +  }
-+  return g_floral_nativebridge_kernel_version[0] == '\0'
-+             ? kDefaultGuestKernelVersion
-+             : g_floral_nativebridge_kernel_version;
++  return g_floral_nativebridge_kernel_version[0] == '\0' ? kDefaultGuestKernelVersion
++                                                         : g_floral_nativebridge_kernel_version;
 +}
 +
-+extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(
-+    const char* name) {
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(const char* name) {
 +  if (name == nullptr) {
 +    return nullptr;
 +  }
@@ -254,6 +256,125 @@ index a3c6b19..312f782 100644
    if (!exists) errno = ENOENT;
    return result;
  }
+diff --git a/libc/bionic/sysinfo.cpp b/libc/bionic/sysinfo.cpp
+index 7ab8e9e..d5ad347 100644
+--- a/libc/bionic/sysinfo.cpp
++++ b/libc/bionic/sysinfo.cpp
+@@ -29,12 +29,113 @@
+ #include <sys/sysinfo.h>
+ 
+ #include <dirent.h>
++#include <inttypes.h>
++#include <limits.h>
++#include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#include "private/get_cpu_count_from_string.h"
+ #include "private/ScopedReaddir.h"
++#include "private/get_cpu_count_from_string.h"
++
++extern "C" int __sysinfo(struct sysinfo*);
++
++namespace {
++
++struct FloralMeminfo {
++  uint64_t total_kb = 0;
++  uint64_t free_kb = 0;
++  uint64_t buffers_kb = 0;
++  uint64_t shared_kb = 0;
++  uint64_t swap_total_kb = 0;
++  uint64_t swap_free_kb = 0;
++  bool valid = false;
++};
++
++unsigned long ToSysinfoUnits(uint64_t kibibytes, unsigned int unit) {
++  if (unit == 0) unit = 1;
++  if (kibibytes > UINT64_MAX / 1024) return ULONG_MAX;
++  const uint64_t value = kibibytes * 1024 / unit;
++  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++FloralMeminfo ReadFloralMeminfo() {
++  FloralMeminfo memory;
++  FILE* file = fopen("/proc/meminfo", "re");
++  if (file == nullptr) return memory;
++
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    uint64_t value = 0;
++    if (sscanf(line, "MemTotal: %" SCNu64 " kB", &value) == 1) {
++      memory.total_kb = value;
++      memory.valid = true;
++    } else if (sscanf(line, "MemFree: %" SCNu64 " kB", &value) == 1) {
++      memory.free_kb = value;
++    } else if (sscanf(line, "Buffers: %" SCNu64 " kB", &value) == 1) {
++      memory.buffers_kb = value;
++    } else if (sscanf(line, "Shmem: %" SCNu64 " kB", &value) == 1) {
++      memory.shared_kb = value;
++    } else if (sscanf(line, "SwapTotal: %" SCNu64 " kB", &value) == 1) {
++      memory.swap_total_kb = value;
++    } else if (sscanf(line, "SwapFree: %" SCNu64 " kB", &value) == 1) {
++      memory.swap_free_kb = value;
++    }
++  }
++  free(line);
++  fclose(file);
++  return memory;
++}
++
++void ApplyFloralProcView(struct sysinfo* info) {
++  const FloralMeminfo memory = ReadFloralMeminfo();
++  if (memory.valid) {
++    const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++    info->totalram = ToSysinfoUnits(memory.total_kb, unit);
++    info->freeram = ToSysinfoUnits(memory.free_kb, unit);
++    info->bufferram = ToSysinfoUnits(memory.buffers_kb, unit);
++    info->sharedram = ToSysinfoUnits(memory.shared_kb, unit);
++    info->totalswap = ToSysinfoUnits(memory.swap_total_kb, unit);
++    info->freeswap = ToSysinfoUnits(memory.swap_free_kb, unit);
++    info->totalhigh = 0;
++    info->freehigh = 0;
++  }
++
++  FILE* file = fopen("/proc/uptime", "re");
++  if (file != nullptr) {
++    double uptime = 0;
++    if (fscanf(file, "%lf", &uptime) == 1 && uptime >= 0) {
++      info->uptime = static_cast<long>(uptime);
++    }
++    fclose(file);
++  }
++
++  file = fopen("/proc/loadavg", "re");
++  if (file != nullptr) {
++    double load[3] = {};
++    if (fscanf(file, "%lf %lf %lf", &load[0], &load[1], &load[2]) == 3) {
++      for (size_t i = 0; i < 3; ++i) {
++        info->loads[i] = static_cast<unsigned long>(load[i] * (1 << SI_LOAD_SHIFT));
++      }
++    }
++    fclose(file);
++  }
++}
++
++}  // namespace
++
++extern "C" int sysinfo(struct sysinfo* info) {
++  const int result = __sysinfo(info);
++  if (result == 0 && info != nullptr) {
++    // Keep direct libc queries consistent with the current procfs namespace.
++    // Without Floral LXCFS these files contain the same host values as the syscall.
++    ApplyFloralProcView(info);
++  }
++  return result;
++}
+ 
+ static bool __matches_cpuN(const char* s) {
+   // The %c trick is to ensure that we have the anchored match "^cpu[0-9]+$".
 diff --git a/libc/bionic/system_property_api.cpp b/libc/bionic/system_property_api.cpp
 index a641f12..0bbd875 100644
 --- a/libc/bionic/system_property_api.cpp
@@ -321,7 +442,7 @@ index a641f12..0bbd875 100644
  
 diff --git a/libc/bionic/uname.cpp b/libc/bionic/uname.cpp
 new file mode 100644
-index 0000000..1280ed6
+index 0000000..a989278
 --- /dev/null
 +++ b/libc/bionic/uname.cpp
 @@ -0,0 +1,31 @@
@@ -370,7 +491,7 @@ index c31e306..5859b6b 100644
      __addsf3; # arm
 diff --git a/libc/private/floral_nativebridge.h b/libc/private/floral_nativebridge.h
 new file mode 100644
-index 0000000..8406f96
+index 0000000..4015596
 --- /dev/null
 +++ b/libc/private/floral_nativebridge.h
 @@ -0,0 +1,30 @@
@@ -406,3 +527,4 @@ index 0000000..8406f96
 +__END_DECLS
 -- 
 2.47.3
+
