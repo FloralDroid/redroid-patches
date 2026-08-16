@@ -1,22 +1,30 @@
-From c093349b168405cf3206c074bd851cdd489a1b5c Mon Sep 17 00:00:00 2001
+From 1c00b73cc8bd5b9cd1b9123d3242d625f467b3dc Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 12 Aug 2026 23:55:47 +0800
 Subject: [PATCH] abi-dumps: add Floral NativeBridge private symbols
 
 ---
- 31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump    | 3 +++
- 31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump | 3 +++
- 31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump      | 3 +++
- 31/64/x86/source-based/libnativebridge.so.lsdump              | 3 +++
- 31/64/x86_64/source-based/libnativebridge.so.lsdump           | 3 +++
- 31/64/x86_x86_64/source-based/libnativebridge.so.lsdump       | 3 +++
- 6 files changed, 18 insertions(+)
+ 31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump  | 6 ++++++
+ .../arm_armv7-a-neon/source-based/libnativebridge.so.lsdump | 6 ++++++
+ 31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump    | 6 ++++++
+ 31/64/x86/source-based/libnativebridge.so.lsdump            | 6 ++++++
+ 31/64/x86_64/source-based/libnativebridge.so.lsdump         | 6 ++++++
+ 31/64/x86_x86_64/source-based/libnativebridge.so.lsdump     | 6 ++++++
+ 6 files changed, 36 insertions(+)
 
 diff --git a/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump b/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump
-index 63981bb..c416d0c 100644
+index 63981bb..ffca1cf 100644
 --- a/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump
 +++ b/31/64/arm64_armv8-a/source-based/libnativebridge.so.lsdump
-@@ -140,6 +140,9 @@
+@@ -135,11 +135,17 @@
+   {
+    "name" : "NativeBridgeInitialized"
+   },
++  {
++   "name" : "NativeBridgeUseCompatibilityLoader"
++  },
+   {
+    "name" : "NeedsNativeBridge"
    },
    {
     "name" : "PreInitializeNativeBridge"
@@ -27,10 +35,18 @@ index 63981bb..c416d0c 100644
   ],
   "elf_objects" : [],
 diff --git a/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump b/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump
-index 1ec9f55..7de5999 100644
+index 1ec9f55..d0fc5df 100644
 --- a/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump
 +++ b/31/64/arm_armv7-a-neon/source-based/libnativebridge.so.lsdump
-@@ -140,6 +140,9 @@
+@@ -135,11 +135,17 @@
+   {
+    "name" : "NativeBridgeInitialized"
+   },
++  {
++   "name" : "NativeBridgeUseCompatibilityLoader"
++  },
+   {
+    "name" : "NeedsNativeBridge"
    },
    {
     "name" : "PreInitializeNativeBridge"
@@ -41,10 +57,18 @@ index 1ec9f55..7de5999 100644
   ],
   "elf_objects" : [],
 diff --git a/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump b/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump
-index 1ec9f55..7de5999 100644
+index 1ec9f55..d0fc5df 100644
 --- a/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump
 +++ b/31/64/arm_armv8-a/source-based/libnativebridge.so.lsdump
-@@ -140,6 +140,9 @@
+@@ -135,11 +135,17 @@
+   {
+    "name" : "NativeBridgeInitialized"
+   },
++  {
++   "name" : "NativeBridgeUseCompatibilityLoader"
++  },
+   {
+    "name" : "NeedsNativeBridge"
    },
    {
     "name" : "PreInitializeNativeBridge"
@@ -55,10 +79,18 @@ index 1ec9f55..7de5999 100644
   ],
   "elf_objects" : [],
 diff --git a/31/64/x86/source-based/libnativebridge.so.lsdump b/31/64/x86/source-based/libnativebridge.so.lsdump
-index e4443f1..3c51919 100644
+index e4443f1..430b063 100644
 --- a/31/64/x86/source-based/libnativebridge.so.lsdump
 +++ b/31/64/x86/source-based/libnativebridge.so.lsdump
-@@ -139,6 +139,9 @@
+@@ -134,11 +134,17 @@
+   {
+    "name" : "NativeBridgeInitialized"
+   },
++  {
++   "name" : "NativeBridgeUseCompatibilityLoader"
++  },
+   {
+    "name" : "NeedsNativeBridge"
    },
    {
     "name" : "PreInitializeNativeBridge"
@@ -69,10 +101,18 @@ index e4443f1..3c51919 100644
   ],
   "elf_objects" : [],
 diff --git a/31/64/x86_64/source-based/libnativebridge.so.lsdump b/31/64/x86_64/source-based/libnativebridge.so.lsdump
-index e9b8708..852a9a0 100644
+index e9b8708..9301d95 100644
 --- a/31/64/x86_64/source-based/libnativebridge.so.lsdump
 +++ b/31/64/x86_64/source-based/libnativebridge.so.lsdump
-@@ -139,6 +139,9 @@
+@@ -134,11 +134,17 @@
+   {
+    "name" : "NativeBridgeInitialized"
+   },
++  {
++   "name" : "NativeBridgeUseCompatibilityLoader"
++  },
+   {
+    "name" : "NeedsNativeBridge"
    },
    {
     "name" : "PreInitializeNativeBridge"
@@ -83,10 +123,18 @@ index e9b8708..852a9a0 100644
   ],
   "elf_objects" : [],
 diff --git a/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump b/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump
-index e4443f1..3c51919 100644
+index e4443f1..430b063 100644
 --- a/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump
 +++ b/31/64/x86_x86_64/source-based/libnativebridge.so.lsdump
-@@ -139,6 +139,9 @@
+@@ -134,11 +134,17 @@
+   {
+    "name" : "NativeBridgeInitialized"
+   },
++  {
++   "name" : "NativeBridgeUseCompatibilityLoader"
++  },
+   {
+    "name" : "NeedsNativeBridge"
    },
    {
     "name" : "PreInitializeNativeBridge"
