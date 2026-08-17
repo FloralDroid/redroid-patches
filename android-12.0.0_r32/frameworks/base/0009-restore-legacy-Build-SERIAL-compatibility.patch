@@ -1,0 +1,44 @@
+From 924d5aa597946abd7d3bcedb45cc9ea9b5923802 Mon Sep 17 00:00:00 2001
+From: FloralDroid <contact@home56.top>
+Date: Mon, 17 Aug 2026 11:38:02 +0800
+Subject: [PATCH] frameworks/base: restore legacy Build.SERIAL compatibility
+
+Restore the pre-P compatibility value for Build.SERIAL before application code is loaded. ActivityManagerService already supplies UNKNOWN for modern and instant applications, while Build.getSerial() keeps its permission gate.
+
+Change-Id: I04578a6bbd8b91d65eab0cecf7622f35c55bb216
+---
+ core/java/android/app/ActivityThread.java | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/core/java/android/app/ActivityThread.java b/core/java/android/app/ActivityThread.java
+index fc4bb1a00da5..925d194e44b0 100644
+--- a/core/java/android/app/ActivityThread.java
++++ b/core/java/android/app/ActivityThread.java
+@@ -219,6 +219,7 @@ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.PrintWriter;
+ import java.lang.ref.WeakReference;
++import java.lang.reflect.Field;
+ import java.lang.reflect.Method;
+ import java.net.InetAddress;
+ import java.nio.file.Files;
+@@ -6563,6 +6564,16 @@ public final class ActivityThread extends ClientTransactionHandler
+         StrictMode.initThreadDefaults(data.appInfo);
+         StrictMode.initVmDefaults(data.appInfo);
+ 
++        // Restore the legacy value only for applications that AMS marked as compatible.
++        // Modern and instant applications receive Build.UNKNOWN from AMS.
++        try {
++            Field field = Build.class.getDeclaredField("SERIAL");
++            field.setAccessible(true);
++            field.set(Build.class, data.buildSerial);
++        } catch (NoSuchFieldException | IllegalAccessException e) {
++            // Keep Build.SERIAL at its declared UNKNOWN fallback if reflection is unavailable.
++        }
++
+         if (data.debugMode != ApplicationThreadConstants.DEBUG_OFF) {
+             // XXX should have option to change the port.
+             Debug.changeDebugPort(8100);
+-- 
+2.47.3
+

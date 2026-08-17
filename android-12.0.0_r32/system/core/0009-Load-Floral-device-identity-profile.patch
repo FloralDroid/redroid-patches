@@ -1,23 +1,23 @@
-From 7281688af7a21fe235fc0dfe69962c583c8c8117 Mon Sep 17 00:00:00 2001
+From efaaf7e3e74d75416d2adafc0701af71e880488f Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
-Date: Sun, 16 Aug 2026 13:20:25 +0800
+Date: Mon, 17 Aug 2026 11:19:18 +0800
 Subject: [PATCH] init: virtualize Floral device and NativeBridge identity
 
 Load host device and NativeBridge policies during boot.
-Expose configured public product, build, kernel, and application ABI identities.
-Keep build-owned loader ABI and hardware compatibility properties unchanged.
 
-Change-Id: I05cf8f58a369ffab3604c3e64aa917bde35c0770
+Expose configured public product, build, kernel, hardware, and application ABI identities. Keep build-owned loader ABI and hardware compatibility properties unchanged.
+
+Change-Id: I2c2738a84b9222211afd757a9548541928a15e75
 ---
  init/Android.bp                          |   5 +
- init/floral_device_profile.cpp           | 284 +++++++++++++++++++++++
- init/floral_device_profile.h             |  55 +++++
- init/floral_device_profile_test.cpp      | 169 ++++++++++++++
- init/floral_nativebridge_config.cpp      | 206 ++++++++++++++++
+ init/floral_device_profile.cpp           | 324 +++++++++++++++++++++++
+ init/floral_device_profile.h             |  61 +++++
+ init/floral_device_profile_test.cpp      | 199 ++++++++++++++
+ init/floral_nativebridge_config.cpp      | 206 ++++++++++++++
  init/floral_nativebridge_config.h        |  48 ++++
  init/floral_nativebridge_config_test.cpp |  75 ++++++
- init/property_service.cpp                |  42 ++++
- 8 files changed, 884 insertions(+)
+ init/property_service.cpp                |  56 +++-
+ 8 files changed, 971 insertions(+), 3 deletions(-)
  create mode 100644 init/floral_device_profile.cpp
  create mode 100644 init/floral_device_profile.h
  create mode 100644 init/floral_device_profile_test.cpp
@@ -57,10 +57,10 @@ index 7eeafa24b..6b13c9775 100644
          "oneshot_on_test.cpp",
 diff --git a/init/floral_device_profile.cpp b/init/floral_device_profile.cpp
 new file mode 100644
-index 000000000..ddfb5468a
+index 000000000..ff19ecf8c
 --- /dev/null
 +++ b/init/floral_device_profile.cpp
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,324 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -101,6 +101,7 @@ index 000000000..ddfb5468a
 +constexpr size_t kMaximumIdentityLength = 64;
 +constexpr size_t kMaximumIdentifierLength = 32;
 +constexpr size_t kMaximumKernelFieldLength = 64;
++constexpr size_t kMaximumHardwareFieldLength = 64;
 +
 +constexpr std::array<std::string_view, 15> kRequiredFields = {
 +        "version",   "brand",    "manufacturer",     "model",           "device",
@@ -116,8 +117,10 @@ index 000000000..ddfb5468a
 +}
 +
 +bool IsKnownField(std::string_view key) {
-+    return IsRequiredField(key) || key == "build_description" || key == "kernel_release" ||
-+           key == "kernel_version";
++    return IsRequiredField(key) || key == "build_description" || key == "build_flavor" ||
++           key == "kernel_release" || key == "kernel_version" || key == "memory_type" ||
++           key == "memory_frequency" || key == "memory_channel" || key == "serial" ||
++           key == "hardware_revision";
 +}
 +
 +bool IsPropertyTextValid(const std::string& property, const std::string& value) {
@@ -180,6 +183,11 @@ index 000000000..ddfb5468a
 +    return true;
 +}
 +
++bool IsHardwareFieldValid(const std::string& value) {
++    return value.size() <= kMaximumHardwareFieldLength &&
++           IsPropertyTextValid("ro.boot.floral_hardware_identity", value);
++}
++
 +android::base::Result<std::map<std::string, std::string>> ParseFields(std::string_view content) {
 +    std::map<std::string, std::string> fields;
 +    size_t line_number = 0;
@@ -222,23 +230,18 @@ index 000000000..ddfb5468a
 +}  // namespace
 +
 +FloralDeviceProfile DefaultFloralDeviceProfile() {
-+    return {"Floral",
-+            "FloralDroid",
-+            "Floral F12",
-+            "floral_f12",
-+            "floral_f12",
-+            "",
-+            "FloralDroid",
-+            "Floral S12",
-+            "FloralDroid",
-+            "Floral GPU",
-+            "",
-+            "",
-+            "",
-+            "",
-+            "",
-+            "",
-+            ""};
++    FloralDeviceProfile profile;
++    profile.brand = "Floral";
++    profile.manufacturer = "FloralDroid";
++    profile.model = "Floral F12";
++    profile.device = "floral_f12";
++    profile.product = "floral_f12";
++    profile.soc_manufacturer = "FloralDroid";
++    profile.soc_model = "Floral S12";
++    profile.gpu_vendor = "FloralDroid";
++    profile.gpu_model = "Floral GPU";
++    profile.build_flavor = "floral_f12-userdebug";
++    return profile;
 +}
 +
 +android::base::Result<FloralDeviceProfile> ParseFloralDeviceProfile(std::string_view content) {
@@ -264,10 +267,16 @@ index 000000000..ddfb5468a
 +            fields.at("build_id"),
 +            fields.at("build_display"),
 +            OptionalField(fields, "build_description"),
++            OptionalField(fields, "build_flavor"),
 +            fields.at("version_release"),
 +            fields.at("security_patch"),
 +            OptionalField(fields, "kernel_release"),
 +            OptionalField(fields, "kernel_version"),
++            OptionalField(fields, "memory_type"),
++            OptionalField(fields, "memory_frequency"),
++            OptionalField(fields, "memory_channel"),
++            OptionalField(fields, "serial"),
++            OptionalField(fields, "hardware_revision"),
 +    };
 +
 +    if (!IsDisplayValueValid(profile.brand) || !IsDisplayValueValid(profile.manufacturer) ||
@@ -282,7 +291,15 @@ index 000000000..ddfb5468a
 +        !IsVersionReleaseValid(profile.version_release) ||
 +        !IsSecurityPatchValid(profile.security_patch) ||
 +        (!profile.kernel_release.empty() && !IsKernelFieldValid(profile.kernel_release)) ||
-+        (!profile.kernel_version.empty() && !IsKernelFieldValid(profile.kernel_version))) {
++        (!profile.kernel_version.empty() && !IsKernelFieldValid(profile.kernel_version)) ||
++        (!profile.build_flavor.empty() &&
++         !IsPropertyTextValid("ro.build.flavor", profile.build_flavor)) ||
++        (!profile.memory_type.empty() && !IsHardwareFieldValid(profile.memory_type)) ||
++        (!profile.memory_frequency.empty() && !IsHardwareFieldValid(profile.memory_frequency)) ||
++        (!profile.memory_channel.empty() && !IsHardwareFieldValid(profile.memory_channel)) ||
++        (!profile.serial.empty() && !IsHardwareFieldValid(profile.serial)) ||
++        (!profile.hardware_revision.empty() &&
++         !IsHardwareFieldValid(profile.hardware_revision))) {
 +        return android::base::Error() << "profile contains an invalid identity value";
 +    }
 +    return profile;
@@ -327,6 +344,12 @@ index 000000000..ddfb5468a
 +    if (!profile.build_description.empty()) {
 +        properties.emplace("ro.build.description", profile.build_description);
 +    }
++    if (!profile.build_flavor.empty()) {
++        properties.emplace("ro.build.flavor", profile.build_flavor);
++    }
++    if (!profile.product.empty()) {
++        properties.emplace("ro.build.product", profile.product);
++    }
 +    if (!profile.version_release.empty()) {
 +        properties.emplace("ro.build.version.release", profile.version_release);
 +        properties.emplace("ro.build.version.release_or_codename", profile.version_release);
@@ -340,6 +363,23 @@ index 000000000..ddfb5468a
 +    if (!profile.kernel_version.empty()) {
 +        properties.emplace("ro.boot.floral_kernel_version", profile.kernel_version);
 +    }
++    if (!profile.memory_type.empty()) {
++        properties.emplace("ro.boot.floral_memory_type", profile.memory_type);
++    }
++    if (!profile.memory_frequency.empty()) {
++        properties.emplace("ro.boot.floral_memory_frequency", profile.memory_frequency);
++    }
++    if (!profile.memory_channel.empty()) {
++        properties.emplace("ro.boot.floral_memory_channel", profile.memory_channel);
++    }
++    if (!profile.serial.empty()) {
++        properties.emplace("ro.serialno", profile.serial);
++        properties.emplace("ro.boot.serialno", profile.serial);
++    }
++    if (!profile.hardware_revision.empty()) {
++        properties.emplace("ro.hardware.revision", profile.hardware_revision);
++        properties.emplace("ro.boot.hardware.revision", profile.hardware_revision);
++    }
 +    return properties;
 +}
 +
@@ -347,10 +387,10 @@ index 000000000..ddfb5468a
 +}  // namespace android
 diff --git a/init/floral_device_profile.h b/init/floral_device_profile.h
 new file mode 100644
-index 000000000..8297f1c69
+index 000000000..f8d69ac6a
 --- /dev/null
 +++ b/init/floral_device_profile.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,61 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -392,10 +432,16 @@ index 000000000..8297f1c69
 +    std::string build_id;
 +    std::string build_display;
 +    std::string build_description;
++    std::string build_flavor;
 +    std::string version_release;
 +    std::string security_patch;
 +    std::string kernel_release;
 +    std::string kernel_version;
++    std::string memory_type;
++    std::string memory_frequency;
++    std::string memory_channel;
++    std::string serial;
++    std::string hardware_revision;
 +};
 +
 +FloralDeviceProfile DefaultFloralDeviceProfile();
@@ -408,10 +454,10 @@ index 000000000..8297f1c69
 +}  // namespace android
 diff --git a/init/floral_device_profile_test.cpp b/init/floral_device_profile_test.cpp
 new file mode 100644
-index 000000000..832d6d8a5
+index 000000000..f8c4055d3
 --- /dev/null
 +++ b/init/floral_device_profile_test.cpp
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,199 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -455,6 +501,12 @@ index 000000000..832d6d8a5
 +security_patch=2022-02-05
 +kernel_release=5.10.66-android12-9-g123456789abc
 +kernel_version=#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022
++build_flavor=PGEM10-userdebug
++memory_type=LPDDR5X
++memory_frequency=4200MHz
++memory_channel=16-bit Quad channel
++serial=FLORALF120001
++hardware_revision=EVT1
 +)";
 +
 +TEST(floral_device_profile, ParsesCompleteProfile) {
@@ -473,6 +525,12 @@ index 000000000..832d6d8a5
 +    EXPECT_EQ(result->security_patch, "2022-02-05");
 +    EXPECT_EQ(result->kernel_release, "5.10.66-android12-9-g123456789abc");
 +    EXPECT_EQ(result->kernel_version, "#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022");
++    EXPECT_EQ(result->build_flavor, "PGEM10-userdebug");
++    EXPECT_EQ(result->memory_type, "LPDDR5X");
++    EXPECT_EQ(result->memory_frequency, "4200MHz");
++    EXPECT_EQ(result->memory_channel, "16-bit Quad channel");
++    EXPECT_EQ(result->serial, "FLORALF120001");
++    EXPECT_EQ(result->hardware_revision, "EVT1");
 +}
 +
 +TEST(floral_device_profile, RejectsPartialProfile) {
@@ -558,6 +616,15 @@ index 000000000..832d6d8a5
 +    EXPECT_EQ(properties.at("ro.boot.floral_kernel_release"), "5.10.66-android12-9-g123456789abc");
 +    EXPECT_EQ(properties.at("ro.boot.floral_kernel_version"),
 +              "#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022");
++    EXPECT_EQ(properties.at("ro.build.flavor"), "PGEM10-userdebug");
++    EXPECT_EQ(properties.at("ro.build.product"), "PGEM10");
++    EXPECT_EQ(properties.at("ro.boot.floral_memory_type"), "LPDDR5X");
++    EXPECT_EQ(properties.at("ro.boot.floral_memory_frequency"), "4200MHz");
++    EXPECT_EQ(properties.at("ro.boot.floral_memory_channel"), "16-bit Quad channel");
++    EXPECT_EQ(properties.at("ro.serialno"), "FLORALF120001");
++    EXPECT_EQ(properties.at("ro.boot.serialno"), "FLORALF120001");
++    EXPECT_EQ(properties.at("ro.hardware.revision"), "EVT1");
++    EXPECT_EQ(properties.at("ro.boot.hardware.revision"), "EVT1");
 +}
 +
 +TEST(floral_device_profile, MapsDefaultIdentityToAndroidProperties) {
@@ -576,6 +643,15 @@ index 000000000..832d6d8a5
 +    EXPECT_EQ(properties.find("ro.build.version.security_patch"), properties.end());
 +    EXPECT_EQ(properties.find("ro.boot.floral_kernel_release"), properties.end());
 +    EXPECT_EQ(properties.find("ro.boot.floral_kernel_version"), properties.end());
++    EXPECT_EQ(properties.at("ro.build.flavor"), "floral_f12-userdebug");
++    EXPECT_EQ(properties.at("ro.build.product"), "floral_f12");
++    EXPECT_EQ(properties.find("ro.boot.floral_memory_type"), properties.end());
++    EXPECT_EQ(properties.find("ro.boot.floral_memory_frequency"), properties.end());
++    EXPECT_EQ(properties.find("ro.boot.floral_memory_channel"), properties.end());
++    EXPECT_EQ(properties.find("ro.serialno"), properties.end());
++    EXPECT_EQ(properties.find("ro.boot.serialno"), properties.end());
++    EXPECT_EQ(properties.find("ro.hardware.revision"), properties.end());
++    EXPECT_EQ(properties.find("ro.boot.hardware.revision"), properties.end());
 +}
 +
 +}  // namespace
@@ -929,7 +1005,7 @@ index 000000000..4ba25cc65
 +}  // namespace init
 +}  // namespace android
 diff --git a/init/property_service.cpp b/init/property_service.cpp
-index 55e89c647..7e203c52d 100755
+index 55e89c647..0728c49a6 100755
 --- a/init/property_service.cpp
 +++ b/init/property_service.cpp
 @@ -64,6 +64,8 @@
@@ -950,7 +1026,26 @@ index 55e89c647..7e203c52d 100755
  
  static bool persistent_properties_loaded = false;
  
-@@ -1089,6 +1093,44 @@ void PropertyLoadBootDefaults() {
+@@ -172,7 +176,8 @@ static bool CheckMacPerms(const std::string& name, const char* target_context,
+     return has_access;
+ }
+ 
+-static uint32_t PropertySet(const std::string& name, const std::string& value, std::string* error) {
++static uint32_t PropertySet(const std::string& name, const std::string& value, std::string* error,
++                            bool allow_read_only_override = false) {
+     size_t valuelen = value.size();
+ 
+     if (!IsLegalPropertyName(name)) {
+@@ -188,7 +193,7 @@ static uint32_t PropertySet(const std::string& name, const std::string& value, s
+     prop_info* pi = (prop_info*) __system_property_find(name.c_str());
+     if (pi != nullptr) {
+         // ro.* properties are actually "write-once".
+-        if (StartsWith(name, "ro.")) {
++        if (StartsWith(name, "ro.") && !allow_read_only_override) {
+             *error = "Read-only property was already set";
+             return PROP_ERROR_READ_ONLY_PROPERTY;
+         }
+@@ -1089,9 +1094,54 @@ void PropertyLoadBootDefaults() {
          load_properties_from_file(kDebugRamdiskProp, nullptr, &properties);
      }
  
@@ -969,8 +1064,10 @@ index 55e89c647..7e203c52d 100755
 +    } else {
 +        PLOG(WARNING) << "Cannot inspect Floral device profile; using defaults";
 +    }
-+    for (auto&& [name, value] : FloralDeviceProfileProperties(floral_profile)) {
-+        properties.insert_or_assign(std::move(name), std::move(value));
++    std::map<std::string, std::string> floral_properties =
++            FloralDeviceProfileProperties(floral_profile);
++    for (const auto& [name, value] : floral_properties) {
++        properties.insert_or_assign(name, value);
 +    }
 +
 +    FloralNativeBridgeConfig nativebridge_config = DefaultFloralNativeBridgeConfig();
@@ -988,13 +1085,22 @@ index 55e89c647..7e203c52d 100755
 +    } else {
 +        PLOG(WARNING) << "Cannot inspect Floral NativeBridge configuration; using defaults";
 +    }
-+    for (auto&& [name, value] : FloralNativeBridgeConfigProperties(nativebridge_config, properties)) {
++    for (auto&& [name, value] :
++         FloralNativeBridgeConfigProperties(nativebridge_config, properties)) {
++        floral_properties.insert_or_assign(name, value);
 +        properties.insert_or_assign(std::move(name), std::move(value));
 +    }
 +
      for (const auto& [name, value] : properties) {
          std::string error;
-         if (PropertySet(name, value, &error) != PROP_SUCCESS) {
+-        if (PropertySet(name, value, &error) != PROP_SUCCESS) {
++        // The trusted, validated profile must supersede inherited kernel identity.
++        const bool allow_read_only_override =
++                floral_properties.find(name) != floral_properties.end();
++        if (PropertySet(name, value, &error, allow_read_only_override) != PROP_SUCCESS) {
+             LOG(ERROR) << "Could not set '" << name << "' to '" << value
+                        << "' while loading .prop files" << error;
+         }
 -- 
 2.47.3
 
