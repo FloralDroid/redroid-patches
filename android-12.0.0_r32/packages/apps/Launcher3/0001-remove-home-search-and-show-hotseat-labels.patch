@@ -1,0 +1,73 @@
+From a83c12c9e3a6d2f3314b9a31f4b9f8b5c1d4e7f2 Mon Sep 17 00:00:00 2001
+From: FloralDroid <contact@home56.top>
+Date: Tue, 18 Aug 2026 00:00:00 +0800
+Subject: [PATCH] Launcher3: remove home search and show hotseat labels
+
+Disable the first-screen QSB and reserve enough space for labels in the
+horizontal bottom hotseat. Vertical hotseats retain their existing compact
+icon-only layout.
+---
+ src/com/android/launcher3/CellLayout.java          | 5 +++--
+ src/com/android/launcher3/DeviceProfile.java       | 8 +++++---
+ src/com/android/launcher3/config/FeatureFlags.java | 2 +-
+ 3 files changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/src/com/android/launcher3/CellLayout.java b/src/com/android/launcher3/CellLayout.java
+index a6adfc4..e848ce1 100644
+--- a/src/com/android/launcher3/CellLayout.java
++++ b/src/com/android/launcher3/CellLayout.java
+@@ -681,10 +681,11 @@ public class CellLayout extends ViewGroup {
+             boolean markCells) {
+         final LayoutParams lp = params;
+ 
+-        // Hotseat icons - remove text
++        // Keep labels visible in the horizontal bottom hotseat.
+         if (child instanceof BubbleTextView) {
+             BubbleTextView bubbleChild = (BubbleTextView) child;
+-            bubbleChild.setTextVisibility(mContainerType != HOTSEAT);
++            bubbleChild.setTextVisibility(mContainerType != HOTSEAT
++                    || !mActivity.getDeviceProfile().isVerticalBarLayout());
+         }
+ 
+         child.setScaleX(mChildScale);
+diff --git a/src/com/android/launcher3/DeviceProfile.java b/src/com/android/launcher3/DeviceProfile.java
+index 81eda10..df3705d 100644
+--- a/src/com/android/launcher3/DeviceProfile.java
++++ b/src/com/android/launcher3/DeviceProfile.java
+@@ -423,6 +423,10 @@ public class DeviceProfile {
+     private void updateHotseatIconSize(int hotseatIconSizePx) {
+         // Ensure there is enough space for folder icons, which have a slightly larger radius.
+         hotseatCellHeightPx = (int) Math.ceil(hotseatIconSizePx * ICON_OVERLAP_FACTOR);
++        if (!isVerticalBarLayout()) {
++            hotseatCellHeightPx += iconDrawablePaddingPx
++                    + Utilities.calculateTextHeight(iconTextSizePx);
++        }
+         if (isVerticalBarLayout()) {
+             hotseatBarSizePx = hotseatIconSizePx + hotseatBarSidePaddingStartPx
+                     + hotseatBarSidePaddingEndPx;
+@@ -884,9 +888,7 @@ public class DeviceProfile {
+             case CellLayout.FOLDER:
+                 return folderCellHeightPx;
+             case CellLayout.HOTSEAT:
+-                // The hotseat is the only container where the cell height is going to be
+-                // different from the content within that cell.
+-                return iconSizePx;
++                return hotseatCellHeightPx;
+             default:
+                 // ??
+                 return 0;
+diff --git a/src/com/android/launcher3/config/FeatureFlags.java b/src/com/android/launcher3/config/FeatureFlags.java
+index e0769db..0ba9dfa 100644
+--- a/src/com/android/launcher3/config/FeatureFlags.java
++++ b/src/com/android/launcher3/config/FeatureFlags.java
+@@ -52,7 +52,7 @@ public final class FeatureFlags {
+      * Enable moving the QSB on the 0th screen of the workspace. This is not a configuration feature
+      * and should be modified at a project level.
+      */
+-    public static final boolean QSB_ON_FIRST_SCREEN = true;
++    public static final boolean QSB_ON_FIRST_SCREEN = false;
+ 
+     /**
+      * Feature flag to handle define config changes dynamically instead of killing the process.
+--
+2.34.1
