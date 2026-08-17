@@ -1,0 +1,64 @@
+From 42c0e737aa1367c4645403933ee0a2626260640d Mon Sep 17 00:00:00 2001
+From: FloralDroid <contact@home56.top>
+Date: Tue, 18 Aug 2026 00:00:00 +0800
+Subject: [PATCH] init: virtualize Android userspace reboot
+
+Translate reboot requests from the Android UI into a zygote restart without
+rebooting the container kernel or terminating init. On dual-zygote systems,
+restart the secondary zygote and use its existing onrestart action to restart
+the primary zygote and system_server.
+
+Keep shutdown and special reboot targets ignored so container lifecycle
+remains controlled by the host.
+---
+ init/init.cpp | 28 +++++++++++++++++++++++++++-
+ 1 file changed, 27 insertions(+), 1 deletion(-)
+
+diff --git a/init/init.cpp b/init/init.cpp
+index b82c589c2..79ec9f2fc 100755
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -252,6 +252,25 @@ static class ShutdownState {
+     bool do_shutdown_ = false;
+ } shutdown_state;
+ 
++static bool IsContainerUserspaceRebootCommand(const std::string& command) {
++    return command == "reboot" || command == "reboot," || command == "reboot,userspace";
++}
++
++static void RestartContainerUserspace() {
++    // The secondary zygote restarts the primary zygote through its existing onrestart action.
++    Service* zygote = ServiceList::GetInstance().FindService("zygote_secondary");
++    if (zygote == nullptr || !zygote->IsRunning()) {
++        zygote = ServiceList::GetInstance().FindService("zygote");
++    }
++    if (zygote == nullptr) {
++        LOG(ERROR) << "Cannot perform container userspace reboot: zygote service is unavailable";
++        return;
++    }
++
++    LOG(INFO) << "Restarting Android userspace through " << zygote->name();
++    zygote->Restart();
++}
++
+ static void UnwindMainThreadStack() {
+     std::unique_ptr<Backtrace> backtrace(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, 1));
+     if (!backtrace->Unwind(0)) {
+@@ -907,7 +926,14 @@ int SecondStageMain(int argc, char** argv) {
+         auto shutdown_command = shutdown_state.CheckShutdown();
+         if (shutdown_command) {
+             LOG(INFO) << "Got shutdown_command '" << *shutdown_command
+-                      << "' Calling HandlePowerctlMessage()";
++                      << "' from sys.powerctl";
++            if (IsContainerUserspaceRebootCommand(*shutdown_command)) {
++                // Do not leave a stale value that would prevent a later reboot request.
++                SetProperty("sys.powerctl", "");
++                RestartContainerUserspace();
++            } else {
++                LOG(INFO) << "Ignoring powerctl command in container: " << *shutdown_command;
++            }
+             shutdown_state.set_do_shutdown(false);
+         }
+ 
+--
+2.34.1
