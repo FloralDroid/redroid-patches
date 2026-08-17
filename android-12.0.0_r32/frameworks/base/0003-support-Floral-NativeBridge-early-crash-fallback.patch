@@ -1,13 +1,13 @@
 From 837c821f2fae5eff7e2641bd944389a9dd9aca46 Mon Sep 17 00:00:00 2001
-From: FloralDroid <opensource@floraldroid.dev>
+From: 5656565566 <contact@home56.top>
 Date: Wed, 12 Aug 2026 23:57:14 +0800
-Subject: [PATCH] =?UTF-8?q?frameworks:=20=E6=94=AF=E6=8C=81=20NativeBridge?=
- =?UTF-8?q?=20=E6=97=A9=E6=9C=9F=E5=B4=A9=E6=BA=83=E5=9B=9E=E9=80=80?=
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+Subject: [PATCH] frameworks: support NativeBridge early crash fallback
 
-在系统内部维护每进程的自动候选状态。ARM 转译进程启动后六十秒内发生 native crash 时切换尚未失败的候选，并恢复原任务。显式后端、非 native crash 与窗口外崩溃保持原行为。
+Maintain automatic candidate state per process within the system. If a native
+crash occurs within sixty seconds of starting an ARM translation process,
+switch to a candidate that has not failed and restore the original task.
+Preserve existing behavior for explicit backends, non-native crashes, and
+crashes outside the recovery window.
 
 Change-Id: Id5ba7ddfae243c2266fcfcfff9a263d7dd937c54
 ---

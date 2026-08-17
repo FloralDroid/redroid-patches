@@ -1,5 +1,5 @@
 From 9d9dea0bd60c0f550ea18e9b47d82a5dfe0565a0 Mon Sep 17 00:00:00 2001
-From: FloralDroid <opensource@floraldroid.dev>
+From: 5656565566 <contact@home56.top>
 Date: Mon, 17 Aug 2026 11:11:29 +0800
 Subject: [PATCH] sepolicy: allow Floral LXCFS sysfs identity views
 
@@ -137,4 +137,3 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /devices/virtual/block/loop       u:object_r:sysfs_loop:s0
 -- 
 2.47.3
-

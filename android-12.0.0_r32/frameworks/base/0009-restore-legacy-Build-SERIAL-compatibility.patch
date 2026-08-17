@@ -1,5 +1,5 @@
 From 924d5aa597946abd7d3bcedb45cc9ea9b5923802 Mon Sep 17 00:00:00 2001
-From: FloralDroid <contact@home56.top>
+From: 5656565566 <contact@home56.top>
 Date: Mon, 17 Aug 2026 11:38:02 +0800
 Subject: [PATCH] frameworks/base: restore legacy Build.SERIAL compatibility
 
@@ -41,4 +41,3 @@ index fc4bb1a00da5..925d194e44b0 100644
              Debug.changeDebugPort(8100);
 -- 
 2.47.3
-
