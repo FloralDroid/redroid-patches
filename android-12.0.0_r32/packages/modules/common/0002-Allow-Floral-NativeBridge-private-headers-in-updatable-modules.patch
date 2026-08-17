@@ -4,8 +4,8 @@ Date: Sun, 16 Aug 2026 22:49:12 +0800
 Subject: [PATCH] Allow Floral NativeBridge private headers in updatable modules
 
 The ART mainline module consumes the internal Floral NativeBridge header
-library used by compatibility loader routing. Add the header library to the
-Android 12 APEX dependency allowlist.
+library used to opt hybrid processes into mixed-ABI routing. Add the header
+library to the Android 12 APEX dependency allowlist.
 
 ---
  build/allowed_deps.txt | 1 +
@@ -25,4 +25,3 @@ index ad589700a3d1..15faa899757a 100644
  libnativehelper_header_only(minSdkVersion:29)
 -- 
 2.47.3
-

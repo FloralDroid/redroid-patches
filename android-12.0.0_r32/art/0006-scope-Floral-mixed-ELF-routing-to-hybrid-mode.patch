@@ -1,0 +1,375 @@
+From 37e718beccec25e53e91d45ce87fab77a00969f6 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Mon, 17 Aug 2026 22:57:55 +0800
+Subject: [PATCH] art: scope Floral mixed ELF routing to hybrid mode
+
+Keep NativeLoader's mixed host and guest namespaces exclusive to hybrid mode. For direct mode, select the backend through the aggregate router before pre-initialization, then bind ART's active handle and callback table to the selected backend DSO.
+
+This preserves zygote backend preloading while making direct initialization, namespaces, library loading, trampolines, and error reporting follow the standalone backend path.
+
+Change-Id: I8663d02e58c74abfec3a8e22fe730a7467360be0
+---
+ libnativebridge/Android.bp                    | 22 +++++
+ .../nativebridge/native_bridge_private.h      | 21 +++++
+ libnativebridge/libnativebridge.map.txt       |  1 +
+ libnativebridge/native_bridge.cc              | 90 +++++++++++++++++--
+ libnativebridge/native_bridge_lazy.cc         |  6 ++
+ libnativeloader/Android.bp                    |  1 +
+ libnativeloader/native_loader_namespace.cpp   |  7 +-
+ libnativeloader/native_loader_test.h          |  6 ++
+ 8 files changed, 146 insertions(+), 8 deletions(-)
+ create mode 100644 libnativebridge/include-private/nativebridge/native_bridge_private.h
+
+diff --git a/libnativebridge/Android.bp b/libnativebridge/Android.bp
+index 64dd0e2..1972c58 100644
+--- a/libnativebridge/Android.bp
++++ b/libnativebridge/Android.bp
+@@ -40,6 +40,26 @@ cc_library_headers {
+     min_sdk_version: "S",
+ }
+ 
++cc_library_headers {
++    name: "libnativebridge-private-headers",
++
++    visibility: [
++        "//art/libnativebridge",
++        "//art/libnativeloader",
++    ],
++
++    host_supported: true,
++    export_include_dirs: ["include-private"],
++
++    apex_available: [
++        "//apex_available:platform",
++        "com.android.art",
++        "com.android.art.debug",
++        "com.android.media",
++    ],
++    min_sdk_version: "S",
++}
++
+ art_cc_library {
+     name: "libnativebridge",
+     defaults: ["libnativebridge-defaults"],
+@@ -57,6 +77,7 @@ art_cc_library {
+     srcs: ["native_bridge.cc"],
+     header_libs: [
+         "libbase_headers",
++        "libnativebridge-private-headers",
+     ],
+     shared_libs: [
+         "liblog",
+@@ -97,6 +118,7 @@ cc_library {
+ 
+     host_supported: false,
+     srcs: ["native_bridge_lazy.cc"],
++    header_libs: ["libnativebridge-private-headers"],
+     runtime_libs: ["libnativebridge"],
+     shared_libs: ["liblog"],
+ }
+diff --git a/libnativebridge/include-private/nativebridge/native_bridge_private.h b/libnativebridge/include-private/nativebridge/native_bridge_private.h
+new file mode 100644
+index 0000000..cf63c8f
+--- /dev/null
++++ b/libnativebridge/include-private/nativebridge/native_bridge_private.h
+@@ -0,0 +1,21 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#ifndef ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
++#define ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
++
++namespace android {
++extern "C" {
++
++// Returns true only when the selected per-process NativeBridge requests
++// Floral's mixed-ABI namespace enhancement. This is internal to ART.
++bool NativeBridgeUseHybridLoader();
++
++}  // extern "C"
++}  // namespace android
++
++#endif  // ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
+diff --git a/libnativebridge/libnativebridge.map.txt b/libnativebridge/libnativebridge.map.txt
+index 5ac4b3d..cd28465 100644
+--- a/libnativebridge/libnativebridge.map.txt
++++ b/libnativebridge/libnativebridge.map.txt
+@@ -27,6 +27,7 @@ LIBNATIVEBRIDGE_1 {
+     NativeBridgeAvailable;
+     NeedsNativeBridge;
+     SetFloralNativeBridgeProcessContext;
++    NativeBridgeUseHybridLoader;
+   local:
+     *;
+ };
+diff --git a/libnativebridge/native_bridge.cc b/libnativebridge/native_bridge.cc
+index 0d99711..01b9363 100644
+--- a/libnativebridge/native_bridge.cc
++++ b/libnativebridge/native_bridge.cc
+@@ -17,6 +17,7 @@
+ #define LOG_TAG "nativebridge"
+ 
+ #include "nativebridge/native_bridge.h"
++#include "nativebridge/native_bridge_private.h"
+ 
+ #include <dlfcn.h>
+ #include <errno.h>
+@@ -138,6 +139,11 @@ static bool had_error = false;
+ 
+ // Handle of the loaded library.
+ static void* native_bridge_handle = nullptr;
++// Direct mode keeps the aggregate router resident while ART owns the selected
++// backend callbacks. This preserves zygote-preloaded backend references without
++// routing application callbacks through libmixbridge.
++static void* floral_router_handle = nullptr;
++static bool floral_direct_backend_bound = false;
+ // Pointer to the callbacks. Available as soon as LoadNativeBridge succeeds, but only initialized
+ // later.
+ static const NativeBridgeCallbacks* callbacks = nullptr;
+@@ -205,21 +211,25 @@ bool NativeBridgeNameAcceptable(const char* nb_library_filename) {
+ 
+ // The policy of invoking Nativebridge changed in v3 with/without namespace.
+ // Suggest Nativebridge implementation not maintain backward-compatible.
+-static bool isCompatibleWith(const uint32_t version) {
++static bool isCompatibleWithCallbacks(const NativeBridgeCallbacks* cbs, const uint32_t version) {
+   // Libnativebridge is now designed to be forward-compatible. So only "0" is an unsupported
+   // version.
+-  if (callbacks == nullptr || callbacks->version == 0 || version == 0) {
++  if (cbs == nullptr || cbs->version == 0 || version == 0) {
+     return false;
+   }
+ 
+   // If this is a v2+ bridge, it may not be forwards- or backwards-compatible. Check.
+-  if (callbacks->version >= SIGNAL_VERSION) {
+-    return callbacks->isCompatibleWith(version);
++  if (cbs->version >= SIGNAL_VERSION) {
++    return cbs->isCompatibleWith(version);
+   }
+ 
+   return true;
+ }
+ 
++static bool isCompatibleWith(const uint32_t version) {
++  return isCompatibleWithCallbacks(callbacks, version);
++}
++
+ static void CloseNativeBridge(bool with_error) {
+   state = NativeBridgeState::kClosed;
+   had_error |= with_error;
+@@ -383,8 +393,52 @@ bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
+   return true;
+ }
+ 
++static bool BindFloralDirectBackend(void* router_handle) {
++  using PrepareDirectBackendFn = const char* (*)();
++  auto prepare_direct_backend = reinterpret_cast<PrepareDirectBackendFn>(
++      dlsym(router_handle, "FloralNativeBridgePrepareDirectBackend"));
++  if (prepare_direct_backend == nullptr) {
++    return false;
++  }
++
++  const char* backend_path = prepare_direct_backend();
++  if (backend_path == nullptr || backend_path[0] == '\0') {
++    return false;
++  }
++
++  void* backend_handle = OpenSystemLibrary(backend_path, RTLD_LAZY);
++  if (backend_handle == nullptr) {
++    ALOGE("Failed to bind Floral direct NativeBridge backend %s: %s", backend_path, dlerror());
++    return false;
++  }
++  if (backend_handle == router_handle) {
++    ALOGE("Floral direct NativeBridge backend resolved to the aggregate router: %s",
++          backend_path);
++    dlclose(backend_handle);
++    return false;
++  }
++
++  auto direct_callbacks = reinterpret_cast<const NativeBridgeCallbacks*>(
++      dlsym(backend_handle, kNativeBridgeInterfaceSymbol));
++  if (!isCompatibleWithCallbacks(direct_callbacks, NAMESPACE_VERSION)) {
++    ALOGE("Floral direct NativeBridge backend %s has an incompatible interface", backend_path);
++    dlclose(backend_handle);
++    return false;
++  }
++
++  floral_router_handle = router_handle;
++  native_bridge_handle = backend_handle;
++  callbacks = direct_callbacks;
++  floral_direct_backend_bound = true;
++  ALOGI("Bound Floral direct NativeBridge backend %s (interface v%u)",
++        backend_path,
++        direct_callbacks->version);
++  return true;
++}
++
+ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* app_data_dir) {
+-  if (state != NativeBridgeState::kOpened || native_bridge_handle == nullptr) {
++  if (state != NativeBridgeState::kOpened || native_bridge_handle == nullptr ||
++      floral_direct_backend_bound) {
+     return;
+   }
+ 
+@@ -393,9 +447,27 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
+       dlsym(native_bridge_handle, "FloralNativeBridgeSetProcessContext"));
+   if (set_process_context != nullptr) {
+     set_process_context(process_name, app_data_dir);
++    BindFloralDirectBackend(native_bridge_handle);
+   }
+ }
+ 
++bool NativeBridgeUseHybridLoader() {
++  if ((state != NativeBridgeState::kOpened &&
++       state != NativeBridgeState::kPreInitialized &&
++       state != NativeBridgeState::kInitialized) ||
++      native_bridge_handle == nullptr) {
++    return false;
++  }
++  if (floral_direct_backend_bound) {
++    return false;
++  }
++
++  using HybridLoaderFn = bool (*)();
++  auto use_hybrid_loader = reinterpret_cast<HybridLoaderFn>(
++      dlsym(native_bridge_handle, "FloralNativeBridgeUseHybridLoader"));
++  return use_hybrid_loader != nullptr && use_hybrid_loader();
++}
++
+ void PreZygoteForkNativeBridge() {
+   if (NativeBridgeInitialized()) {
+     if (isCompatibleWith(PRE_ZYGOTE_FORK_VERSION)) {
+@@ -523,6 +595,10 @@ bool InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {
+       } else {
+         // Unload the library.
+         dlclose(native_bridge_handle);
++        if (floral_router_handle != nullptr) {
++          dlclose(floral_router_handle);
++          floral_router_handle = nullptr;
++        }
+         CloseNativeBridge(true);
+       }
+     }
+@@ -543,6 +619,10 @@ void UnloadNativeBridge() {
+     case NativeBridgeState::kInitialized:
+       // Unload.
+       dlclose(native_bridge_handle);
++      if (floral_router_handle != nullptr) {
++        dlclose(floral_router_handle);
++        floral_router_handle = nullptr;
++      }
+       CloseNativeBridge(false);
+       break;
+ 
+diff --git a/libnativebridge/native_bridge_lazy.cc b/libnativebridge/native_bridge_lazy.cc
+index 2927623..c531890 100644
+--- a/libnativebridge/native_bridge_lazy.cc
++++ b/libnativebridge/native_bridge_lazy.cc
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "nativebridge/native_bridge.h"
++#include "nativebridge/native_bridge_private.h"
+ #define LOG_TAG "nativebridge"
+ 
+ #include <dlfcn.h>
+@@ -59,6 +60,11 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
+   f(process_name, app_data_dir);
+ }
+ 
++bool NativeBridgeUseHybridLoader() {
++  static auto f = GET_FUNC_PTR(NativeBridgeUseHybridLoader);
++  return f();
++}
++
+ bool NativeBridgeAvailable() {
+   static auto f = GET_FUNC_PTR(NativeBridgeAvailable);
+   return f();
+diff --git a/libnativeloader/Android.bp b/libnativeloader/Android.bp
+index 3f13506..92e18d2 100644
+--- a/libnativeloader/Android.bp
++++ b/libnativeloader/Android.bp
+@@ -34,6 +34,7 @@ art_cc_library {
+     ],
+     header_libs: [
+         "libnativehelper_header_only",
++        "libnativebridge-private-headers",
+     ],
+     shared_libs: [
+         "liblog",
+diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
+index a295929..20daa7f 100644
+--- a/libnativeloader/native_loader_namespace.cpp
++++ b/libnativeloader/native_loader_namespace.cpp
+@@ -34,6 +34,7 @@
+ #include <android-base/strings.h>
+ #include <log/log.h>
+ #include <nativebridge/native_bridge.h>
++#include <nativebridge/native_bridge_private.h>
+ 
+ #include "nativeloader/dlext_namespaces.h"
+ 
+@@ -128,7 +129,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetExportedNamespace(const
+   } else {
+     auto bridged_raw = NativeBridgeGetExportedNamespace(name.c_str());
+     if (bridged_raw != nullptr) {
+-      if (HybridElfRoutingEnabled()) {
++      if (HybridElfRoutingEnabled() && NativeBridgeUseHybridLoader()) {
+         auto native_raw = android_get_exported_namespace(name.c_str());
+         return NativeLoaderNamespace(name, native_raw, bridged_raw);
+       }
+@@ -152,7 +153,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+   if (!is_bridged) {
+     return NativeLoaderNamespace(kDefaultNamespaceName, static_cast<android_namespace_t*>(nullptr));
+   } else {
+-    if (HybridElfRoutingEnabled()) {
++    if (HybridElfRoutingEnabled() && NativeBridgeUseHybridLoader()) {
+       return NativeLoaderNamespace(kDefaultNamespaceName,
+                                    static_cast<android_namespace_t*>(nullptr),
+                                    static_cast<native_bridge_namespace_t*>(nullptr));
+@@ -207,7 +208,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+     }
+   } else {
+     android_namespace_t* native_raw = nullptr;
+-    if (HybridElfRoutingEnabled()) {
++    if (HybridElfRoutingEnabled() && NativeBridgeUseHybridLoader()) {
+       const std::string native_name = name + "-native";
+       native_raw = android_create_namespace(
+           native_name.c_str(), nullptr, search_paths.c_str(), type, permitted_paths.c_str(),
+diff --git a/libnativeloader/native_loader_test.h b/libnativeloader/native_loader_test.h
+index 09c56e5..5d74ac9 100644
+--- a/libnativeloader/native_loader_test.h
++++ b/libnativeloader/native_loader_test.h
+@@ -56,6 +56,7 @@ class Platform {
+ 
+   // libnativebridge APIs for which libdl_android has no corresponding APIs
+   virtual bool NativeBridgeInitialized() = 0;
++  virtual bool NativeBridgeUseHybridLoader() = 0;
+   virtual const char* NativeBridgeGetError() = 0;
+   virtual bool NativeBridgeIsPathSupported(const char*) = 0;
+   virtual bool NativeBridgeIsSupported(const char*) = 0;
+@@ -122,6 +123,7 @@ class MockPlatform : public Platform {
+ 
+   // Mocking libnativebridge APIs
+   MOCK_METHOD0(NativeBridgeInitialized, bool());
++  MOCK_METHOD0(NativeBridgeUseHybridLoader, bool());
+   MOCK_METHOD0(NativeBridgeGetError, const char*());
+   MOCK_METHOD1(NativeBridgeIsPathSupported, bool(const char*));
+   MOCK_METHOD1(NativeBridgeIsSupported, bool(const char*));
+@@ -200,6 +202,10 @@ bool NativeBridgeInitialized() {
+   return mock->NativeBridgeInitialized();
+ }
+ 
++bool NativeBridgeUseHybridLoader() {
++  return mock->NativeBridgeUseHybridLoader();
++}
++
+ bool NativeBridgeInitAnonymousNamespace(const char* public_ns_sonames,
+                                         const char* anon_ns_library_path) {
+   return mock->mock_init_anonymous_namespace(true, public_ns_sonames, anon_ns_library_path);
+-- 
+2.47.3
+

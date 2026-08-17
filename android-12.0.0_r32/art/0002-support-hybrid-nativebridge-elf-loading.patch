@@ -1,17 +1,21 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: FloralDroid <opensource@floraldroid.dev>
+From fb7dc6d25408e28add8d3fea79a3665e6a262ccd Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
 Date: Wed, 12 Aug 2026 02:35:00 +0800
-Subject: [PATCH] art: 支持 NativeBridge 混合 ELF 路由
+Subject: [PATCH] art: support hybrid NativeBridge ELF routing
 
-为桥接 classloader 同时维护宿主和转译 linker namespace。通过绝对路径
-加载动态解包库时读取 ELF e_machine，x86/x86_64 使用宿主 namespace，
-ARM/ARM64 和无法识别的路径保持原有 NativeBridge 路径。
+Keep system-owned native ELF files on the host linker. For app-private native
+files, let the selected bridge claim the path first and fall back to the host
+linker only when the bridge rejects it.
 
-加载结果携带实际卸载方式，避免宿主句柄被交给 NativeBridge 卸载。
-
+Change-Id: I2b59ad7b250261de5681f7edd680a09a3989dbd5
 ---
+ libnativeloader/native_loader.cpp           |  10 +-
+ libnativeloader/native_loader_namespace.cpp | 145 ++++++++++++++++++--
+ libnativeloader/native_loader_namespace.h   |  31 +++--
+ 3 files changed, 167 insertions(+), 19 deletions(-)
+
 diff --git a/libnativeloader/native_loader.cpp b/libnativeloader/native_loader.cpp
-index 2deb5ef3d06d5e84c3ebe9399f7097c0d893fb05..c53df8f7f4847e6efb37bef2b7603c3eda788587 100644
+index 2deb5ef..c53df8f 100644
 --- a/libnativeloader/native_loader.cpp
 +++ b/libnativeloader/native_loader.cpp
 @@ -133,7 +133,11 @@ Result<void*> TryLoadNativeloaderExtraLib(const char* path) {
@@ -40,7 +44,7 @@ index 2deb5ef3d06d5e84c3ebe9399f7097c0d893fb05..c53df8f7f4847e6efb37bef2b7603c3e
  
  // native_bridge_namespaces are not supported for callers of this function.
 diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
-index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2c16fb5ad 100644
+index 669fa74..a295929 100644
 --- a/libnativeloader/native_loader_namespace.cpp
 +++ b/libnativeloader/native_loader_namespace.cpp
 @@ -21,9 +21,16 @@
@@ -60,7 +64,7 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
  #include <android-base/strings.h>
  #include <log/log.h>
  #include <nativebridge/native_bridge.h>
-@@ -38,6 +45,52 @@ namespace {
+@@ -38,6 +45,68 @@ namespace {
  
  constexpr const char* kDefaultNamespaceName = "default";
  constexpr const char* kSystemNamespaceName = "system";
@@ -110,10 +114,26 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
 +  }
 +  return ElfTarget::kUnknown;
 +}
++
++bool IsSystemLibraryPath(const char* path) {
++  if (path == nullptr || path[0] != '/') {
++    return false;
++  }
++  constexpr const char* kSystemPrefixes[] = {
++      "/system/", "/system_ext/", "/product/", "/vendor/",
++      "/odm/",    "/apex/",
++  };
++  for (const char* prefix : kSystemPrefixes) {
++    if (strncmp(path, prefix, strlen(prefix)) == 0) {
++      return true;
++    }
++  }
++  return false;
++}
  
  std::string GetLinkerError(bool is_bridged) {
    const char* msg = is_bridged ? NativeBridgeGetError() : dlerror();
-@@ -57,9 +110,13 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetExportedNamespace(const
+@@ -57,9 +126,13 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetExportedNamespace(const
        return NativeLoaderNamespace(name, raw);
      }
    } else {
@@ -130,7 +150,7 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
      }
    }
    return Errorf("namespace {} does not exist or exported", name);
-@@ -79,6 +136,11 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+@@ -79,6 +152,11 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
    if (!is_bridged) {
      return NativeLoaderNamespace(kDefaultNamespaceName, static_cast<android_namespace_t*>(nullptr));
    } else {
@@ -142,7 +162,7 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
      return NativeLoaderNamespace(kDefaultNamespaceName,
                                   static_cast<native_bridge_namespace_t*>(nullptr));
    }
-@@ -128,10 +190,24 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+@@ -128,10 +206,24 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
        return NativeLoaderNamespace(name, raw);
      }
    } else {
@@ -167,7 +187,7 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
        return NativeLoaderNamespace(name, raw);
      }
    }
-@@ -150,6 +226,14 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
+@@ -150,6 +242,14 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
        return {};
      }
    } else {
@@ -182,7 +202,7 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
      if (NativeBridgeLinkNamespaces(this->ToRawNativeBridgeNamespace(),
                                     target == nullptr ? nullptr : target->ToRawNativeBridgeNamespace(),
                                     shared_libs.c_str())) {
-@@ -159,20 +243,30 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
+@@ -159,20 +259,49 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
    return Error() << GetLinkerError(IsBridged());
  }
  
@@ -198,7 +218,15 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
 +      return LoadResult{handle, false};
      }
    } else {
-+    if (IsHybrid() && ReadElfTarget(lib_name) == ElfTarget::kNative) {
+-    void* handle =
+-        NativeBridgeLoadLibraryExt(lib_name, RTLD_NOW, this->ToRawNativeBridgeNamespace());
++    const ElfTarget target = ReadElfTarget(lib_name);
++    const bool native_elf = target == ElfTarget::kNative;
++    const bool system_library = IsSystemLibraryPath(lib_name);
++
++    // System x86 libraries keep host ownership. App-private native ELFs try
++    // the selected bridge first so Houdini can handle protected x86 names.
++    if (IsHybrid() && native_elf && system_library) {
 +      android_dlextinfo extinfo;
 +      extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
 +      extinfo.library_namespace = this->ToRawAndroidNamespace();
@@ -208,16 +236,29 @@ index 669fa74dc2ba01c15d36db2292b23b43bf0e7020..fd1138b4d85f0bcbf44db0568129e7b2
 +      }
 +      return Error() << GetLinkerError(false);
 +    }
-     void* handle =
-         NativeBridgeLoadLibraryExt(lib_name, RTLD_NOW, this->ToRawNativeBridgeNamespace());
++    void* handle = NativeBridgeLoadLibraryExt(
++        lib_name, RTLD_NOW, this->ToRawNativeBridgeNamespace());
      if (handle != nullptr) {
 -      return handle;
 +      return LoadResult{handle, true};
++    }
++
++    // A real app-private x86 ELF can still be native. Only fall back to the
++    // host linker after the selected translation backend rejects it.
++    if (IsHybrid() && native_elf && !system_library) {
++      android_dlextinfo extinfo;
++      extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
++      extinfo.library_namespace = this->ToRawAndroidNamespace();
++      handle = android_dlopen_ext(lib_name, RTLD_NOW, &extinfo);
++      if (handle != nullptr) {
++        return LoadResult{handle, false};
++      }
++      return Error() << GetLinkerError(false);
      }
    }
    return Error() << GetLinkerError(IsBridged());
 diff --git a/libnativeloader/native_loader_namespace.h b/libnativeloader/native_loader_namespace.h
-index 9a5aeac20396f49de09ac3286e3b8c5f68548160..4f6f2f6997f9638e4ff02f3cfe7176d40ce6f910 100644
+index 9a5aeac..4f6f2f6 100644
 --- a/libnativeloader/native_loader_namespace.h
 +++ b/libnativeloader/native_loader_namespace.h
 @@ -20,7 +20,6 @@
@@ -291,5 +332,4 @@ index 9a5aeac20396f49de09ac3286e3b8c5f68548160..4f6f2f6997f9638e4ff02f3cfe7176d4
  
  }  // namespace android
 -- 
-2.39.5
-
+2.47.3

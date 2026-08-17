@@ -1,13 +1,14 @@
-From 14ad227787868b1fe576fcfc76e443f36e7abbcc Mon Sep 17 00:00:00 2001
+From e3592cefe37a2bd269abe48a454723879fd3630c Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
-Date: Mon, 17 Aug 2026 01:15:46 +0800
+Date: Tue, 18 Aug 2026 01:43:24 +0800
 Subject: [PATCH] frameworks: restore NativeBridge direct loader recovery
 
 Change-Id: Ieeabec6b5da591bb5c388c9363812955ee1a515c
+
 ---
  .../java/com/android/server/am/AppErrors.java |   9 +
- .../server/am/FloralNativeBridgeManager.java  | 193 ++++++++++++++----
- 2 files changed, 164 insertions(+), 38 deletions(-)
+ .../server/am/FloralNativeBridgeManager.java  | 197 ++++++++++++++----
+ 2 files changed, 168 insertions(+), 38 deletions(-)
 
 diff --git a/services/core/java/com/android/server/am/AppErrors.java b/services/core/java/com/android/server/am/AppErrors.java
 index 7a071cc4c615..ccbc9e965aae 100644
@@ -30,7 +31,7 @@ index 7a071cc4c615..ccbc9e965aae 100644
              mPackageWatchdog.onPackageFailure(r.getPackageListWithVersionCode(),
                      PackageWatchdog.FAILURE_REASON_APP_CRASH);
 diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-index 1f1255e3456b..5a42384b6c53 100644
+index 1f1255e3456b..21c637f5b1d2 100644
 --- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 @@ -20,6 +20,7 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
@@ -215,9 +216,8 @@ index 1f1255e3456b..5a42384b6c53 100644
 +            final String candidate = json.optString(i);
 +            if (isCandidate(candidate)) {
 +                candidates.add(candidate);
-             }
-         }
--        return backends;
++            }
++        }
 +        return candidates;
 +    }
 +
@@ -233,8 +233,9 @@ index 1f1255e3456b..5a42384b6c53 100644
 +                if (isBackend(backend)) {
 +                    failed.add(candidateName(backend, MODE_HYBRID));
 +                }
-+            }
-+        }
+             }
+         }
+-        return backends;
 +        return failed;
 +    }
 +
@@ -301,29 +302,27 @@ index 1f1255e3456b..5a42384b6c53 100644
              this.candidates = new ArrayList<>(candidates);
              this.preserveTaskSurface = preserveTaskSurface;
              this.startUptime = startUptime;
-@@ -412,8 +503,8 @@ final class FloralNativeBridgeManager {
+@@ -412,8 +503,7 @@ final class FloralNativeBridgeManager {
  
          static PolicyRule automaticDefaults() {
              final ArrayList<String> candidates = new ArrayList<>();
 -            candidates.add(BACKEND_NDK);
 -            candidates.add(BACKEND_HOUDINI);
-+            addBackendCandidates(candidates, BACKEND_NDK);
-+            addBackendCandidates(candidates, BACKEND_HOUDINI);
++            addBackendCandidates(candidates, BACKEND_NDK, BACKEND_HOUDINI);
              return new PolicyRule(true, candidates, true);
          }
  
-@@ -421,8 +512,8 @@ final class FloralNativeBridgeManager {
+@@ -421,8 +511,7 @@ final class FloralNativeBridgeManager {
              final PolicyRule rule = automaticDefaults();
              if (BACKEND_HOUDINI.equals(backend)) {
                  rule.candidates.clear();
 -                rule.candidates.add(BACKEND_HOUDINI);
 -                rule.candidates.add(BACKEND_NDK);
-+                addBackendCandidates(rule.candidates, BACKEND_HOUDINI);
-+                addBackendCandidates(rule.candidates, BACKEND_NDK);
++                addBackendCandidates(rule.candidates, BACKEND_HOUDINI, BACKEND_NDK);
              }
              return rule;
          }
-@@ -459,8 +550,7 @@ final class FloralNativeBridgeManager {
+@@ -459,8 +548,7 @@ final class FloralNativeBridgeManager {
                          return preferred(preferred);
                      }
                      final PolicyRule rule = fromCandidates(array);
@@ -333,7 +332,7 @@ index 1f1255e3456b..5a42384b6c53 100644
                      return rule;
                  }
              }
-@@ -475,26 +565,53 @@ final class FloralNativeBridgeManager {
+@@ -475,26 +563,59 @@ final class FloralNativeBridgeManager {
          }
  
          private static PolicyRule fromCandidates(JSONArray array) {
@@ -355,9 +354,7 @@ index 1f1255e3456b..5a42384b6c53 100644
 +                return automaticDefaults();
 +            }
 +            final ArrayList<String> candidates = new ArrayList<>();
-+            for (String backend : backends) {
-+                addBackendCandidates(candidates, backend);
-+            }
++            addBackendCandidates(candidates, backends.toArray(new String[0]));
 +            return new PolicyRule(true, candidates, true);
          }
  
@@ -371,27 +368,33 @@ index 1f1255e3456b..5a42384b6c53 100644
              return automaticDefaults();
          }
 +
-+        private static void addBackendCandidates(ArrayList<String> candidates, String backend) {
-+            candidates.add(candidateName(backend, MODE_HYBRID));
-+            candidates.add(candidateName(backend, MODE_DIRECT));
++        private static void addBackendCandidates(ArrayList<String> candidates,
++                String... backends) {
++            // Keep the loader model stable for one complete recovery pass.
++            for (String backend : backends) {
++                candidates.add(candidateName(backend, MODE_HYBRID));
++            }
++            for (String backend : backends) {
++                candidates.add(candidateName(backend, MODE_DIRECT));
++            }
 +        }
 +
 +        private static void reorderBackendFirst(ArrayList<String> candidates, String backend) {
-+            final ArrayList<String> ordered = new ArrayList<>();
++            final ArrayList<String> backends = new ArrayList<>();
 +            for (String candidate : candidates) {
-+                if (candidate.startsWith(backend + "/")) {
-+                    ordered.add(candidate);
++                final int separator = candidate.indexOf('/');
++                if (separator > 0) {
++                    final String candidateBackend = candidate.substring(0, separator);
++                    if (!backends.contains(candidateBackend)) {
++                        backends.add(candidateBackend);
++                    }
 +                }
 +            }
-+            for (String candidate : candidates) {
-+                if (!candidate.startsWith(backend + "/")) {
-+                    ordered.add(candidate);
-+                }
++            if (backends.remove(backend)) {
++                backends.add(0, backend);
 +            }
 +            candidates.clear();
-+            candidates.addAll(ordered);
++            addBackendCandidates(candidates, backends.toArray(new String[0]));
 +        }
      }
  }
--- 
-2.47.3
