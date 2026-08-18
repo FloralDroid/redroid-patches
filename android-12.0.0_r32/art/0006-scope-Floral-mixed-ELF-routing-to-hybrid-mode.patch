@@ -118,13 +118,14 @@ index 0d99711..01b9363 100644
  
  #include <dlfcn.h>
  #include <errno.h>
-@@ -138,6 +139,11 @@ static bool had_error = false;
+@@ -138,6 +139,12 @@ static bool had_error = false;
  
  // Handle of the loaded library.
  static void* native_bridge_handle = nullptr;
-+// Direct mode keeps the aggregate router resident while ART owns the selected
-+// backend callbacks. This preserves zygote-preloaded backend references without
-+// routing application callbacks through libmixbridge.
++// Direct mode briefly uses the aggregate router to resolve the explicit
++// package rule, then releases it after ART owns the selected backend callbacks.
++// Application callbacks and namespace operations therefore cannot return to
++// libmixbridge after the direct binding point.
 +static void* floral_router_handle = nullptr;
 +static bool floral_direct_backend_bound = false;
  // Pointer to the callbacks. Available as soon as LoadNativeBridge succeeds, but only initialized
@@ -160,7 +161,7 @@ index 0d99711..01b9363 100644
  static void CloseNativeBridge(bool with_error) {
    state = NativeBridgeState::kClosed;
    had_error |= with_error;
-@@ -383,8 +393,52 @@ bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
+@@ -383,8 +393,58 @@ bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
    return true;
  }
  
@@ -201,6 +202,12 @@ index 0d99711..01b9363 100644
 +  native_bridge_handle = backend_handle;
 +  callbacks = direct_callbacks;
 +  floral_direct_backend_bound = true;
++  // The router is a selection shim only. Do not leave it mapped in a direct
++  // process where an app could observe Floral's loader or diagnostics path.
++  if (dlclose(router_handle) != 0) {
++    ALOGW("Failed to release Floral direct NativeBridge router: %s", dlerror());
++  }
++  floral_router_handle = nullptr;
 +  ALOGI("Bound Floral direct NativeBridge backend %s (interface v%u)",
 +        backend_path,
 +        direct_callbacks->version);
@@ -372,4 +379,3 @@ index 09c56e5..5d74ac9 100644
    return mock->mock_init_anonymous_namespace(true, public_ns_sonames, anon_ns_library_path);
 -- 
 2.47.3
-
