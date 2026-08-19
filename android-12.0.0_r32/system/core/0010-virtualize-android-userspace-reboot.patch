@@ -1,0 +1,74 @@
+From 9e4c8101f11e37a489fc855aa6adec31af06a924 Mon Sep 17 00:00:00 2001
+From: FloralDroid <contact@home56.top>
+Date: Tue, 18 Aug 2026 13:27:53 +0800
+Subject: [PATCH] init: virtualize Android userspace reboot
+
+Translate reboot requests from the Android UI into a zygote restart without rebooting the container kernel or terminating init. On dual-zygote systems, restart the secondary zygote and use its existing onrestart action to restart the primary zygote and system_server.
+
+Queue the standard userspace-reboot-requested action before restarting zygote so pending shutdown and boot state cannot make the replacement system_server reboot again.
+
+Keep shutdown and special reboot targets ignored so container lifecycle remains controlled by the host.
+
+Change-Id: Id26c329f5926a05331c740724b343a59507e9293
+---
+ init/init.cpp | 37 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/init/init.cpp b/init/init.cpp
+index b82c589c2..aa544b1df 100755
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -252,6 +252,34 @@ static class ShutdownState {
+     bool do_shutdown_ = false;
+ } shutdown_state;
+ 
++static bool IsContainerUserspaceRebootCommand(const std::string& command) {
++    return command == "reboot" || command == "reboot," || command == "reboot,userspace" ||
++           command == "reboot,userrequested";
++}
++
++static Result<void> RestartContainerUserspace(const BuiltinArguments&) {
++    // The secondary zygote restarts the primary zygote through its existing onrestart action.
++    Service* zygote = ServiceList::GetInstance().FindService("zygote_secondary");
++    if (zygote == nullptr || !zygote->IsRunning()) {
++        zygote = ServiceList::GetInstance().FindService("zygote");
++    }
++    if (zygote == nullptr) {
++        return Error()
++               << "Cannot perform container userspace reboot: zygote service is unavailable";
++    }
++
++    LOG(INFO) << "Restarting Android userspace through " << zygote->name();
++    zygote->Restart();
++    return {};
++}
++
++static void QueueContainerUserspaceRestart() {
++    auto& action_manager = ActionManager::GetInstance();
++    // Reset the pending shutdown and boot state before the replacement system_server starts.
++    action_manager.QueueEventTrigger("userspace-reboot-requested");
++    action_manager.QueueBuiltinAction(RestartContainerUserspace, "container-userspace-reboot");
++}
++
+ static void UnwindMainThreadStack() {
+     std::unique_ptr<Backtrace> backtrace(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, 1));
+     if (!backtrace->Unwind(0)) {
+@@ -907,7 +935,14 @@ int SecondStageMain(int argc, char** argv) {
+         auto shutdown_command = shutdown_state.CheckShutdown();
+         if (shutdown_command) {
+             LOG(INFO) << "Got shutdown_command '" << *shutdown_command
+-                      << "' Calling HandlePowerctlMessage()";
++                      << "' from sys.powerctl";
++            if (IsContainerUserspaceRebootCommand(*shutdown_command)) {
++                // Do not leave a stale value that would prevent a later reboot request.
++                SetProperty("sys.powerctl", "");
++                QueueContainerUserspaceRestart();
++            } else {
++                LOG(INFO) << "Ignoring powerctl command in container: " << *shutdown_command;
++            }
+             shutdown_state.set_do_shutdown(false);
+         }
+ 
+-- 
+2.47.3
+

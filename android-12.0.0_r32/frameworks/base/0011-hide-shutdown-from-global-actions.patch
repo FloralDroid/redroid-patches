@@ -1,0 +1,27 @@
+From 46e8cbd1097cfdf42a2bb70626afe75d27031b15 Mon Sep 17 00:00:00 2001
+From: FloralDroid <contact@home56.top>
+Date: Tue, 18 Aug 2026 00:00:00 +0800
+Subject: [PATCH] SystemUI: hide shutdown from global actions
+
+Containers cannot power themselves off safely, and allowing the Android
+shutdown sequence to begin before init ignores sys.powerctl can leave the UI
+partially stopped. Remove shutdown from the default global actions while
+retaining userspace restart.
+---
+ core/res/res/values/config.xml | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/core/res/res/values/config.xml b/core/res/res/values/config.xml
+index fbc14c7e2e17..8aac7cd2426f 100644
+--- a/core/res/res/values/config.xml
++++ b/core/res/res/values/config.xml
+@@ -2964,7 +2964,6 @@
+     <string-array translatable="false" name="config_globalActionsList">
+         <item>emergency</item>
+         <item>lockdown</item>
+-        <item>power</item>
+         <item>restart</item>
+         <item>logout</item>
+         <item>screenshot</item>
+--
+2.34.1
