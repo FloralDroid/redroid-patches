@@ -1,4 +1,4 @@
-From 79e507bb021bf279f2f45f4fba566272f957a919 Mon Sep 17 00:00:00 2001
+From bf87f982d9823a8e5ba3686869315ece5d456c11 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 19 Aug 2026 12:00:39 +0800
 Subject: [PATCH] art: consolidate Floral NativeBridge routing and namespaces
@@ -512,7 +512,7 @@ index 2deb5ef..c53df8f 100644
  
  // native_bridge_namespaces are not supported for callers of this function.
 diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
-index 669fa74..0183b60 100644
+index 669fa74..cc258a6 100644
 --- a/libnativeloader/native_loader_namespace.cpp
 +++ b/libnativeloader/native_loader_namespace.cpp
 @@ -21,12 +21,20 @@
@@ -540,7 +540,7 @@ index 669fa74..0183b60 100644
  
  constexpr const char* kDefaultNamespaceName = "default";
  constexpr const char* kSystemNamespaceName = "system";
-+constexpr const char* kHybridElfProperty = "ro.floral.nativebridge.hybrid_elf";
++constexpr const char* kHybridElfProperty = "ro.floral.bridge.hybrid_elf";
 +
 +enum class ElfTarget {
 +  kUnknown,
