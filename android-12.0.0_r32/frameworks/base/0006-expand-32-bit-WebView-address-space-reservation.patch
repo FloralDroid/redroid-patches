@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sat, 15 Aug 2026 11:25:00 +0800
+Subject: [PATCH] frameworks: expand 32-bit WebView address space reservation
+
+Recent 32-bit Chromium providers can exceed Android 12's historical 130 MiB
+RELRO reservation. Raise the default to 256 MiB and provide read-only product
+properties for explicit 32-bit and 64-bit tuning.
+---
+ core/java/android/webkit/WebViewLibraryLoader.java | 22 ++++++++++++++++------
+ 1 file changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/core/java/android/webkit/WebViewLibraryLoader.java b/core/java/android/webkit/WebViewLibraryLoader.java
+index a1e46f7..ed71777 100644
+--- a/core/java/android/webkit/WebViewLibraryLoader.java
++++ b/core/java/android/webkit/WebViewLibraryLoader.java
+@@ -25,6 +25,7 @@ import android.content.pm.PackageInfo;
+ import android.os.Build;
+ import android.os.Process;
+ import android.os.RemoteException;
++import android.os.SystemProperties;
+ import android.util.Log;
+ 
+ import com.android.internal.annotations.VisibleForTesting;
+@@ -46,6 +47,13 @@ public class WebViewLibraryLoader {
+     private static final String CHROMIUM_WEBVIEW_NATIVE_RELRO_64 =
+             "/data/misc/shared_relro/libwebviewchromium64.relro";
+ 
++    private static final long CHROMIUM_WEBVIEW_DEFAULT_VMSIZE_32 = 256L * 1024 * 1024;
++    private static final long CHROMIUM_WEBVIEW_DEFAULT_VMSIZE_64 = 1L * 1024 * 1024 * 1024;
++    private static final String CHROMIUM_WEBVIEW_VMSIZE_32_PROPERTY =
++            "ro.floral.webview.vmsize32";
++    private static final String CHROMIUM_WEBVIEW_VMSIZE_64_PROPERTY =
++            "ro.floral.webview.vmsize64";
++
+     private static final boolean DEBUG = false;
+ 
+     private static boolean sAddressSpaceReserved = false;
+@@ -179,11 +187,15 @@ public class WebViewLibraryLoader {
+     static void reserveAddressSpaceInZygote() {
+         System.loadLibrary("webviewchromium_loader");
+         boolean is64Bit = VMRuntime.getRuntime().is64Bit();
+-        // On 64-bit address space is really cheap and we can reserve 1GB which is plenty.
+-        // On 32-bit it's fairly scarce and we should keep it to a realistic number that
+-        // permits some future growth but doesn't hog space: we use 130MB which is roughly
+-        // what was calculated on older OS versions in practice.
+-        long addressSpaceToReserve = is64Bit ? 1 * 1024 * 1024 * 1024 : 130 * 1024 * 1024;
++        // 32-bit Chromium builds can grow beyond the historical 130 MiB
++        // reservation. Keep the defaults conservative for 64-bit and allow
++        // read-only product properties to tune either address-space budget.
++        long defaultSize = is64Bit ? CHROMIUM_WEBVIEW_DEFAULT_VMSIZE_64
++                                   : CHROMIUM_WEBVIEW_DEFAULT_VMSIZE_32;
++        String property = is64Bit ? CHROMIUM_WEBVIEW_VMSIZE_64_PROPERTY
++                                  : CHROMIUM_WEBVIEW_VMSIZE_32_PROPERTY;
++        long configuredSize = SystemProperties.getLong(property, defaultSize);
++        long addressSpaceToReserve = configuredSize > 0 ? configuredSize : defaultSize;
+         sAddressSpaceReserved = nativeReserveAddressSpace(addressSpaceToReserve);
+ 
+         if (sAddressSpaceReserved) {
+-- 
+2.39.5

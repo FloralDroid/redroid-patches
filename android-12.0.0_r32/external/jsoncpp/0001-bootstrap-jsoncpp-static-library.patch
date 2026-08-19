@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 14 Aug 2026 02:18:00 +0800
+Subject: [PATCH] jsoncpp: provide bootstrap static library
+
+Provide a static JsonCpp variant for the bootstrap init binary.
+---
+diff --git a/Android.bp b/Android.bp
+index 03e8ac1..2f318d4 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -82,6 +82,14 @@ cc_library {
+     min_sdk_version: "29",
+ }
+ 
++// init is a bootstrap binary and cannot depend on the regular shared library.
++cc_library_static {
++    name: "libjsoncpp_bootstrap",
++    defaults: ["libjsoncpp_defaults"],
++    ramdisk_available: true,
++    recovery_available: true,
++}
++
+ cc_library_static {
+     name: "libjsoncpp_ndk",
+     defaults: ["libjsoncpp_defaults"],

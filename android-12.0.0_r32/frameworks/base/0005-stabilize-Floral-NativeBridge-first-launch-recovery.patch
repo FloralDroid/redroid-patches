@@ -1,0 +1,322 @@
+From 9643f137c6d8cdc636e3c6ea88d265a1f46521da Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 14 Aug 2026 20:00:14 +0800
+Subject: [PATCH] frameworks: stabilize NativeBridge first-launch recovery
+
+Persist candidate results for each application and system version, pin verified
+backends after a stability window, and stop recovery after all candidates are
+exhausted. Crashes in helper or service processes switch only their own backend
+without closing the foreground task.
+
+Recognize pre-top launch processes that are not yet bound to an ActivityRecord,
+remove stale starting windows, and relaunch the selected fallback backend with
+the original task ID.
+
+---
+ .../server/am/FloralNativeBridgeManager.java  | 90 +++++++++++++++----
+ .../core/java/com/android/server/wm/Task.java | 13 ++-
+ .../server/wm/RootWindowContainerTests.java   | 25 ++++++
+ 3 files changed, 110 insertions(+), 18 deletions(-)
+
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+index 702d6e276c3d..751abb1cc3ce 100644
+--- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -20,6 +20,7 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
+ 
+ import android.app.ActivityOptions;
+ import android.app.ApplicationExitInfo;
++import android.os.Build;
+ import android.os.FileUtils;
+ import android.os.SystemClock;
+ import android.os.UserHandle;
+@@ -38,7 +39,7 @@ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ 
+-/** Coordinates per-process recovery for Floral's aggregate NativeBridge. */
++/** Coordinates deterministic backend selection and bounded recovery. */
+ final class FloralNativeBridgeManager {
+     private static final String TAG = "FloralNativeBridge";
+     private static final String POLICY_PATH =
+@@ -48,6 +49,7 @@ final class FloralNativeBridgeManager {
+     // Translated games commonly initialize optional native SDKs well after their first frame.
+     private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
+     private static final int MAX_JSON_BYTES = 256 * 1024;
++    private static final int STATE_VERSION = 2;
+ 
+     private static final String BACKEND_AUTO = "auto";
+     private static final String BACKEND_NDK = "ndk";
+@@ -56,12 +58,17 @@ final class FloralNativeBridgeManager {
+     private final ActivityManagerService mService;
+     private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
+     private final ArrayMap<ProcessRecord, Launch> mLaunches = new ArrayMap<>();
++    private final JSONObject mPolicy;
+     private JSONObject mState;
+ 
+     FloralNativeBridgeManager(ActivityManagerService service) {
+         mService = service;
++        // The host policy is refreshed by init at boot. Keep parsing out of the
++        // AMS lock so starting a translated process stays deterministic and cheap.
++        mPolicy = readJsonFile(new File(POLICY_PATH));
+         mState = readJsonFile(mStateFile.getBaseFile());
+-        if (mState == null) {
++        if (mState == null || mState.optInt("version", 0) != STATE_VERSION
++                || !Build.FINGERPRINT.equals(mState.optString("build_fingerprint"))) {
+             mState = emptyState();
+         }
+     }
+@@ -84,25 +91,37 @@ final class FloralNativeBridgeManager {
+         JSONObject state = packages.optJSONObject(processName);
+         boolean changed = false;
+         if (state == null || state.optLong("version_code", Long.MIN_VALUE) != versionCode
++                || !app.info.packageName.equals(state.optString("package_name"))
+                 || !sameCandidates(state.optJSONArray("candidates"), rule.candidates)) {
+             state = new JSONObject();
++            put(state, "package_name", app.info.packageName);
+             put(state, "version_code", versionCode);
+             put(state, "candidates", toJsonArray(rule.candidates));
+             put(state, "failed_backends", new JSONArray());
+             put(state, "selected_backend", rule.candidates.get(0));
+             put(state, "stable", false);
++            put(state, "exhausted", false);
++            put(state, "failure_count", 0);
+             put(packages, processName, state);
+             changed = true;
+         }
+ 
++        if (state.optBoolean("exhausted", false)) {
++            if (changed) {
++                writeState();
++            }
++            Slog.w(TAG, "NativeBridge recovery exhausted for " + processName);
++            return;
++        }
++
+         final ArraySet<String> failed = readBackends(state.optJSONArray("failed_backends"));
+         String selected = state.optString("selected_backend", "");
+         if (!rule.candidates.contains(selected) || failed.contains(selected)) {
+             final String replacement = firstAvailable(rule.candidates, failed);
+             if (replacement == null) {
+-                if (changed) {
+-                    writeState();
+-                }
++                put(state, "selected_backend", "");
++                put(state, "exhausted", true);
++                writeState();
+                 Slog.w(TAG, "NativeBridge candidates exhausted for " + processName);
+                 return;
+             }
+@@ -113,15 +132,19 @@ final class FloralNativeBridgeManager {
+         if (selected.isEmpty()) {
+             return;
+         }
+-        if (state.optBoolean("stable", false)) {
+-            put(state, "stable", false);
+-            changed = true;
+-        }
+         if (changed) {
+             writeState();
+         }
+ 
+-        final Launch launch = new Launch(processName, versionCode, selected,
++        // A backend that already survived the probation window is a learned
++        // result. Later application crashes must not poison that result.
++        if (state.optBoolean("stable", false)) {
++            Slog.i(TAG, "Using stable NativeBridge backend " + selected
++                    + " for " + processName);
++            return;
++        }
++
++        final Launch launch = new Launch(processName, app.info.packageName, versionCode, selected,
+                 rule.candidates, app.getStartTime());
+         mLaunches.put(app, launch);
+         mService.mHandler.postDelayed(() -> finishStabilityWindow(app, launch),
+@@ -147,7 +170,7 @@ final class FloralNativeBridgeManager {
+         }
+     }
+ 
+-    /** Handles only an early translated native crash with an unused fallback. */
++    /** Handles only an early translated native crash with an available fallback. */
+     boolean handleEarlyNativeCrash(ProcessRecord app) {
+         final Launch launch = mLaunches.get(app);
+         if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
+@@ -164,7 +187,11 @@ final class FloralNativeBridgeManager {
+         final String replacement = firstAvailable(launch.candidates, failed);
+         put(state, "failed_backends", toJsonArray(failed));
+         put(state, "stable", false);
++        put(state, "failure_count", state.optInt("failure_count", 0) + 1);
++        put(state, "last_failure_timestamp_ms", System.currentTimeMillis());
+         if (replacement == null) {
++            put(state, "selected_backend", "");
++            put(state, "exhausted", true);
+             writeState();
+             mLaunches.remove(app);
+             Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
+@@ -173,11 +200,20 @@ final class FloralNativeBridgeManager {
+         }
+ 
+         put(state, "selected_backend", replacement);
++        put(state, "exhausted", false);
+         writeState();
+         mLaunches.remove(app);
+ 
+-        final int taskId = mService.mAtmInternal.finishTopCrashedActivities(
+-                app.getWindowProcessController(), "floral-nativebridge-fallback");
++        // A pre-top activity can crash before WindowManager attaches its ActivityRecord to this
++        // process. Preserve that launch identity so the starting window does not remain forever.
++        // Child services and helper processes still must not tear down the user's task.
++        final HostingRecord hostingRecord = app.getHostingRecord();
++        final boolean restartTask = (hostingRecord != null && hostingRecord.isTopApp())
++                || (app == mService.getTopApp() && app.hasActivities());
++        final int taskId = restartTask
++                ? mService.mAtmInternal.finishTopCrashedActivities(
++                        app.getWindowProcessController(), "floral-nativebridge-fallback")
++                : INVALID_TASK_ID;
+         mService.mProcessList.removeProcessLocked(app, false, true,
+                 ApplicationExitInfo.REASON_CRASH_NATIVE, "native bridge fallback");
+         Slog.w(TAG, "Early native crash in " + launch.processName + "; switching "
+@@ -209,7 +245,7 @@ final class FloralNativeBridgeManager {
+     }
+ 
+     private PolicyRule resolvePolicy(String processName, String packageName) {
+-        final JSONObject root = readJsonFile(new File(POLICY_PATH));
++        final JSONObject root = mPolicy;
+         if (root == null) {
+             return PolicyRule.automaticDefaults();
+         }
+@@ -266,13 +302,15 @@ final class FloralNativeBridgeManager {
+ 
+     private static JSONObject emptyState() {
+         final JSONObject root = new JSONObject();
+-        put(root, "version", 1);
++        put(root, "version", STATE_VERSION);
++        put(root, "build_fingerprint", Build.FINGERPRINT);
+         put(root, "packages", new JSONObject());
+         return root;
+     }
+ 
+     private static boolean matchesLaunch(JSONObject state, Launch launch) {
+         return state != null
++                && launch.packageName.equals(state.optString("package_name"))
+                 && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
+                 && launch.backend.equals(state.optString("selected_backend"));
+     }
+@@ -334,14 +372,16 @@ final class FloralNativeBridgeManager {
+ 
+     private static final class Launch {
+         final String processName;
++        final String packageName;
+         final long versionCode;
+         final String backend;
+         final ArrayList<String> candidates;
+         final long startUptime;
+ 
+-        Launch(String processName, long versionCode, String backend,
++        Launch(String processName, String packageName, long versionCode, String backend,
+                 ArrayList<String> candidates, long startUptime) {
+             this.processName = processName;
++            this.packageName = packageName;
+             this.versionCode = versionCode;
+             this.backend = backend;
+             this.candidates = new ArrayList<>(candidates);
+@@ -390,6 +430,19 @@ final class FloralNativeBridgeManager {
+             if (backend.isEmpty()) {
+                 backend = object.optString("backend", "");
+             }
++            if (backend.isEmpty()) {
++                final String preferred = object.optString("preferred_backend", "");
++                if (BACKEND_NDK.equals(preferred) || BACKEND_HOUDINI.equals(preferred)) {
++                    final JSONArray array = object.optJSONArray("candidates");
++                    if (array == null || array.length() == 0) {
++                        return preferred(preferred);
++                    }
++                    final PolicyRule rule = fromCandidates(array);
++                    rule.candidates.remove(preferred);
++                    rule.candidates.add(0, preferred);
++                    return rule;
++                }
++            }
+             if (backend.isEmpty()) {
+                 backend = object.optString("mode", BACKEND_AUTO);
+             }
+@@ -397,8 +450,11 @@ final class FloralNativeBridgeManager {
+                 return explicit(backend);
+             }
+ 
++            return fromCandidates(object.optJSONArray("candidates"));
++        }
++
++        private static PolicyRule fromCandidates(JSONArray array) {
+             final ArrayList<String> candidates = new ArrayList<>();
+-            final JSONArray array = object.optJSONArray("candidates");
+             if (array != null) {
+                 for (int i = 0; i < array.length(); i++) {
+                     final String candidate = array.optString(i);
+diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
+index c068fd1a5f6e..a223336ca5b8 100644
+--- a/services/core/java/com/android/server/wm/Task.java
++++ b/services/core/java/com/android/server/wm/Task.java
+@@ -6775,7 +6775,7 @@ class Task extends WindowContainer<WindowContainer> {
+      */
+     final Task finishTopCrashedActivityLocked(WindowProcessController app, String reason) {
+         final ActivityRecord r = topRunningActivity();
+-        if (r == null || r.app != app) {
++        if (r == null || !belongsToCrashedProcess(r, app)) {
+             return null;
+         }
+         if (r.isActivityTypeHome() && mAtmService.mHomeProcess == app) {
+@@ -6809,6 +6809,17 @@ class Task extends WindowContainer<WindowContainer> {
+         return finishedTask;
+     }
+ 
++    private static boolean belongsToCrashedProcess(ActivityRecord r,
++            WindowProcessController app) {
++        if (r.app == app) {
++            return true;
++        }
++        // During an asynchronous pre-top launch, native initialization may fail before the
++        // ActivityRecord is attached. Process name and uid uniquely identify that pending process.
++        return r.app == null && r.isState(ActivityState.INITIALIZING)
++                && r.getUid() == app.mUid && app.mName.equals(r.processName);
++    }
++
+     void finishVoiceTask(IVoiceInteractionSession session) {
+         final PooledConsumer c = PooledLambda.obtainConsumer(Task::finishIfVoiceTask,
+                 PooledLambda.__(Task.class), session.asBinder());
+diff --git a/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java b/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java
+index 9cf29d4dcc50..28b032e51a1e 100644
+--- a/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java
++++ b/services/tests/wmtests/src/com/android/server/wm/RootWindowContainerTests.java
+@@ -421,6 +421,31 @@ public class RootWindowContainerTests extends WindowTestsBase {
+         assertEquals(originalRootTaskCount, defaultTaskDisplayArea.getRootTaskCount());
+     }
+ 
++    /**
++     * Verifies that a native crash during asynchronous process startup removes the pending
++     * activity even though it has not attached to its process yet.
++     */
++    @Test
++    public void testRemovingPendingRootTaskOnAppCrash() {
++        final TaskDisplayArea defaultTaskDisplayArea = mRootWindowContainer
++                .getDefaultTaskDisplayArea();
++        final int originalRootTaskCount = defaultTaskDisplayArea.getRootTaskCount();
++        final Task rootTask = defaultTaskDisplayArea.createRootTask(
++                WINDOWING_MODE_FULLSCREEN, ACTIVITY_TYPE_STANDARD, false /* onTop */);
++        final ActivityRecord firstActivity = new ActivityBuilder(mAtm).setTask(rootTask).build();
++        final WindowProcessController startingApp = firstActivity.app;
++        final int crashedTaskId = rootTask.mTaskId;
++
++        assertEquals(originalRootTaskCount + 1, defaultTaskDisplayArea.getRootTaskCount());
++
++        // A pre-top process can die before realStartActivityLocked attaches this record.
++        firstActivity.app = null;
++        assertEquals(crashedTaskId,
++                mRootWindowContainer.finishTopCrashedActivities(startingApp, "test"));
++
++        assertEquals(originalRootTaskCount, defaultTaskDisplayArea.getRootTaskCount());
++    }
++
+     /**
+      * Verifies that removal of activities with task and root task is done correctly when there are
+      * several task display areas.
