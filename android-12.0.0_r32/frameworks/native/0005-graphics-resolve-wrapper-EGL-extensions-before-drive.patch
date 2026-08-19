@@ -1,0 +1,94 @@
+From 9e176727915854e269f4f625c0bf6003ceb39ba1 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 19 Aug 2026 11:59:30 +0800
+Subject: [PATCH 5/5] graphics: resolve wrapper EGL extensions before driver
+ init
+
+Return Android EGL wrapper entry points before attempting vendor driver initialization. This keeps built-in extensions such as eglGetNativeClientBufferANDROID available to translated callers even when driver discovery is not ready.
+
+Change-Id: I4fccc103d19cb33649cea3b261ea40d93938f3de
+---
+ opengl/libs/EGL/eglApi.cpp               | 7 +++++++
+ opengl/libs/EGL/egl_platform_entries.cpp | 9 ++++++++-
+ opengl/libs/EGL/egl_platform_entries.h   | 2 +-
+ opengl/tests/EGLTest/EGL_test.cpp        | 4 ++++
+ 4 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/opengl/libs/EGL/eglApi.cpp b/opengl/libs/EGL/eglApi.cpp
+index 502c14f..b608116 100644
+--- a/opengl/libs/EGL/eglApi.cpp
++++ b/opengl/libs/EGL/eglApi.cpp
+@@ -234,6 +234,13 @@ EGLint eglGetError(void) {
+ }
+ 
+ __eglMustCastToProperFunctionPointerType eglGetProcAddress(const char* procname) {
++    // Android's EGL wrapper implements these extension entry points itself.
++    // Resolve them before loading a vendor driver so translated callers do not
++    // lose wrapper functionality when driver discovery is still unavailable.
++    if (EGLFuncPointer addr = android::FindWrapperExtensionAddr(procname)) {
++        return addr;
++    }
++
+     // eglGetProcAddress() could be the very first function called
+     // in which case we must make sure we've initialized ourselves, this
+     // happens the first time egl_get_display() is called.
+diff --git a/opengl/libs/EGL/egl_platform_entries.cpp b/opengl/libs/EGL/egl_platform_entries.cpp
+index de36a7a..3418bc3 100644
+--- a/opengl/libs/EGL/egl_platform_entries.cpp
++++ b/opengl/libs/EGL/egl_platform_entries.cpp
+@@ -230,6 +230,13 @@ static void (*findProcAddress(const char* name, const extension_map_t* map, size
+     return nullptr;
+ }
+ 
++EGLFuncPointer FindWrapperExtensionAddr(const char* name) {
++    if (name == nullptr || FILTER_EXTENSIONS(name)) {
++        return nullptr;
++    }
++    return findProcAddress(name, sExtensionMap, NELEM(sExtensionMap));
++}
++
+ // ----------------------------------------------------------------------------
+ 
+ extern void setGLHooksThreadSpecific(gl_hooks_t const* value);
+@@ -1139,7 +1146,7 @@ __eglMustCastToProperFunctionPointerType eglGetProcAddressImpl(const char* procn
+     }
+ 
+     __eglMustCastToProperFunctionPointerType addr;
+-    addr = findProcAddress(procname, sExtensionMap, NELEM(sExtensionMap));
++    addr = FindWrapperExtensionAddr(procname);
+     if (addr) return addr;
+ 
+     addr = findBuiltinWrapper(procname);
+diff --git a/opengl/libs/EGL/egl_platform_entries.h b/opengl/libs/EGL/egl_platform_entries.h
+index 85b1db3..2d600cc 100644
+--- a/opengl/libs/EGL/egl_platform_entries.h
++++ b/opengl/libs/EGL/egl_platform_entries.h
+@@ -24,9 +24,9 @@ typedef __eglMustCastToProperFunctionPointerType EGLFuncPointer;
+ namespace android {
+ 
+ EGLint eglGetErrorImpl();
++EGLFuncPointer FindWrapperExtensionAddr(const char* name);
+ EGLFuncPointer FindPlatformImplAddr(const char* name);
+ 
+ }; // namespace android
+ 
+ #endif // ANDROID_EGLAPI_H
+-
+diff --git a/opengl/tests/EGLTest/EGL_test.cpp b/opengl/tests/EGLTest/EGL_test.cpp
+index bbd786d..aa48106 100644
+--- a/opengl/tests/EGLTest/EGL_test.cpp
++++ b/opengl/tests/EGLTest/EGL_test.cpp
+@@ -47,6 +47,10 @@ namespace android {
+ 
+ #define EGL_UNSIGNED_TRUE static_cast<EGLBoolean>(EGL_TRUE)
+ 
++TEST(EGLProcAddressTest, ResolvesNativeClientBufferWrapper) {
++    EXPECT_NE(nullptr, eglGetProcAddress("eglGetNativeClientBufferANDROID"));
++}
++
+ // retrieve wide-color setting from configstore
+ using namespace android::hardware::configstore;
+ using namespace android::hardware::configstore::V1_0;
+-- 
+2.47.3
+
