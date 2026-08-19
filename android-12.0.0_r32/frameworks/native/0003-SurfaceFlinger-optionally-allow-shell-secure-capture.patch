@@ -1,0 +1,201 @@
+From a3ce1715a1fdec183bc4167fed260f704f2a4a0b Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 6 Aug 2026 18:19:16 +0800
+Subject: [PATCH 3/3] SurfaceFlinger: optionally allow shell secure capture
+
+Change-Id: Ib7461e20e0e4abc7977580f9a8c6709b21c995ff
+---
+ .../compositionengine/DisplayCreationArgs.h   |  9 ++++++++
+ .../impl/OutputCompositionState.h             |  3 +++
+ .../CompositionEngine/src/Display.cpp         |  1 +
+ .../CompositionEngine/src/Output.cpp          |  3 ++-
+ services/surfaceflinger/DisplayDevice.h       |  1 +
+ services/surfaceflinger/SurfaceFlinger.cpp    | 11 ++++++++-
+ services/surfaceflinger/SurfaceFlinger.h      |  1 +
+ .../SurfaceFlinger_CreateDisplayTest.cpp      | 23 ++++++++++++++++++-
+ .../tests/unittests/TestableSurfaceFlinger.h  |  2 ++
+ 9 files changed, 51 insertions(+), 3 deletions(-)
+
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/DisplayCreationArgs.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/DisplayCreationArgs.h
+index 14eddb1..bbd5a09 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/DisplayCreationArgs.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/DisplayCreationArgs.h
+@@ -45,6 +45,10 @@ struct DisplayCreationArgs {
+     // True if this display should be considered secure
+     bool isSecure = false;
+ 
++    // False when a recording display may show secure layers but must still
++    // black out protected buffers.
++    bool allowsProtectedContent = true;
++
+     // Gives the initial layer stack id to be used for the display
+     uint32_t layerStackId = ~0u;
+ 
+@@ -84,6 +88,11 @@ public:
+         return *this;
+     }
+ 
++    DisplayCreationArgsBuilder& setAllowsProtectedContent(bool allowsProtectedContent) {
++        mArgs.allowsProtectedContent = allowsProtectedContent;
++        return *this;
++    }
++
+     DisplayCreationArgsBuilder& setLayerStackId(uint32_t layerStackId) {
+         mArgs.layerStackId = layerStackId;
+         return *this;
+diff --git a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h
+index f34cb94..8309b51 100644
+--- a/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h
++++ b/services/surfaceflinger/CompositionEngine/include/compositionengine/impl/OutputCompositionState.h
+@@ -47,6 +47,9 @@ struct OutputCompositionState {
+     // If false, this output is not considered secure
+     bool isSecure{false};
+ 
++    // If false, protected buffers are blacked out even on a secure output.
++    bool allowsProtectedContent{true};
++
+     // If true, the current frame on this output uses client composition
+     bool usesClientComposition{false};
+ 
+diff --git a/services/surfaceflinger/CompositionEngine/src/Display.cpp b/services/surfaceflinger/CompositionEngine/src/Display.cpp
+index 2f2c686..c2fc588 100644
+--- a/services/surfaceflinger/CompositionEngine/src/Display.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/Display.cpp
+@@ -54,6 +54,7 @@ void Display::setConfiguration(const compositionengine::DisplayCreationArgs& arg
+     mIsVirtual = !args.connectionType;
+     mPowerAdvisor = args.powerAdvisor;
+     editState().isSecure = args.isSecure;
++    editState().allowsProtectedContent = args.allowsProtectedContent;
+     editState().displaySpace.bounds = Rect(args.pixels);
+     setLayerStackFilter(args.layerStackId,
+                         args.connectionType == ui::DisplayConnectionType::Internal);
+diff --git a/services/surfaceflinger/CompositionEngine/src/Output.cpp b/services/surfaceflinger/CompositionEngine/src/Output.cpp
+index cafcb40..31eded9 100644
+--- a/services/surfaceflinger/CompositionEngine/src/Output.cpp
++++ b/services/surfaceflinger/CompositionEngine/src/Output.cpp
+@@ -1002,7 +1002,8 @@ std::optional<base::unique_fd> Output::composeSurfaces(
+                                                       outputState.usesClientComposition};
+ 
+     auto& renderEngine = getCompositionEngine().getRenderEngine();
+-    const bool supportsProtectedContent = renderEngine.supportsProtectedContent();
++    const bool supportsProtectedContent =
++            outputState.allowsProtectedContent && renderEngine.supportsProtectedContent();
+ 
+     // If we the display is secure, protected content support is enabled, and at
+     // least one layer has protected content, we need to use a secure back
+diff --git a/services/surfaceflinger/DisplayDevice.h b/services/surfaceflinger/DisplayDevice.h
+index 7e4d923..83b9153 100644
+--- a/services/surfaceflinger/DisplayDevice.h
++++ b/services/surfaceflinger/DisplayDevice.h
+@@ -259,6 +259,7 @@ struct DisplayDeviceState {
+     uint32_t height = 0;
+     std::string displayName;
+     bool isSecure = false;
++    bool allowsProtectedContent = true;
+ 
+ private:
+     static std::atomic<int32_t> sNextSequenceId;
+diff --git a/services/surfaceflinger/SurfaceFlinger.cpp b/services/surfaceflinger/SurfaceFlinger.cpp
+index fe43a20..f78863d 100644
+--- a/services/surfaceflinger/SurfaceFlinger.cpp
++++ b/services/surfaceflinger/SurfaceFlinger.cpp
+@@ -356,6 +356,11 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory, SkipInitializationTag)
+ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipInitialization) {
+     ALOGI("SurfaceFlinger is starting");
+ 
++    mAllowShellSecureCapture =
++            base::GetBoolProperty("ro.boot.floral_allow_secure_capture"s, false);
++    ALOGI_IF(mAllowShellSecureCapture,
++             "Shell virtual displays may capture secure, non-protected layers");
++
+     hasSyncFramework = running_without_sync_framework(true);
+ 
+     dispSyncPresentTimeOffset = present_time_offset_from_vsync_ns(0);
+@@ -529,7 +534,9 @@ sp<IBinder> SurfaceFlinger::createDisplay(const String8& displayName, bool secur
+     // This is to ensure that only system and graphics can request to create a secure
+     // display. Secure displays can show secure content so we add an additional restriction on it.
+     const int uid = IPCThreadState::self()->getCallingUid();
+-    if (secure && uid != AID_GRAPHICS && uid != AID_SYSTEM) {
++    const bool shellSecureCapture = mAllowShellSecureCapture && uid == AID_SHELL;
++    secure = secure || shellSecureCapture;
++    if (secure && uid != AID_GRAPHICS && uid != AID_SYSTEM && !shellSecureCapture) {
+         ALOGE("Only privileged processes can create a secure display");
+         return nullptr;
+     }
+@@ -554,6 +561,7 @@ sp<IBinder> SurfaceFlinger::createDisplay(const String8& displayName, bool secur
+     // Display ID is assigned when virtual display is allocated by HWC.
+     DisplayDeviceState state;
+     state.isSecure = secure;
++    state.allowsProtectedContent = !shellSecureCapture;
+     state.displayName = displayName;
+     mCurrentState.displays.add(token, state);
+     mInterceptor->saveDisplayCreation(state);
+@@ -2761,6 +2769,7 @@ void SurfaceFlinger::processDisplayAdded(const wp<IBinder>& displayToken,
+ 
+     builder.setPixels(resolution);
+     builder.setIsSecure(state.isSecure);
++    builder.setAllowsProtectedContent(state.allowsProtectedContent);
+     builder.setLayerStackId(state.layerStack);
+     builder.setPowerAdvisor(&mPowerAdvisor);
+     builder.setName(state.displayName);
+diff --git a/services/surfaceflinger/SurfaceFlinger.h b/services/surfaceflinger/SurfaceFlinger.h
+index c3d837e..87622be 100644
+--- a/services/surfaceflinger/SurfaceFlinger.h
++++ b/services/surfaceflinger/SurfaceFlinger.h
+@@ -1233,6 +1233,7 @@ private:
+     const nsecs_t mBootTime = systemTime();
+     bool mGpuToCpuSupported = false;
+     bool mIsUserBuild = true;
++    bool mAllowShellSecureCapture = false;
+ 
+     // Can only accessed from the main thread, these members
+     // don't need synchronization
+diff --git a/services/surfaceflinger/tests/unittests/SurfaceFlinger_CreateDisplayTest.cpp b/services/surfaceflinger/tests/unittests/SurfaceFlinger_CreateDisplayTest.cpp
+index 2362a31..26abcce 100644
+--- a/services/surfaceflinger/tests/unittests/SurfaceFlinger_CreateDisplayTest.cpp
++++ b/services/surfaceflinger/tests/unittests/SurfaceFlinger_CreateDisplayTest.cpp
+@@ -90,5 +90,26 @@ TEST_F(CreateDisplayTest, createDisplaySetsCurrentStateForSecureDisplay) {
+     EXPECT_CALL(*mMessageQueue, invalidate()).Times(1);
+ }
+ 
++TEST_F(CreateDisplayTest, shellCaptureOptionPromotesVirtualDisplayWithoutProtectedContent) {
++    const String8 name("scrcpy");
++    mFlinger.setAllowShellSecureCapture(true);
++    EXPECT_CALL(*mSurfaceInterceptor, saveDisplayCreation(_)).Times(1);
++
++    int64_t oldId = IPCThreadState::self()->clearCallingIdentity();
++    IPCThreadState::self()->restoreCallingIdentity(static_cast<int64_t>(AID_SHELL) << 32 |
++                                                   AID_SHELL);
++    sp<IBinder> displayToken = mFlinger.createDisplay(name, false);
++    IPCThreadState::self()->restoreCallingIdentity(oldId);
++
++    ASSERT_TRUE(hasCurrentDisplayState(displayToken));
++    const auto& display = getCurrentDisplayState(displayToken);
++    EXPECT_TRUE(display.isVirtual());
++    EXPECT_TRUE(display.isSecure);
++    EXPECT_FALSE(display.allowsProtectedContent);
++    EXPECT_EQ(name.string(), display.displayName);
++
++    EXPECT_CALL(*mMessageQueue, invalidate()).Times(1);
++}
++
+ } // namespace
+-} // namespace android
+\ No newline at end of file
++} // namespace android
+diff --git a/services/surfaceflinger/tests/unittests/TestableSurfaceFlinger.h b/services/surfaceflinger/tests/unittests/TestableSurfaceFlinger.h
+index cf67593..c618c95 100644
+--- a/services/surfaceflinger/tests/unittests/TestableSurfaceFlinger.h
++++ b/services/surfaceflinger/tests/unittests/TestableSurfaceFlinger.h
+@@ -300,6 +300,8 @@ public:
+         return mFlinger->createDisplay(displayName, secure);
+     }
+ 
++    void setAllowShellSecureCapture(bool allow) { mFlinger->mAllowShellSecureCapture = allow; }
++
+     auto destroyDisplay(const sp<IBinder>& displayToken) {
+         return mFlinger->destroyDisplay(displayToken);
+     }
+-- 
+2.47.3
+

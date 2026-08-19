@@ -1,0 +1,45 @@
+From 4f4b6c3ac64e942fc109863e32fbb93b42c04a31 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sat, 15 Aug 2026 22:08:00 +0800
+Subject: [PATCH] Codec2: wait for input surface acquire fence
+
+The Android 12 Codec2 input surface path drops the acquire fence passed by
+GraphicBufferSource. C2Fence cannot wrap a sync fd in this release and the
+HIDL conversion also does not transport one, so wait before queuing the block.
+This prevents consumers from reading a buffer while composition is incomplete
+and closes the owned fence fd on every path.
+---
+ media/codec2/hidl/1.0/utils/InputSurfaceConnection.cpp | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/media/codec2/hidl/1.0/utils/InputSurfaceConnection.cpp b/media/codec2/hidl/1.0/utils/InputSurfaceConnection.cpp
+index 7c2e01400b8a3f6e1ff4254af99e5cc985f00987..d89680b64433e30e157cc04ce0fba4f2c8448969 100644
+--- a/media/codec2/hidl/1.0/utils/InputSurfaceConnection.cpp
++++ b/media/codec2/hidl/1.0/utils/InputSurfaceConnection.cpp
+@@ -29,6 +29,7 @@
+ #include <hidl/HidlSupport.h>
+ #include <media/stagefright/bqhelper/ComponentWrapper.h>
+ #include <system/graphics.h>
++#include <ui/Fence.h>
+ #include <ui/GraphicBuffer.h>
+ #include <utils/Errors.h>
+ 
+@@ -189,8 +190,14 @@ struct InputSurfaceConnection::Impl : public ComponentWrapper {
+             int64_t timestamp,
+             int fenceFd) override {
+         LOG(VERBOSE) << "Impl::submitBuffer -- bufferId = " << bufferId << ".";
+-        // TODO: Use fd to construct fence
+-        (void)fenceFd;
++        // Android 12 cannot carry a sync fd in C2Fence across this HIDL path.
++        // Wait here so the queued graphic block is ready for either sink type.
++        sp<Fence> acquireFence = new Fence(fenceFd);
++        status_t fenceStatus = acquireFence->waitForever("Codec2 input surface");
++        if (fenceStatus != OK) {
++            LOG(ERROR) << "Failed waiting for input buffer acquire fence: " << fenceStatus;
++            return fenceStatus;
++        }
+ 
+         std::shared_ptr<C2GraphicAllocation> alloc;
+         C2Handle* handle = WrapNativeCodec2GrallocHandle(
+-- 
+2.34.1
