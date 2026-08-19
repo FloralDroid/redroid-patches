@@ -1,11 +1,33 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 752e7838b9e4683b5ae5a6d4c8418e2dbc54486c Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 14 Aug 2026 02:12:00 +0800
 Subject: [PATCH] frameworks: separate Floral public and loader ABI views
 
 Expose the configured Floral application ABI view through Build while retaining
-build-owned ABI lists for PackageManager and zygote internals.
+build-owned ABI lists for zygote and platform internals. PackageManager keeps an
+APK on the public ARM family whenever any base or split APK contains ARM code.
+
+Change-Id: I58859c26b8b3559f7848cc51e3c68f7dfb809822
 ---
+ .../com/android/commands/am/Instrument.java   |  2 +-
+ core/java/android/os/AppZygote.java           |  2 +-
+ core/java/android/os/Build.java               | 35 ++++++++++--
+ core/java/android/os/ZygoteProcess.java       |  8 +--
+ .../android/webkit/WebViewLibraryLoader.java  |  6 +-
+ core/java/android/webkit/WebViewZygote.java   |  2 +-
+ .../internal/content/NativeLibraryHelper.java | 53 +++++++++++++-----
+ .../com/android/server/PinnerService.java     |  4 +-
+ .../am/ActivityManagerShellCommand.java       |  2 +-
+ .../java/com/android/server/pm/Installer.java |  2 +-
+ .../android/server/pm/InstructionSets.java    |  8 +--
+ .../server/pm/PackageAbiHelperImpl.java       | 55 +++++++++++--------
+ .../server/pm/PackageManagerService.java      |  2 +-
+ .../server/pm/PackageManagerServiceUtils.java |  2 +-
+ .../server/pm/PackageManagerShellCommand.java |  2 +-
+ .../server/pm/dex/PackageDexUsage.java        |  2 +-
+ .../java/com/android/server/SystemServer.java |  2 +-
+ 17 files changed, 123 insertions(+), 66 deletions(-)
+
 diff --git a/cmds/am/src/com/android/commands/am/Instrument.java b/cmds/am/src/com/android/commands/am/Instrument.java
 index 1e72ddf8ecfc..01d6737beeab 100644
 --- a/cmds/am/src/com/android/commands/am/Instrument.java
@@ -162,75 +184,121 @@ index 2bfbe4bdfba7..f3d068ff365a 100644
                      Process.FIRST_ISOLATED_UID,
                      Integer.MAX_VALUE); // TODO(b/123615476) deal with user-id ranges properly
 diff --git a/core/java/com/android/internal/content/NativeLibraryHelper.java b/core/java/com/android/internal/content/NativeLibraryHelper.java
-index 10750b695a39..ffd597ffc00c 100644
+index 10750b695a39..10fb82fac225 100644
 --- a/core/java/com/android/internal/content/NativeLibraryHelper.java
 +++ b/core/java/com/android/internal/content/NativeLibraryHelper.java
-@@ -382,9 +382,9 @@ public class NativeLibraryHelper {
+@@ -237,6 +237,17 @@ public class NativeLibraryHelper {
+         return finalRes;
+     }
+ 
++    /**
++     * Returns whether the package contains native code for the public application ABI view.
++     *
++     * Floral keeps host ABIs in the internal loader view, but a package that contains any public
++     * guest ABI must stay on that ABI family. This prevents an auxiliary host-ABI library from
++     * changing the process ABI selected for an otherwise ARM application.
++     */
++    public static boolean hasPublicNativeLibraries(Handle handle) {
++        return findSupportedAbi(handle, Build.SUPPORTED_ABIS) >= 0;
++    }
++
+     private native static int nativeFindSupportedAbi(long handle, String[] supportedAbis,
+             boolean debuggable);
+ 
+@@ -373,6 +384,13 @@ public class NativeLibraryHelper {
+     public static int copyNativeBinariesWithOverride(Handle handle, File libraryRoot,
+             String abiOverride, boolean isIncremental) {
+         try {
++            final boolean usePublicAbis = hasPublicNativeLibraries(handle);
++            final String[] supportedAbis = usePublicAbis
++                    ? Build.SUPPORTED_ABIS : Build.INTERNAL_SUPPORTED_ABIS;
++            final String[] supported32BitAbis = usePublicAbis
++                    ? Build.SUPPORTED_32_BIT_ABIS : Build.INTERNAL_SUPPORTED_32_BIT_ABIS;
++            final String[] supported64BitAbis = usePublicAbis
++                    ? Build.SUPPORTED_64_BIT_ABIS : Build.INTERNAL_SUPPORTED_64_BIT_ABIS;
+             if (handle.multiArch) {
+                 // Warn if we've set an abiOverride for multi-lib packages..
+                 // By definition, we need to copy both 32 and 64 bit libraries for
+@@ -382,9 +400,9 @@ public class NativeLibraryHelper {
                  }
  
                  int copyRet = PackageManager.NO_NATIVE_LIBRARIES;
 -                if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
-+                if (Build.INTERNAL_SUPPORTED_32_BIT_ABIS.length > 0) {
++                if (supported32BitAbis.length > 0) {
                      copyRet = copyNativeBinariesForSupportedAbi(handle, libraryRoot,
 -                            Build.SUPPORTED_32_BIT_ABIS, true /* use isa specific subdirs */,
-+                            Build.INTERNAL_SUPPORTED_32_BIT_ABIS, true /* use isa specific subdirs */,
++                            supported32BitAbis, true /* use isa specific subdirs */,
                              isIncremental);
                      if (copyRet < 0 && copyRet != PackageManager.NO_NATIVE_LIBRARIES &&
                              copyRet != PackageManager.INSTALL_FAILED_NO_MATCHING_ABIS) {
-@@ -393,9 +393,9 @@ public class NativeLibraryHelper {
+@@ -393,9 +411,9 @@ public class NativeLibraryHelper {
                      }
                  }
  
 -                if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
-+                if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0) {
++                if (supported64BitAbis.length > 0) {
                      copyRet = copyNativeBinariesForSupportedAbi(handle, libraryRoot,
 -                            Build.SUPPORTED_64_BIT_ABIS, true /* use isa specific subdirs */,
-+                            Build.INTERNAL_SUPPORTED_64_BIT_ABIS, true /* use isa specific subdirs */,
++                            supported64BitAbis, true /* use isa specific subdirs */,
                              isIncremental);
                      if (copyRet < 0 && copyRet != PackageManager.NO_NATIVE_LIBRARIES &&
                              copyRet != PackageManager.INSTALL_FAILED_NO_MATCHING_ABIS) {
-@@ -412,10 +412,10 @@ public class NativeLibraryHelper {
+@@ -412,10 +430,10 @@ public class NativeLibraryHelper {
                  }
  
                  String[] abiList = (cpuAbiOverride != null) ?
 -                        new String[] { cpuAbiOverride } : Build.SUPPORTED_ABIS;
 -                if (Build.SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null &&
-+                        new String[] { cpuAbiOverride } : Build.INTERNAL_SUPPORTED_ABIS;
-+                if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null &&
++                        new String[] { cpuAbiOverride } : supportedAbis;
++                if (supported64BitAbis.length > 0 && cpuAbiOverride == null &&
                          hasRenderscriptBitcode(handle)) {
 -                    abiList = Build.SUPPORTED_32_BIT_ABIS;
-+                    abiList = Build.INTERNAL_SUPPORTED_32_BIT_ABIS;
++                    abiList = supported32BitAbis;
                  }
  
                  int copyRet = copyNativeBinariesForSupportedAbi(handle, libraryRoot, abiList,
-@@ -444,12 +444,12 @@ public class NativeLibraryHelper {
+@@ -436,6 +454,13 @@ public class NativeLibraryHelper {
+     public static long sumNativeBinariesWithOverride(Handle handle, String abiOverride)
+             throws IOException {
+         long sum = 0;
++        final boolean usePublicAbis = hasPublicNativeLibraries(handle);
++        final String[] supportedAbis = usePublicAbis
++                ? Build.SUPPORTED_ABIS : Build.INTERNAL_SUPPORTED_ABIS;
++        final String[] supported32BitAbis = usePublicAbis
++                ? Build.SUPPORTED_32_BIT_ABIS : Build.INTERNAL_SUPPORTED_32_BIT_ABIS;
++        final String[] supported64BitAbis = usePublicAbis
++                ? Build.SUPPORTED_64_BIT_ABIS : Build.INTERNAL_SUPPORTED_64_BIT_ABIS;
+         if (handle.multiArch) {
+             // Warn if we've set an abiOverride for multi-lib packages..
+             // By definition, we need to copy both 32 and 64 bit libraries for
+@@ -444,12 +469,12 @@ public class NativeLibraryHelper {
                  Slog.w(TAG, "Ignoring abiOverride for multi arch application.");
              }
  
 -            if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
 -                sum += sumNativeBinariesForSupportedAbi(handle, Build.SUPPORTED_32_BIT_ABIS);
-+            if (Build.INTERNAL_SUPPORTED_32_BIT_ABIS.length > 0) {
-+                sum += sumNativeBinariesForSupportedAbi(handle, Build.INTERNAL_SUPPORTED_32_BIT_ABIS);
++            if (supported32BitAbis.length > 0) {
++                sum += sumNativeBinariesForSupportedAbi(handle, supported32BitAbis);
              }
  
 -            if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
 -                sum += sumNativeBinariesForSupportedAbi(handle, Build.SUPPORTED_64_BIT_ABIS);
-+            if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0) {
-+                sum += sumNativeBinariesForSupportedAbi(handle, Build.INTERNAL_SUPPORTED_64_BIT_ABIS);
++            if (supported64BitAbis.length > 0) {
++                sum += sumNativeBinariesForSupportedAbi(handle, supported64BitAbis);
              }
          } else {
              String cpuAbiOverride = null;
-@@ -460,10 +460,10 @@ public class NativeLibraryHelper {
+@@ -460,10 +485,10 @@ public class NativeLibraryHelper {
              }
  
              String[] abiList = (cpuAbiOverride != null) ?
 -                    new String[] { cpuAbiOverride } : Build.SUPPORTED_ABIS;
 -            if (Build.SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null &&
-+                    new String[] { cpuAbiOverride } : Build.INTERNAL_SUPPORTED_ABIS;
-+            if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null &&
++                    new String[] { cpuAbiOverride } : supportedAbis;
++            if (supported64BitAbis.length > 0 && cpuAbiOverride == null &&
                      hasRenderscriptBitcode(handle)) {
 -                abiList = Build.SUPPORTED_32_BIT_ABIS;
-+                abiList = Build.INTERNAL_SUPPORTED_32_BIT_ABIS;
++                abiList = supported32BitAbis;
              }
  
              sum += sumNativeBinariesForSupportedAbi(handle, abiList);
@@ -316,7 +384,7 @@ index 2d42107bdd63..d61753684c47 100644
  
          for (String abi : allAbis) {
 diff --git a/services/core/java/com/android/server/pm/PackageAbiHelperImpl.java b/services/core/java/com/android/server/pm/PackageAbiHelperImpl.java
-index d851e6ced91b..9d9a44915876 100644
+index d851e6ced91b..9fe7c2cf4788 100644
 --- a/services/core/java/com/android/server/pm/PackageAbiHelperImpl.java
 +++ b/services/core/java/com/android/server/pm/PackageAbiHelperImpl.java
 @@ -239,16 +239,16 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
@@ -374,80 +442,94 @@ index d851e6ced91b..9d9a44915876 100644
              }
          } else {
              primaryCpuAbi = null;
-@@ -335,16 +335,16 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
+@@ -321,6 +321,13 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
+         NativeLibraryHelper.Handle handle = null;
+         try {
+             handle = AndroidPackageUtils.createNativeLibraryHandle(pkg);
++            final boolean usePublicAbis = NativeLibraryHelper.hasPublicNativeLibraries(handle);
++            final String[] supportedAbis = usePublicAbis
++                    ? Build.SUPPORTED_ABIS : Build.INTERNAL_SUPPORTED_ABIS;
++            final String[] supported32BitAbis = usePublicAbis
++                    ? Build.SUPPORTED_32_BIT_ABIS : Build.INTERNAL_SUPPORTED_32_BIT_ABIS;
++            final String[] supported64BitAbis = usePublicAbis
++                    ? Build.SUPPORTED_64_BIT_ABIS : Build.INTERNAL_SUPPORTED_64_BIT_ABIS;
+             // TODO(multiArch): This can be null for apps that didn't go through the
+             // usual installation process. We can calculate it again, like we
+             // do during install time.
+@@ -335,16 +342,16 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
              if (pkg.isMultiArch()) {
                  int abi32 = PackageManager.NO_NATIVE_LIBRARIES;
                  int abi64 = PackageManager.NO_NATIVE_LIBRARIES;
 -                if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
-+                if (Build.INTERNAL_SUPPORTED_32_BIT_ABIS.length > 0) {
++                if (supported32BitAbis.length > 0) {
                      if (extractLibs) {
                          Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "copyNativeBinaries");
                          abi32 = NativeLibraryHelper.copyNativeBinariesForSupportedAbi(handle,
 -                                nativeLibraryRoot, Build.SUPPORTED_32_BIT_ABIS,
-+                                nativeLibraryRoot, Build.INTERNAL_SUPPORTED_32_BIT_ABIS,
++                                nativeLibraryRoot, supported32BitAbis,
                                  useIsaSpecificSubdirs, onIncremental);
                      } else {
                          Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "findSupportedAbi");
                          abi32 = NativeLibraryHelper.findSupportedAbi(
 -                                handle, Build.SUPPORTED_32_BIT_ABIS);
-+                                handle, Build.INTERNAL_SUPPORTED_32_BIT_ABIS);
++                                handle, supported32BitAbis);
                      }
                      Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
                  }
-@@ -358,16 +358,16 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
+@@ -358,16 +365,16 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
                  maybeThrowExceptionForMultiArchCopy(
                          "Error unpackaging 32 bit native libs for multiarch app.", abi32);
  
 -                if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
-+                if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0) {
++                if (supported64BitAbis.length > 0) {
                      if (extractLibs) {
                          Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "copyNativeBinaries");
                          abi64 = NativeLibraryHelper.copyNativeBinariesForSupportedAbi(handle,
 -                                nativeLibraryRoot, Build.SUPPORTED_64_BIT_ABIS,
-+                                nativeLibraryRoot, Build.INTERNAL_SUPPORTED_64_BIT_ABIS,
++                                nativeLibraryRoot, supported64BitAbis,
                                  useIsaSpecificSubdirs, onIncremental);
                      } else {
                          Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "findSupportedAbi");
                          abi64 = NativeLibraryHelper.findSupportedAbi(
 -                                handle, Build.SUPPORTED_64_BIT_ABIS);
-+                                handle, Build.INTERNAL_SUPPORTED_64_BIT_ABIS);
++                                handle, supported64BitAbis);
                      }
                      Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
                  }
-@@ -381,11 +381,11 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
+@@ -381,11 +388,11 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
                          throw new PackageManagerException(INSTALL_FAILED_INTERNAL_ERROR,
                                  "Shared library native lib extraction not supported");
                      }
 -                    primaryCpuAbi = Build.SUPPORTED_64_BIT_ABIS[abi64];
-+                    primaryCpuAbi = Build.INTERNAL_SUPPORTED_64_BIT_ABIS[abi64];
++                    primaryCpuAbi = supported64BitAbis[abi64];
                  }
  
                  if (abi32 >= 0) {
 -                    final String abi = Build.SUPPORTED_32_BIT_ABIS[abi32];
-+                    final String abi = Build.INTERNAL_SUPPORTED_32_BIT_ABIS[abi32];
++                    final String abi = supported32BitAbis[abi32];
                      if (abi64 >= 0) {
                          if (pkg.isUse32BitAbi()) {
                              secondaryCpuAbi = primaryCpuAbi;
-@@ -399,7 +399,7 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
+@@ -399,7 +406,7 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
                  }
              } else {
                  String[] abiList = (cpuAbiOverride != null)
 -                        ? new String[]{cpuAbiOverride} : Build.SUPPORTED_ABIS;
-+                        ? new String[]{cpuAbiOverride} : Build.INTERNAL_SUPPORTED_ABIS;
++                        ? new String[]{cpuAbiOverride} : supportedAbis;
  
                  // If an app that contains RenderScript has target API level < 21, it needs to run
                  // with 32-bit ABI, and its APK file will contain a ".bc" file.
-@@ -411,10 +411,10 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
+@@ -411,10 +418,10 @@ final class PackageAbiHelperImpl implements PackageAbiHelper {
                  // we will fail the installation for such an app because it won't be able to run.
                  boolean needsRenderScriptOverride = false;
                  // No need to check if the device only supports 32-bit
 -                if (Build.SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null
-+                if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0 && cpuAbiOverride == null
++                if (supported64BitAbis.length > 0 && cpuAbiOverride == null
                          && NativeLibraryHelper.hasRenderscriptBitcode(handle)) {
 -                    if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
 -                        abiList = Build.SUPPORTED_32_BIT_ABIS;
-+                    if (Build.INTERNAL_SUPPORTED_32_BIT_ABIS.length > 0) {
-+                        abiList = Build.INTERNAL_SUPPORTED_32_BIT_ABIS;
++                    if (supported32BitAbis.length > 0) {
++                        abiList = supported32BitAbis;
                          needsRenderScriptOverride = true;
                      } else {
                          throw new PackageManagerException(

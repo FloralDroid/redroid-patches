@@ -1,0 +1,140 @@
+From 9607c6969437a06b24a84bdc57317de285d059f9 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 20 Aug 2026 01:32:47 +0800
+Subject: [PATCH] frameworks: add Floral ABI and recovery switches
+
+Change-Id: Ifff9a65cad2c5854703fdc769eebd46f859618eb
+---
+ core/java/android/os/Build.java               | 15 ++++++++++---
+ .../server/am/FloralNativeBridgeManager.java  | 22 +++++++++++++++++--
+ 2 files changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/core/java/android/os/Build.java b/core/java/android/os/Build.java
+index 7ead13038b7e..ba380545ac6b 100755
+--- a/core/java/android/os/Build.java
++++ b/core/java/android/os/Build.java
+@@ -217,7 +217,7 @@ public class Build {
+      *
+      * See {@link #SUPPORTED_32_BIT_ABIS} and {@link #SUPPORTED_64_BIT_ABIS}.
+      */
+-    public static final String[] SUPPORTED_ABIS = getStringList(
++    public static final String[] SUPPORTED_ABIS = getPublicAbiList(
+             "ro.floral.nb.pubabi", ",", "ro.product.cpu.abilist");
+ 
+     /**
+@@ -226,7 +226,7 @@ public class Build {
+      *
+      * See {@link #SUPPORTED_ABIS} and {@link #SUPPORTED_64_BIT_ABIS}.
+      */
+-    public static final String[] SUPPORTED_32_BIT_ABIS = getStringList(
++    public static final String[] SUPPORTED_32_BIT_ABIS = getPublicAbiList(
+             "ro.floral.nb.pubabi32", ",", "ro.product.cpu.abilist32");
+ 
+     /**
+@@ -235,7 +235,7 @@ public class Build {
+      *
+      * See {@link #SUPPORTED_ABIS} and {@link #SUPPORTED_32_BIT_ABIS}.
+      */
+-    public static final String[] SUPPORTED_64_BIT_ABIS = getStringList(
++    public static final String[] SUPPORTED_64_BIT_ABIS = getPublicAbiList(
+             "ro.floral.nb.pubabi64", ",", "ro.product.cpu.abilist64");
+ 
+     /** @hide ABI order used by PackageManager, zygote, and native loaders. */
+@@ -1468,6 +1468,15 @@ public class Build {
+         }
+     }
+ 
++    private static String[] getPublicAbiList(String property, String separator, String fallback) {
++        // compat_aosp is the highest-priority switch for the public ABI view.
++        if (SystemProperties.getBoolean("ro.floral.bridge.compat_aosp", false) ||
++                !SystemProperties.getBoolean("ro.floral.bridge.abi_virtualization", true)) {
++            return getStringList(fallback, separator);
++        }
++        return getStringList(property, separator, fallback);
++    }
++
+     @UnsupportedAppUsage
+     private static long getLong(String property) {
+         try {
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+index 84a58cd5f8d2..913993fc55fd 100644
+--- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -24,6 +24,7 @@ import android.app.ApplicationExitInfo;
+ import android.app.ApplicationErrorReport;
+ import android.os.Build;
+ import android.os.FileUtils;
++import android.os.SystemProperties;
+ import android.os.SystemClock;
+ import android.os.UserHandle;
+ import android.util.ArrayMap;
+@@ -63,8 +64,11 @@ final class FloralNativeBridgeManager {
+     // State written by older images used this name for the same second-stage
+     // candidate. It is normalized when read and is never emitted again.
+     private static final String MODE_COMPAT_LEGACY = "compat";
++    private static final String COMPAT_AOSP_PROPERTY = "ro.floral.bridge.compat_aosp";
++    private static final String RECOVERY_PROPERTY = "ro.floral.bridge.recovery";
+ 
+     private final ActivityManagerService mService;
++    private final boolean mEnabled;
+     private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
+     private final ArrayMap<ProcessRecord, Launch> mLaunches = new ArrayMap<>();
+     private final JSONObject mPolicy;
+@@ -72,10 +76,12 @@ final class FloralNativeBridgeManager {
+ 
+     FloralNativeBridgeManager(ActivityManagerService service) {
+         mService = service;
++        mEnabled = !SystemProperties.getBoolean(COMPAT_AOSP_PROPERTY, false)
++                && SystemProperties.getBoolean(RECOVERY_PROPERTY, true);
+         // The host policy is refreshed by init at boot. Keep parsing out of the
+         // AMS lock so starting a translated process stays deterministic and cheap.
+-        mPolicy = readJsonFile(new File(POLICY_PATH));
+-        mState = readJsonFile(mStateFile.getBaseFile());
++        mPolicy = mEnabled ? readJsonFile(new File(POLICY_PATH)) : null;
++        mState = mEnabled ? readJsonFile(mStateFile.getBaseFile()) : emptyState();
+         if (mState == null || (mState.optInt("version", 0) != 2
+                 && mState.optInt("version", 0) != STATE_VERSION)
+                 || !Build.FINGERPRINT.equals(mState.optString("build_fingerprint"))) {
+@@ -85,6 +91,9 @@ final class FloralNativeBridgeManager {
+ 
+     /** Called while holding the ActivityManagerService lock, before zygote fork. */
+     void onProcessStarting(ProcessRecord app) {
++        if (!mEnabled) {
++            return;
++        }
+         mLaunches.remove(app);
+         if (!isTranslatedApp(app)) {
+             return;
+@@ -165,6 +174,9 @@ final class FloralNativeBridgeManager {
+     }
+ 
+     private void finishStabilityWindow(ProcessRecord app, Launch launch) {
++        if (!mEnabled) {
++            return;
++        }
+         synchronized (mService) {
+             if (mLaunches.get(app) != launch) {
+                 return;
+@@ -184,6 +196,9 @@ final class FloralNativeBridgeManager {
+ 
+     /** Releases a preserved task if a monitored replacement dies outside the crash callback. */
+     void onProcessDied(ProcessRecord app) {
++        if (!mEnabled) {
++            return;
++        }
+         final Launch launch = mLaunches.remove(app);
+         if (launch != null && launch.preserveTaskSurface) {
+             mService.mAtmInternal.cancelNativeBridgeRecovery(
+@@ -216,6 +231,9 @@ final class FloralNativeBridgeManager {
+ 
+     private boolean handleEarlyFailure(ProcessRecord app, String failure,
+             int exitReason) {
++        if (!mEnabled) {
++            return false;
++        }
+         final Launch launch = mLaunches.get(app);
+         if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
+                 > EARLY_CRASH_WINDOW_MS) {
+-- 
+2.47.3
+

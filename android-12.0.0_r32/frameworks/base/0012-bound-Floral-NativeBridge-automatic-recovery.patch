@@ -1,0 +1,300 @@
+From c6618e91ec83d1edec916c3aacd490c8e0c59f62 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 19 Aug 2026 15:23:36 +0800
+Subject: [PATCH] frameworks: bound NativeBridge automatic recovery
+
+Keep automatic recovery within hybrid loader mode and release preserved task surfaces when candidates are exhausted, task restart fails, or a monitored process dies outside the crash callback.
+
+Change-Id: I7f7f552e8a74443bc0d6b03d721d2f6e4b116c71
+---
+ .../server/am/ActivityManagerService.java     |  3 +
+ .../server/am/FloralNativeBridgeManager.java  | 67 +++++++++++++++----
+ .../com/android/server/wm/ActivityRecord.java |  4 ++
+ .../wm/ActivityTaskManagerInternal.java       |  3 +
+ .../server/wm/ActivityTaskManagerService.java |  7 ++
+ .../server/wm/RootWindowContainer.java        |  7 ++
+ .../core/java/com/android/server/wm/Task.java | 11 ++-
+ 7 files changed, 87 insertions(+), 15 deletions(-)
+
+diff --git a/services/core/java/com/android/server/am/ActivityManagerService.java b/services/core/java/com/android/server/am/ActivityManagerService.java
+index 1a5480ddf06b..caa2d78913ff 100644
+--- a/services/core/java/com/android/server/am/ActivityManagerService.java
++++ b/services/core/java/com/android/server/am/ActivityManagerService.java
+@@ -3015,6 +3015,9 @@ public class ActivityManagerService extends IActivityManager.Stub
+     @GuardedBy("this")
+     final void handleAppDiedLocked(ProcessRecord app, int pid,
+             boolean restarting, boolean allowRestart, boolean fromBinderDied) {
++        if (mFloralNativeBridgeManager != null) {
++            mFloralNativeBridgeManager.onProcessDied(app);
++        }
+         boolean kept = cleanUpApplicationRecordLocked(app, pid, restarting, allowRestart, -1,
+                 false /*replacingPid*/, fromBinderDied);
+         if (!kept && !restarting) {
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+index 21c637f5b1d2..84a58cd5f8d2 100644
+--- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -17,6 +17,7 @@
+ package com.android.server.am;
+ 
+ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
++import static android.app.ActivityManager.isStartResultSuccessful;
+ 
+ import android.app.ActivityOptions;
+ import android.app.ApplicationExitInfo;
+@@ -30,6 +31,8 @@ import android.util.ArraySet;
+ import android.util.AtomicFile;
+ import android.util.Slog;
+ 
++import com.android.server.wm.WindowProcessController;
++
+ import org.json.JSONArray;
+ import org.json.JSONException;
+ import org.json.JSONObject;
+@@ -179,6 +182,15 @@ final class FloralNativeBridgeManager {
+         }
+     }
+ 
++    /** Releases a preserved task if a monitored replacement dies outside the crash callback. */
++    void onProcessDied(ProcessRecord app) {
++        final Launch launch = mLaunches.remove(app);
++        if (launch != null && launch.preserveTaskSurface) {
++            mService.mAtmInternal.cancelNativeBridgeRecovery(
++                    app.getWindowProcessController());
++        }
++    }
++
+     /** Handles only an early translated native crash with an available fallback. */
+     boolean handleEarlyNativeCrash(ProcessRecord app) {
+         return handleEarlyFailure(app, "native crash", ApplicationExitInfo.REASON_CRASH_NATIVE);
+@@ -227,6 +239,11 @@ final class FloralNativeBridgeManager {
+             put(state, "exhausted", true);
+             writeState();
+             mLaunches.remove(app);
++            // A previous fallback may have kept this ActivityRecord and its starting surface.
++            // The ordinary crash path below must be allowed to clean both up when no candidate
++            // remains.
++            mService.mAtmInternal.cancelNativeBridgeRecovery(
++                    app.getWindowProcessController());
+             Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
+                     + " failed with " + launch.candidate + " (" + failure + ")");
+             return false;
+@@ -242,15 +259,16 @@ final class FloralNativeBridgeManager {
+         final HostingRecord hostingRecord = app.getHostingRecord();
+         final boolean restartTask = (hostingRecord != null && hostingRecord.isTopApp())
+                 || (app == mService.getTopApp() && app.hasActivities());
++        final WindowProcessController crashedProcess = app.getWindowProcessController();
+         final int taskId;
+         if (!restartTask) {
+             taskId = INVALID_TASK_ID;
+         } else if (launch.preserveTaskSurface) {
+             taskId = mService.mAtmInternal.prepareNativeBridgeRecovery(
+-                    app.getWindowProcessController(), "floral-nativebridge-fallback");
++                    crashedProcess, "floral-nativebridge-fallback");
+         } else {
+             taskId = mService.mAtmInternal.finishTopCrashedActivities(
+-                    app.getWindowProcessController(), "floral-nativebridge-fallback");
++                    crashedProcess, "floral-nativebridge-fallback");
+         }
+         mService.mProcessList.removeProcessLocked(app, false, true,
+                 exitReason, "native bridge fallback");
+@@ -260,21 +278,36 @@ final class FloralNativeBridgeManager {
+         if (taskId != INVALID_TASK_ID) {
+             // Restart on the next AMS turn after process cleanup. A zero-duration task
+             // animation prevents the recovery launch itself from exposing an intermediate frame.
+-            mService.mHandler.post(() -> restartTask(taskId, launch.preserveTaskSurface));
++            mService.mHandler.post(() -> restartTask(
++                    taskId, launch.preserveTaskSurface, crashedProcess));
+         }
+         return true;
+     }
+ 
+-    private void restartTask(int taskId, boolean preserveTaskSurface) {
++    private void restartTask(int taskId, boolean preserveTaskSurface,
++            WindowProcessController crashedProcess) {
++        boolean started = false;
+         try {
+             final ActivityOptions options = preserveTaskSurface
+                     ? ActivityOptions.makeCustomTaskAnimation(
+                             mService.mContext, 0, 0, null, null, null)
+                     : ActivityOptions.makeBasic();
+-            mService.startActivityFromRecents(taskId, options.toBundle());
+-        } catch (IllegalArgumentException e) {
++            final int result = mService.startActivityFromRecents(taskId, options.toBundle());
++            started = isStartResultSuccessful(result);
++            if (!started) {
++                Slog.w(TAG, "Unable to restart task " + taskId
++                        + " after fallback, result=" + result);
++            }
++        } catch (RuntimeException e) {
+             Slog.w(TAG, "Unable to restart task " + taskId + " after fallback", e);
+         }
++        if (!started && preserveTaskSurface) {
++            // The old process has already been removed. Release the preserved record and use
++            // Android's standard crashed-activity cleanup so it cannot remain in the foreground.
++            mService.mAtmInternal.cancelNativeBridgeRecovery(crashedProcess);
++            mService.mAtmInternal.finishTopCrashedActivities(
++                    crashedProcess, "floral-nativebridge-restart-failed");
++        }
+     }
+ 
+     private static boolean isTranslatedApp(ProcessRecord app) {
+@@ -385,8 +418,8 @@ final class FloralNativeBridgeManager {
+     private static ArraySet<String> readFailedCandidates(JSONObject state) {
+         final ArraySet<String> failed = readCandidates(
+                 state.optJSONArray("failed_candidates"));
+-        // State version 2 only knew about backends. Treat those records as a
+-        // failed hybrid attempt so the new direct candidate can still run.
++        // State version 2 only knew about backends. Preserve those records as
++        // failed hybrid attempts when upgrading the candidate schema.
+         final JSONArray legacy = state.optJSONArray("failed_backends");
+         if (legacy != null) {
+             for (int i = 0; i < legacy.length(); i++) {
+@@ -537,6 +570,7 @@ final class FloralNativeBridgeManager {
+ 
+         private static PolicyRule parseSelection(JSONObject object) {
+             String backend = object.optString("selected_backend", "");
++            final boolean hasSelectedBackend = isBackend(backend);
+             if (backend.isEmpty()) {
+                 backend = object.optString("backend", "");
+             }
+@@ -556,7 +590,11 @@ final class FloralNativeBridgeManager {
+                 backend = object.optString("mode", BACKEND_AUTO);
+             }
+             if (!BACKEND_AUTO.equals(backend)) {
+-                return explicit(backend);
++                final String requestedMode = normalizeMode(object.optString(
++                        "selected_loader_mode", MODE_HYBRID));
++                final String loaderMode = hasSelectedBackend && isMode(requestedMode)
++                        ? requestedMode : MODE_HYBRID;
++                return explicit(backend, loaderMode);
+             }
+ 
+             return fromCandidates(object.optJSONArray("candidates"));
+@@ -581,9 +619,13 @@ final class FloralNativeBridgeManager {
+         }
+ 
+         private static PolicyRule explicit(String backend) {
++            return explicit(backend, MODE_HYBRID);
++        }
++
++        private static PolicyRule explicit(String backend, String loaderMode) {
+             final ArrayList<String> candidates = new ArrayList<>();
+             if (isBackend(backend)) {
+-                addBackendCandidates(candidates, backend);
++                candidates.add(candidateName(backend, loaderMode));
+                 return new PolicyRule(false, candidates, true);
+             }
+             return automaticDefaults();
+@@ -591,13 +633,10 @@ final class FloralNativeBridgeManager {
+ 
+         private static void addBackendCandidates(ArrayList<String> candidates,
+                 String... backends) {
+-            // Keep the loader model stable for one complete recovery pass.
++            // Automatic recovery keeps the enhanced loader model for its complete pass.
+             for (String backend : backends) {
+                 candidates.add(candidateName(backend, MODE_HYBRID));
+             }
+-            for (String backend : backends) {
+-                candidates.add(candidateName(backend, MODE_DIRECT));
+-            }
+         }
+ 
+         private static void reorderBackendFirst(ArrayList<String> candidates, String backend) {
+diff --git a/services/core/java/com/android/server/wm/ActivityRecord.java b/services/core/java/com/android/server/wm/ActivityRecord.java
+index 4a4c47bb1507..f4d5054d719d 100644
+--- a/services/core/java/com/android/server/wm/ActivityRecord.java
++++ b/services/core/java/com/android/server/wm/ActivityRecord.java
+@@ -1811,6 +1811,10 @@ final class ActivityRecord extends WindowToken implements WindowManagerService.A
+         setState(RESTARTING_PROCESS, "nativeBridgeRecovery");
+     }
+ 
++    void cancelNativeBridgeRecovery() {
++        mNativeBridgeRecoveryPending = false;
++    }
++
+     /**
+      * Evaluate the theme for a starting window.
+      * @param prev Previous activity which may have a starting window.
+diff --git a/services/core/java/com/android/server/wm/ActivityTaskManagerInternal.java b/services/core/java/com/android/server/wm/ActivityTaskManagerInternal.java
+index 77750f985399..05b6348bdd80 100644
+--- a/services/core/java/com/android/server/wm/ActivityTaskManagerInternal.java
++++ b/services/core/java/com/android/server/wm/ActivityTaskManagerInternal.java
+@@ -533,6 +533,9 @@ public abstract class ActivityTaskManagerInternal {
+     public abstract int prepareNativeBridgeRecovery(
+             WindowProcessController crashedApp, String reason);
+ 
++    /** Allows the ordinary crash path to clean up a task after recovery is exhausted. */
++    public abstract void cancelNativeBridgeRecovery(WindowProcessController crashedApp);
++
+     public abstract void onUidActive(int uid, int procState);
+     public abstract void onUidInactive(int uid);
+     public abstract void onUidProcStateChanged(int uid, int procState);
+diff --git a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
+index 2eb0d3d44c2e..d0ec7f540b5d 100644
+--- a/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
++++ b/services/core/java/com/android/server/wm/ActivityTaskManagerService.java
+@@ -6250,6 +6250,13 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
+             }
+         }
+ 
++        @Override
++        public void cancelNativeBridgeRecovery(WindowProcessController crashedApp) {
++            synchronized (mGlobalLock) {
++                mRootWindowContainer.cancelNativeBridgeRecovery(crashedApp);
++            }
++        }
++
+         @HotPath(caller = HotPath.OOM_ADJUSTMENT)
+         @Override
+         public void onUidActive(int uid, int procState) {
+diff --git a/services/core/java/com/android/server/wm/RootWindowContainer.java b/services/core/java/com/android/server/wm/RootWindowContainer.java
+index 2a3a005b717a..b67c6d31d30e 100644
+--- a/services/core/java/com/android/server/wm/RootWindowContainer.java
++++ b/services/core/java/com/android/server/wm/RootWindowContainer.java
+@@ -2320,6 +2320,13 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
+         return recoveredTask[0] != null ? recoveredTask[0].mTaskId : INVALID_TASK_ID;
+     }
+ 
++    /** Clears any task-surface preservation left by an exhausted NativeBridge recovery. */
++    void cancelNativeBridgeRecovery(WindowProcessController app) {
++        forAllTasks(rootTask -> {
++            rootTask.cancelTopActivityNativeBridgeRecoveryLocked(app);
++        });
++    }
++
+     boolean resumeFocusedTasksTopActivities() {
+         return resumeFocusedTasksTopActivities(null, null, null);
+     }
+diff --git a/services/core/java/com/android/server/wm/Task.java b/services/core/java/com/android/server/wm/Task.java
+index b968782159da..dd28525e55f6 100644
+--- a/services/core/java/com/android/server/wm/Task.java
++++ b/services/core/java/com/android/server/wm/Task.java
+@@ -6827,6 +6827,14 @@ class Task extends WindowContainer<WindowContainer> {
+         return r.getTask();
+     }
+ 
++    /** Restores ordinary crash cleanup after NativeBridge has no replacement candidate. */
++    final void cancelTopActivityNativeBridgeRecoveryLocked(WindowProcessController app) {
++        final ActivityRecord r = topRunningActivity();
++        if (r != null && belongsToCrashedProcess(r, app)) {
++            r.cancelNativeBridgeRecovery();
++        }
++    }
++
+     private static boolean belongsToCrashedProcess(ActivityRecord r,
+             WindowProcessController app) {
+         if (r.app == app) {
+@@ -6834,7 +6842,8 @@ class Task extends WindowContainer<WindowContainer> {
+         }
+         // During an asynchronous pre-top launch, native initialization may fail before the
+         // ActivityRecord is attached. Process name and uid uniquely identify that pending process.
+-        return r.app == null && r.isState(ActivityState.INITIALIZING)
++        return r.app == null
++                && r.isState(ActivityState.INITIALIZING, ActivityState.RESTARTING_PROCESS)
+                 && r.getUid() == app.mUid && app.mName.equals(r.processName);
+     }
+ 
+-- 
+2.47.3
+
