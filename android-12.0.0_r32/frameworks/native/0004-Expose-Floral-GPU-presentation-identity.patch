@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 7 Aug 2026 17:24:00 +0800
+Subject: [PATCH 4/4] graphics: expose Floral GPU presentation identity
+
+Use the immutable Floral GPU identity properties for GLES vendor and
+renderer strings and for Vulkan physical-device names. Keep the real Vulkan
+IDs, extensions, features, limits, and rendering path unchanged.
+
+Route both core and KHR Vulkan properties2 lookups through the override and
+keep the generated entry-point table in sync with its generator.
+
+---
+diff --git a/opengl/libs/Android.bp b/opengl/libs/Android.bp
+index c9fce8ad526f50db3220f23ea4744a8047df5aae..b14f68456c1694a1b457677cf6bdc9776cca5ab3 100644
+--- a/opengl/libs/Android.bp
++++ b/opengl/libs/Android.bp
+@@ -79,6 +79,7 @@ cc_defaults {
+     ],
+     static_libs: [
+         "libarect",
++        "libfloral_gpu_identity",
+     ],
+     header_libs: [
+         "bionic_libc_platform_headers",
+@@ -89,6 +90,17 @@ cc_defaults {
+     export_header_lib_headers: ["gl_headers"],
+ }
+ 
++cc_library_static {
++    name: "libfloral_gpu_identity",
++    srcs: ["FloralGpuIdentity.cpp"],
++    cflags: [
++        "-Wall",
++        "-Werror",
++    ],
++    shared_libs: ["libcutils"],
++    export_include_dirs: ["."],
++}
++
+ //##############################################################################
+ // Build META EGL library
+ //
+diff --git a/opengl/libs/FloralGpuIdentity.cpp b/opengl/libs/FloralGpuIdentity.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f579eb226a4df50be6d38c611b7353a348dce66
+--- /dev/null
++++ b/opengl/libs/FloralGpuIdentity.cpp
+@@ -0,0 +1,58 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "FloralGpuIdentity.h"
++
++#include <pthread.h>
++
++#include <cutils/properties.h>
++
++namespace android {
++namespace floral {
++namespace {
++
++struct GpuIdentity {
++    char vendor[PROP_VALUE_MAX] = {};
++    char model[PROP_VALUE_MAX] = {};
++};
++
++GpuIdentity identity;
++pthread_once_t identity_once = PTHREAD_ONCE_INIT;
++
++void ReadIdentity() {
++    property_get("ro.boot.floral_gpu_vendor", identity.vendor, "");
++    property_get("ro.boot.floral_gpu_model", identity.model, "");
++}
++
++const GpuIdentity& GetIdentity() {
++    pthread_once(&identity_once, ReadIdentity);
++    return identity;
++}
++
++} // namespace
++
++const char* GetGpuVendorOverride() {
++    const char* value = GetIdentity().vendor;
++    return value[0] == '\0' ? nullptr : value;
++}
++
++const char* GetGpuModelOverride() {
++    const char* value = GetIdentity().model;
++    return value[0] == '\0' ? nullptr : value;
++}
++
++} // namespace floral
++} // namespace android
+diff --git a/opengl/libs/FloralGpuIdentity.h b/opengl/libs/FloralGpuIdentity.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e01ed70b5c006ceebe945eb39a19a2b4e933690e
+--- /dev/null
++++ b/opengl/libs/FloralGpuIdentity.h
+@@ -0,0 +1,26 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++namespace android {
++namespace floral {
++
++const char* GetGpuVendorOverride();
++const char* GetGpuModelOverride();
++
++} // namespace floral
++} // namespace android
+diff --git a/opengl/libs/GLES2/gl2.cpp b/opengl/libs/GLES2/gl2.cpp
+index 65f50f54fb7837859fd9014e608ec3aeacd11482..872fa9e71e93484c62b9bc665356e9e3d466b722 100644
+--- a/opengl/libs/GLES2/gl2.cpp
++++ b/opengl/libs/GLES2/gl2.cpp
+@@ -22,6 +22,7 @@
+ #include <log/log.h>
+ #include <cutils/properties.h>
+ 
++#include "../FloralGpuIdentity.h"
+ #include "../hooks.h"
+ #include "../egl_impl.h"
+ 
+@@ -301,6 +302,15 @@ extern "C" {
+ }
+ 
+ const GLubyte * glGetString(GLenum name) {
++    if (name == GL_VENDOR) {
++        if (const char* value = android::floral::GetGpuVendorOverride()) {
++            return reinterpret_cast<const GLubyte*>(value);
++        }
++    } else if (name == GL_RENDERER) {
++        if (const char* value = android::floral::GetGpuModelOverride()) {
++            return reinterpret_cast<const GLubyte*>(value);
++        }
++    }
+     egl_connection_t* const cnx = egl_get_connection();
+     return cnx->platform.glGetString(name);
+ }
+diff --git a/opengl/libs/GLES_CM/gl.cpp b/opengl/libs/GLES_CM/gl.cpp
+index bacd4b4bc87560cab27b04fc8c0474ecfe3e2eb0..1e42345b990ce7f1af6b02b06bd6d507fcacf8f7 100644
+--- a/opengl/libs/GLES_CM/gl.cpp
++++ b/opengl/libs/GLES_CM/gl.cpp
+@@ -25,6 +25,7 @@
+ #include <GLES/gl.h>
+ #include <GLES/glext.h>
+ 
++#include "../FloralGpuIdentity.h"
+ #include "../hooks.h"
+ #include "../egl_impl.h"
+ 
+@@ -347,6 +348,15 @@ extern "C" {
+ extern "C" const GLubyte * __glGetString(GLenum name);
+ 
+ const GLubyte * glGetString(GLenum name) {
++    if (name == GL_VENDOR) {
++        if (const char* value = android::floral::GetGpuVendorOverride()) {
++            return reinterpret_cast<const GLubyte*>(value);
++        }
++    } else if (name == GL_RENDERER) {
++        if (const char* value = android::floral::GetGpuModelOverride()) {
++            return reinterpret_cast<const GLubyte*>(value);
++        }
++    }
+     const GLubyte * ret = egl_get_string_for_current_context(name);
+     if (ret == NULL) {
+         gl_hooks_t::gl_t const * const _c = &getGlThreadSpecific()->gl;
+diff --git a/vulkan/libvulkan/Android.bp b/vulkan/libvulkan/Android.bp
+index 440c5b144ac5318efbeddd49f0247149a44b7e05..11a27c03aa4cbf3e06a50f68fd2f5fc5480eca2b 100644
+--- a/vulkan/libvulkan/Android.bp
++++ b/vulkan/libvulkan/Android.bp
+@@ -110,5 +110,8 @@ cc_library_shared {
+         "android.hardware.graphics.common@1.0",
+         "libSurfaceFlingerProp",
+     ],
+-    static_libs: ["libgrallocusage"],
++    static_libs: [
++        "libfloral_gpu_identity",
++        "libgrallocusage",
++    ],
+ }
+diff --git a/vulkan/libvulkan/api.cpp b/vulkan/libvulkan/api.cpp
+index d1cd397da433e57f7df2659bcd10233aad8d1b31..e11618b0fb79d330b9260c99abc948944d19a2cb 100644
+--- a/vulkan/libvulkan/api.cpp
++++ b/vulkan/libvulkan/api.cpp
+@@ -41,6 +41,7 @@
+ 
+ #include <vulkan/vk_layer_interface.h>
+ #include <graphicsenv/GraphicsEnv.h>
++#include "FloralGpuIdentity.h"
+ #include "api.h"
+ #include "driver.h"
+ #include "layers_extensions.h"
+@@ -1256,6 +1257,23 @@ void DestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) {
+         LayerChain::DestroyDevice(device, pAllocator);
+ }
+ 
++void GetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
++                                 VkPhysicalDeviceProperties* pProperties) {
++    GetData(physicalDevice).dispatch.GetPhysicalDeviceProperties(physicalDevice, pProperties);
++    if (const char* model = android::floral::GetGpuModelOverride()) {
++        strlcpy(pProperties->deviceName, model, sizeof(pProperties->deviceName));
++    }
++}
++
++void GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
++                                  VkPhysicalDeviceProperties2* pProperties) {
++    GetData(physicalDevice).dispatch.GetPhysicalDeviceProperties2(physicalDevice, pProperties);
++    if (const char* model = android::floral::GetGpuModelOverride()) {
++        strlcpy(pProperties->properties.deviceName, model,
++                sizeof(pProperties->properties.deviceName));
++    }
++}
++
+ VkResult EnumerateInstanceLayerProperties(uint32_t* pPropertyCount,
+                                           VkLayerProperties* pProperties) {
+     ATRACE_CALL();
+diff --git a/vulkan/libvulkan/api.h b/vulkan/libvulkan/api.h
+index 2a215d74277632802d7de400e8da804a6a66d9e1..6c0b165080c4c160016e330c3298b4aec15d58eb 100644
+--- a/vulkan/libvulkan/api.h
++++ b/vulkan/libvulkan/api.h
+@@ -33,6 +33,10 @@ VKAPI_ATTR VkResult CreateDevice(VkPhysicalDevice physicalDevice,
+                                  const VkDeviceCreateInfo* pCreateInfo,
+                                  const VkAllocationCallbacks* pAllocator,
+                                  VkDevice* pDevice);
++VKAPI_ATTR void GetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
++                                            VkPhysicalDeviceProperties* pProperties);
++VKAPI_ATTR void GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
++                                             VkPhysicalDeviceProperties2* pProperties);
+ VKAPI_ATTR void DestroyDevice(VkDevice device,
+                               const VkAllocationCallbacks* pAllocator);
+ VKAPI_ATTR VkResult
+diff --git a/vulkan/libvulkan/api_gen.cpp b/vulkan/libvulkan/api_gen.cpp
+index 26052fba63a1f03e9c5122f01b8bf400104c5c76..57a35d79cfd9a6be4eaaef8c0119af60da6afca0 100644
+--- a/vulkan/libvulkan/api_gen.cpp
++++ b/vulkan/libvulkan/api_gen.cpp
+@@ -365,7 +365,6 @@ namespace {
+ VKAPI_ATTR VkResult EnumeratePhysicalDevices(VkInstance instance, uint32_t* pPhysicalDeviceCount, VkPhysicalDevice* pPhysicalDevices);
+ VKAPI_ATTR PFN_vkVoidFunction GetDeviceProcAddr(VkDevice device, const char* pName);
+ VKAPI_ATTR PFN_vkVoidFunction GetInstanceProcAddr(VkInstance instance, const char* pName);
+-VKAPI_ATTR void GetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties);
+ VKAPI_ATTR void GetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount, VkQueueFamilyProperties* pQueueFamilyProperties);
+ VKAPI_ATTR void GetPhysicalDeviceMemoryProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceMemoryProperties* pMemoryProperties);
+ VKAPI_ATTR void GetPhysicalDeviceFeatures(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures* pFeatures);
+@@ -504,7 +503,6 @@ VKAPI_ATTR VkResult GetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapch
+ VKAPI_ATTR VkResult AcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex);
+ VKAPI_ATTR VkResult QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo);
+ VKAPI_ATTR void GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2* pFeatures);
+-VKAPI_ATTR void GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties2* pProperties);
+ VKAPI_ATTR void GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice, VkFormat format, VkFormatProperties2* pFormatProperties);
+ VKAPI_ATTR VkResult GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice, const VkPhysicalDeviceImageFormatInfo2* pImageFormatInfo, VkImageFormatProperties2* pImageFormatProperties);
+ VKAPI_ATTR void GetPhysicalDeviceQueueFamilyProperties2(VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount, VkQueueFamilyProperties2* pQueueFamilyProperties);
+@@ -806,6 +804,9 @@ VKAPI_ATTR PFN_vkVoidFunction GetInstanceProcAddr(VkInstance instance, const cha
+         { "vkGetImageSubresourceLayout", reinterpret_cast<PFN_vkVoidFunction>(GetImageSubresourceLayout) },
+         { "vkGetInstanceProcAddr", reinterpret_cast<PFN_vkVoidFunction>(GetInstanceProcAddr) },
+         { "vkGetMemoryAndroidHardwareBufferANDROID", reinterpret_cast<PFN_vkVoidFunction>(GetMemoryAndroidHardwareBufferANDROID) },
++        { "vkGetPhysicalDeviceProperties", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceProperties) },
++        { "vkGetPhysicalDeviceProperties2", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceProperties2) },
++        { "vkGetPhysicalDeviceProperties2KHR", reinterpret_cast<PFN_vkVoidFunction>(GetPhysicalDeviceProperties2) },
+         { "vkGetPipelineCacheData", reinterpret_cast<PFN_vkVoidFunction>(GetPipelineCacheData) },
+         { "vkGetQueryPoolResults", reinterpret_cast<PFN_vkVoidFunction>(GetQueryPoolResults) },
+         { "vkGetRenderAreaGranularity", reinterpret_cast<PFN_vkVoidFunction>(GetRenderAreaGranularity) },
+@@ -851,10 +852,6 @@ VKAPI_ATTR PFN_vkVoidFunction GetInstanceProcAddr(VkInstance instance, const cha
+     return GetData(instance).dispatch.GetInstanceProcAddr(instance, pName);
+ }
+ 
+-VKAPI_ATTR void GetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties* pProperties) {
+-    GetData(physicalDevice).dispatch.GetPhysicalDeviceProperties(physicalDevice, pProperties);
+-}
+-
+ VKAPI_ATTR void GetPhysicalDeviceQueueFamilyProperties(VkPhysicalDevice physicalDevice, uint32_t* pQueueFamilyPropertyCount, VkQueueFamilyProperties* pQueueFamilyProperties) {
+     GetData(physicalDevice).dispatch.GetPhysicalDeviceQueueFamilyProperties(physicalDevice, pQueueFamilyPropertyCount, pQueueFamilyProperties);
+ }
+@@ -1407,10 +1404,6 @@ VKAPI_ATTR void GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice, VkPh
+     GetData(physicalDevice).dispatch.GetPhysicalDeviceFeatures2(physicalDevice, pFeatures);
+ }
+ 
+-VKAPI_ATTR void GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties2* pProperties) {
+-    GetData(physicalDevice).dispatch.GetPhysicalDeviceProperties2(physicalDevice, pProperties);
+-}
+-
+ VKAPI_ATTR void GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice, VkFormat format, VkFormatProperties2* pFormatProperties) {
+     GetData(physicalDevice).dispatch.GetPhysicalDeviceFormatProperties2(physicalDevice, format, pFormatProperties);
+ }
+diff --git a/vulkan/scripts/api_generator.py b/vulkan/scripts/api_generator.py
+index be24172eed550c9929a14670d64ccba7aeb05f5d..deac096f2057594b4abb723ebde161f5e24ae5c3 100644
+--- a/vulkan/scripts/api_generator.py
++++ b/vulkan/scripts/api_generator.py
+@@ -27,6 +27,8 @@ _INTERCEPTED_COMMANDS = [
+     'vkDestroyInstance',
+     'vkEnumerateDeviceExtensionProperties',
+     'vkEnumerateDeviceLayerProperties',
++    'vkGetPhysicalDeviceProperties',
++    'vkGetPhysicalDeviceProperties2',
+ ]
+ 
+ 
+@@ -172,7 +174,11 @@ def _intercept_instance_proc_addr(f):
+ 
+   sorted_command_list = sorted(gencom.command_list)
+   for cmd in sorted_command_list:
+-    if gencom.is_function_exported(cmd):
++    if cmd == 'vkGetPhysicalDeviceProperties2KHR':
++      f.write(gencom.indent(2) + '{ \"' + cmd +
++              '\", reinterpret_cast<PFN_vkVoidFunction>(' +
++              'GetPhysicalDeviceProperties2) },\n')
++    elif gencom.is_function_exported(cmd):
+       if gencom.is_globally_dispatched(cmd):
+         f.write(gencom.indent(2) + '{ \"' + cmd + '\", nullptr },\n')
+       elif (_is_intercepted(cmd) or
+-- 
+2.47.3

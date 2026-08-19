@@ -1,0 +1,803 @@
+From a5379bcc1a7aa449a92e651bf3839b57ae68e5f5 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sat, 15 Aug 2026 14:05:15 +0800
+Subject: [PATCH] bionic: virtualize ARM identity for NativeBridge guests
+
+Change-Id: Iebec5484573d6b07c6d53d2770ef044739745276
+---
+ libc/Android.bp                     |   2 +
+ libc/SYSCALLS.TXT                   |   4 +-
+ libc/bionic/floral_nativebridge.cpp | 127 ++++++++++
+ libc/bionic/getauxval.cpp           |  46 +++-
+ libc/bionic/sysinfo.cpp             | 377 +++++++++++++++++++++++++++-
+ libc/bionic/system_property_api.cpp |  32 ++-
+ libc/bionic/uname.cpp               |  31 +++
+ libc/libc.map.txt                   |   1 +
+ libc/private/floral_nativebridge.h  |  30 +++
+ 9 files changed, 644 insertions(+), 6 deletions(-)
+ create mode 100644 libc/bionic/floral_nativebridge.cpp
+ create mode 100644 libc/bionic/uname.cpp
+ create mode 100644 libc/private/floral_nativebridge.h
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index 2c0656f..93db505 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1066,6 +1066,7 @@ cc_library_static {
+         "bionic/ftruncate.cpp",
+         "bionic/ftw.cpp",
+         "bionic/futimens.cpp",
++        "bionic/floral_nativebridge.cpp",
+         "bionic/getcwd.cpp",
+         "bionic/getdomainname.cpp",
+         "bionic/getentropy.cpp",
+@@ -1174,6 +1175,7 @@ cc_library_static {
+         "bionic/timespec_get.cpp",
+         "bionic/tmpfile.cpp",
+         "bionic/umount.cpp",
++        "bionic/uname.cpp",
+         "bionic/unlink.cpp",
+         "bionic/usleep.cpp",
+         "bionic/utmp.cpp",
+diff --git a/libc/SYSCALLS.TXT b/libc/SYSCALLS.TXT
+index 391e7af..ce2b779 100644
+--- a/libc/SYSCALLS.TXT
++++ b/libc/SYSCALLS.TXT
+@@ -296,13 +296,13 @@ int __sched_getaffinity:sched_getaffinity(pid_t pid, size_t setsize, cpu_set_t*
+ int __getcpu:getcpu(unsigned*, unsigned*, void*) all
+ 
+ # other
+-int     uname(struct utsname*)  all
++int     __uname:uname(struct utsname*)  all
+ mode_t  umask(mode_t)  all
+ int     __reboot:reboot(int, int, int, void*)  all
+ int     init_module(void*, unsigned long, const char*)  all
+ int     delete_module(const char*, unsigned int)   all
+ int     klogctl:syslog(int, char*, int)   all
+-int     sysinfo(struct sysinfo*)  all
++int     __sysinfo:sysinfo(struct sysinfo*)  all
+ int     personality(unsigned long)  all
+ 
+ ssize_t tee(int, int, size_t, unsigned int)  all
+diff --git a/libc/bionic/floral_nativebridge.cpp b/libc/bionic/floral_nativebridge.cpp
+new file mode 100644
+index 0000000..5e31a8c
+--- /dev/null
++++ b/libc/bionic/floral_nativebridge.cpp
+@@ -0,0 +1,127 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#include "private/floral_nativebridge.h"
++
++#include <sys/system_properties.h>
++
++#include <string.h>
++
++#include "private/bionic_defs.h"
++
++namespace {
++
++int g_floral_nativebridge_guest_arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
++constexpr size_t kUtsnameFieldLength = 64;
++constexpr char kDefaultGuestKernelRelease[] = "5.10.66-android12-9";
++constexpr char kDefaultGuestKernelVersion[] = "#1 SMP PREEMPT";
++char g_floral_nativebridge_kernel_release[kUtsnameFieldLength + 1] = {};
++char g_floral_nativebridge_kernel_version[kUtsnameFieldLength + 1] = {};
++
++void LoadKernelIdentity() {
++  char value[PROP_VALUE_MAX] = {};
++  if (__system_property_get("ro.boot.floral_kernel_release", value) > 0 &&
++      strlen(value) <= kUtsnameFieldLength) {
++    strlcpy(g_floral_nativebridge_kernel_release, value,
++            sizeof(g_floral_nativebridge_kernel_release));
++  }
++
++  memset(value, 0, sizeof(value));
++  if (__system_property_get("ro.boot.floral_kernel_version", value) > 0 &&
++      strlen(value) <= kUtsnameFieldLength) {
++    strlcpy(g_floral_nativebridge_kernel_version, value,
++            sizeof(g_floral_nativebridge_kernel_version));
++  }
++}
++
++void ClearKernelIdentity() {
++  g_floral_nativebridge_kernel_release[0] = '\0';
++  g_floral_nativebridge_kernel_version[0] = '\0';
++}
++
++struct PropertyOverride {
++  const char* name;
++  const char* arm;
++  const char* arm64;
++};
++
++constexpr PropertyOverride kPropertyOverrides[] = {
++    {"ro.product.cpu.abi", "armeabi-v7a", "arm64-v8a"},
++    {"ro.product.cpu.abi2", "armeabi", ""},
++    {"ro.product.cpu.abilist", "armeabi-v7a,armeabi", "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.product.cpu.abilist32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
++    {"ro.product.cpu.abilist64", "", "arm64-v8a"},
++    {"ro.dalvik.vm.isa.arm", "arm", "arm"},
++    {"ro.dalvik.vm.isa.arm64", "arm64", "arm64"},
++    {"ro.floral.nb.pubabi", "armeabi-v7a,armeabi", "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.floral.nb.pubabi32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
++    {"ro.floral.nb.pubabi64", "", "arm64-v8a"},
++    {"ro.floral.nb.loadabi", "armeabi-v7a,armeabi", "arm64-v8a,armeabi-v7a,armeabi"},
++    {"ro.floral.nb.loadabi32", "armeabi-v7a,armeabi", "armeabi-v7a,armeabi"},
++    {"ro.floral.nb.loadabi64", "", "arm64-v8a"},
++};
++
++}  // namespace
++
++extern "C" void __floral_nativebridge_set_guest_arch(int arch) {
++  if (arch < FLORAL_NATIVEBRIDGE_GUEST_NONE || arch > FLORAL_NATIVEBRIDGE_GUEST_ARM64) {
++    arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
++  }
++  if (arch == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    ClearKernelIdentity();
++  } else {
++    LoadKernelIdentity();
++  }
++  __atomic_store_n(&g_floral_nativebridge_guest_arch, arch, __ATOMIC_RELEASE);
++}
++
++extern "C" __LIBC_HIDDEN__ int __floral_nativebridge_guest_arch() {
++  return __atomic_load_n(&g_floral_nativebridge_guest_arch, __ATOMIC_ACQUIRE);
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_machine() {
++  switch (__floral_nativebridge_guest_arch()) {
++    case FLORAL_NATIVEBRIDGE_GUEST_ARM:
++      return "armv7l";
++    case FLORAL_NATIVEBRIDGE_GUEST_ARM64:
++      return "aarch64";
++    default:
++      return nullptr;
++  }
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_release() {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    return nullptr;
++  }
++  return g_floral_nativebridge_kernel_release[0] == '\0' ? kDefaultGuestKernelRelease
++                                                         : g_floral_nativebridge_kernel_release;
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_version() {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    return nullptr;
++  }
++  return g_floral_nativebridge_kernel_version[0] == '\0' ? kDefaultGuestKernelVersion
++                                                         : g_floral_nativebridge_kernel_version;
++}
++
++extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(const char* name) {
++  if (name == nullptr) {
++    return nullptr;
++  }
++  const int arch = __floral_nativebridge_guest_arch();
++  if (arch == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    return nullptr;
++  }
++  for (const PropertyOverride& property : kPropertyOverrides) {
++    if (strcmp(name, property.name) == 0) {
++      return arch == FLORAL_NATIVEBRIDGE_GUEST_ARM64 ? property.arm64 : property.arm;
++    }
++  }
++  return nullptr;
++}
+diff --git a/libc/bionic/getauxval.cpp b/libc/bionic/getauxval.cpp
+index a3c6b19..312f782 100644
+--- a/libc/bionic/getauxval.cpp
++++ b/libc/bionic/getauxval.cpp
+@@ -35,6 +35,41 @@
+ #include <elf.h>
+ #include <errno.h>
+ 
++#include "private/floral_nativebridge.h"
++
++namespace {
++
++constexpr unsigned long kArm64BaselineHwcap = (1UL << 0) | (1UL << 1);  // FP, ASIMD.
++constexpr unsigned long kArmBaselineHwcap =
++    (1UL << 0) | (1UL << 1) | (1UL << 2) | (1UL << 4) | (1UL << 6) |
++    (1UL << 7) | (1UL << 12) | (1UL << 13) | (1UL << 15) | (1UL << 16) |
++    (1UL << 17) | (1UL << 18);  // ARMv7 with VFPv4, NEON and integer divide.
++
++unsigned long FloralGuestAuxValue(unsigned long type, int arch, bool* exists) {
++  static const char kArmPlatform[] = "v7l";
++  static const char kArm64Platform[] = "aarch64";
++
++  *exists = false;
++  switch (type) {
++    case AT_PLATFORM:
++    case AT_BASE_PLATFORM:
++      *exists = true;
++      return reinterpret_cast<unsigned long>(
++          arch == FLORAL_NATIVEBRIDGE_GUEST_ARM64 ? kArm64Platform : kArmPlatform);
++    case AT_HWCAP:
++      *exists = true;
++      return arch == FLORAL_NATIVEBRIDGE_GUEST_ARM64 ? kArm64BaselineHwcap
++                                                      : kArmBaselineHwcap;
++    case AT_HWCAP2:
++      *exists = true;
++      return 0;
++    default:
++      return 0;
++  }
++}
++
++}  // namespace
++
+ // This function needs to be safe to call before TLS is set up, so it can't
+ // access errno or the stack protector.
+ __LIBC_HIDDEN__ unsigned long __bionic_getauxval(unsigned long type, bool* exists) {
+@@ -50,7 +85,16 @@ __LIBC_HIDDEN__ unsigned long __bionic_getauxval(unsigned long type, bool* exist
+ 
+ extern "C" unsigned long getauxval(unsigned long type) {
+   bool exists;
+-  unsigned long result = __bionic_getauxval(type, &exists);
++  unsigned long result = 0;
++  const int guest_arch = __floral_nativebridge_guest_arch();
++  if (guest_arch != FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++    result = FloralGuestAuxValue(type, guest_arch, &exists);
++  } else {
++    exists = false;
++  }
++  if (!exists) {
++    result = __bionic_getauxval(type, &exists);
++  }
+   if (!exists) errno = ENOENT;
+   return result;
+ }
+diff --git a/libc/bionic/sysinfo.cpp b/libc/bionic/sysinfo.cpp
+index 7ab8e9e..515554b 100644
+--- a/libc/bionic/sysinfo.cpp
++++ b/libc/bionic/sysinfo.cpp
+@@ -29,12 +29,387 @@
+ #include <sys/sysinfo.h>
+ 
+ #include <dirent.h>
++#include <errno.h>
++#include <inttypes.h>
++#include <limits.h>
++#include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#include "private/get_cpu_count_from_string.h"
+ #include "private/ScopedReaddir.h"
++#include "private/get_cpu_count_from_string.h"
++
++extern "C" int __sysinfo(struct sysinfo*);
++
++namespace {
++
++struct FloralMeminfo {
++  uint64_t total_kb = 0;
++  uint64_t free_kb = 0;
++  uint64_t buffers_kb = 0;
++  uint64_t shared_kb = 0;
++  uint64_t swap_total_kb = 0;
++  uint64_t swap_free_kb = 0;
++  bool valid = false;
++};
++
++struct FloralCgroupMemory {
++  uint64_t total_bytes = 0;
++  uint64_t current_bytes = 0;
++  uint64_t swap_total_bytes = 0;
++  uint64_t swap_current_bytes = 0;
++  bool valid = false;
++};
++
++// Cgroup paths can approach PATH_MAX; keep their buffers off libc's small stack.
++class FloralPathBuffer {
++ public:
++  FloralPathBuffer() : data_(static_cast<char*>(malloc(PATH_MAX))) {
++    if (data_ != nullptr) data_[0] = '\0';
++  }
++
++  ~FloralPathBuffer() {
++    free(data_);
++  }
++
++  FloralPathBuffer(const FloralPathBuffer&) = delete;
++  FloralPathBuffer& operator=(const FloralPathBuffer&) = delete;
++
++  bool valid() const {
++    return data_ != nullptr;
++  }
++
++  char* get() {
++    return data_;
++  }
++
++ private:
++  char* data_;
++};
++
++unsigned long ToSysinfoUnits(uint64_t kibibytes, unsigned int unit) {
++  if (unit == 0) unit = 1;
++  if (kibibytes > UINT64_MAX / 1024) return ULONG_MAX;
++  const uint64_t value = kibibytes * 1024 / unit;
++  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++unsigned long BytesToSysinfoUnits(uint64_t bytes, unsigned int unit) {
++  if (unit == 0) unit = 1;
++  const uint64_t value = bytes / unit;
++  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++bool IsSafeCgroupPath(const char* path) {
++  if (path == nullptr || path[0] != '/') return false;
++
++  const char* component = path + 1;
++  while (*component != '\0') {
++    const char* slash = strchr(component, '/');
++    const size_t length = slash == nullptr ? strlen(component) : slash - component;
++    if ((length == 1 && component[0] == '.') ||
++        (length == 2 && component[0] == '.' && component[1] == '.')) {
++      return false;
++    }
++    if (slash == nullptr) break;
++    component = slash + 1;
++  }
++  return true;
++}
++
++bool ControllerListContains(const char* controllers, const char* expected) {
++  const size_t expected_length = strlen(expected);
++  const char* cursor = controllers;
++  while (*cursor != '\0') {
++    const char* comma = strchr(cursor, ',');
++    const size_t length = comma == nullptr ? strlen(cursor) : comma - cursor;
++    if (length == expected_length && strncmp(cursor, expected, length) == 0) return true;
++    if (comma == nullptr) break;
++    cursor = comma + 1;
++  }
++  return false;
++}
++
++bool ReadSelfCgroupPaths(char* unified, size_t unified_size, char* memory, size_t memory_size) {
++  FILE* file = fopen("/proc/self/cgroup", "re");
++  if (file == nullptr) return false;
++
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    char* first_colon = strchr(line, ':');
++    if (first_colon == nullptr) continue;
++    char* second_colon = strchr(first_colon + 1, ':');
++    if (second_colon == nullptr) continue;
++
++    *first_colon = '\0';
++    *second_colon = '\0';
++    char* path = second_colon + 1;
++    path[strcspn(path, "\r\n")] = '\0';
++    if (!IsSafeCgroupPath(path)) continue;
++
++    if (strcmp(line, "0") == 0 && first_colon[1] == '\0') {
++      if (strlcpy(unified, path, unified_size) >= unified_size) unified[0] = '\0';
++    } else if (ControllerListContains(first_colon + 1, "memory")) {
++      if (strlcpy(memory, path, memory_size) >= memory_size) memory[0] = '\0';
++    }
++  }
++  free(line);
++  fclose(file);
++  return unified[0] != '\0' || memory[0] != '\0';
++}
++
++bool ReadCgroupValue(const char* path, uint64_t* value, bool* unlimited) {
++  FILE* file = fopen(path, "re");
++  if (file == nullptr) return false;
++
++  char text[64];
++  const bool read = fgets(text, sizeof(text), file) != nullptr;
++  fclose(file);
++  if (!read) return false;
++
++  text[strcspn(text, "\r\n")] = '\0';
++  if (strcmp(text, "max") == 0) {
++    *unlimited = true;
++    *value = 0;
++    return true;
++  }
++
++  char* end = nullptr;
++  errno = 0;
++  const uint64_t parsed = strtoull(text, &end, 10);
++  if (errno != 0 || end == text || *end != '\0') return false;
++  *unlimited = false;
++  *value = parsed;
++  return true;
++}
++
++bool BuildCgroupFilePath(char* output, size_t output_size, const char* root, const char* cgroup,
++                         const char* file) {
++  const char* separator = strcmp(cgroup, "/") == 0 ? "" : cgroup;
++  const int length = snprintf(output, output_size, "%s%s/%s", root, separator, file);
++  return length >= 0 && static_cast<size_t>(length) < output_size;
++}
++
++bool ParentCgroupPath(char* path) {
++  if (strcmp(path, "/") == 0) return false;
++  char* slash = strrchr(path, '/');
++  if (slash == path) {
++    path[1] = '\0';
++  } else if (slash != nullptr) {
++    *slash = '\0';
++  }
++  return true;
++}
++
++bool ReadCgroupLimit(const char* root, const char* cgroup, const char* file, uint64_t* limit) {
++  FloralPathBuffer current;
++  FloralPathBuffer path;
++  if (!current.valid() || !path.valid() || strlcpy(current.get(), cgroup, PATH_MAX) >= PATH_MAX) {
++    return false;
++  }
++
++  bool found = false;
++  uint64_t minimum = UINT64_MAX;
++  do {
++    uint64_t value = 0;
++    bool unlimited = false;
++    if (BuildCgroupFilePath(path.get(), PATH_MAX, root, current.get(), file) &&
++        ReadCgroupValue(path.get(), &value, &unlimited) && !unlimited && value != 0) {
++      if (value < minimum) minimum = value;
++      found = true;
++    }
++  } while (ParentCgroupPath(current.get()));
++
++  if (!found) return false;
++  *limit = minimum;
++  return true;
++}
++
++bool ReadCgroupV2Memory(const char* cgroup, FloralCgroupMemory* memory) {
++  FloralPathBuffer path;
++  if (!path.valid()) return false;
++  bool swap_unlimited = false;
++
++  if (!ReadCgroupLimit("/sys/fs/cgroup", cgroup, "memory.max", &memory->total_bytes)) {
++    return false;
++  }
++  bool current_unlimited = false;
++  if (!BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup, "memory.current") ||
++      !ReadCgroupValue(path.get(), &memory->current_bytes, &current_unlimited) ||
++      current_unlimited) {
++    return false;
++  }
++
++  if (BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup, "memory.swap.max") &&
++      ReadCgroupValue(path.get(), &memory->swap_total_bytes, &swap_unlimited) &&
++      !swap_unlimited &&
++      BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup,
++                          "memory.swap.current")) {
++    bool current_unlimited = false;
++    if (!ReadCgroupValue(path.get(), &memory->swap_current_bytes, &current_unlimited) ||
++        current_unlimited) {
++      memory->swap_total_bytes = 0;
++      memory->swap_current_bytes = 0;
++    }
++  } else {
++    memory->swap_total_bytes = 0;
++    memory->swap_current_bytes = 0;
++  }
++  memory->valid = true;
++  return true;
++}
++
++bool ReadCgroupV1Memory(const char* cgroup, FloralCgroupMemory* memory) {
++  constexpr char kRoot[] = "/sys/fs/cgroup/memory";
++  FloralPathBuffer path;
++  if (!path.valid()) return false;
++  bool unlimited = false;
++
++  if (!ReadCgroupLimit(kRoot, cgroup, "memory.limit_in_bytes", &memory->total_bytes)) {
++    return false;
++  }
++  if (!BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup, "memory.usage_in_bytes") ||
++      !ReadCgroupValue(path.get(), &memory->current_bytes, &unlimited) || unlimited) {
++    return false;
++  }
++
++  uint64_t memory_and_swap_limit = 0;
++  uint64_t memory_and_swap_usage = 0;
++  if (BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup, "memory.memsw.limit_in_bytes") &&
++      ReadCgroupValue(path.get(), &memory_and_swap_limit, &unlimited) && !unlimited &&
++      BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup,
++                          "memory.memsw.usage_in_bytes") &&
++      ReadCgroupValue(path.get(), &memory_and_swap_usage, &unlimited) && !unlimited) {
++    memory->swap_total_bytes = memory_and_swap_limit > memory->total_bytes
++                                   ? memory_and_swap_limit - memory->total_bytes
++                                   : 0;
++    memory->swap_current_bytes = memory_and_swap_usage > memory->current_bytes
++                                     ? memory_and_swap_usage - memory->current_bytes
++                                     : 0;
++  }
++  memory->valid = true;
++  return true;
++}
++
++FloralCgroupMemory ReadFloralCgroupMemory() {
++  FloralCgroupMemory memory;
++  FloralPathBuffer unified_path;
++  FloralPathBuffer memory_path;
++  if (!unified_path.valid() || !memory_path.valid() ||
++      !ReadSelfCgroupPaths(unified_path.get(), PATH_MAX, memory_path.get(), PATH_MAX)) {
++    return memory;
++  }
++
++  if (unified_path.get()[0] != '\0' && ReadCgroupV2Memory(unified_path.get(), &memory)) {
++    return memory;
++  }
++  if (memory_path.get()[0] != '\0') ReadCgroupV1Memory(memory_path.get(), &memory);
++  return memory;
++}
++
++bool ApplyFloralCgroupMemory(struct sysinfo* info) {
++  FloralCgroupMemory memory = ReadFloralCgroupMemory();
++  if (!memory.valid) return false;
++
++  const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++  const uint64_t host_total = static_cast<uint64_t>(info->totalram) * unit;
++  if (host_total != 0 && memory.total_bytes > host_total) memory.total_bytes = host_total;
++  if (memory.current_bytes > memory.total_bytes) memory.current_bytes = memory.total_bytes;
++  if (memory.swap_current_bytes > memory.swap_total_bytes) {
++    memory.swap_current_bytes = memory.swap_total_bytes;
++  }
++
++  info->totalram = BytesToSysinfoUnits(memory.total_bytes, unit);
++  info->freeram = BytesToSysinfoUnits(memory.total_bytes - memory.current_bytes, unit);
++  info->sharedram = 0;
++  info->bufferram = 0;
++  info->totalswap = BytesToSysinfoUnits(memory.swap_total_bytes, unit);
++  info->freeswap = BytesToSysinfoUnits(memory.swap_total_bytes - memory.swap_current_bytes, unit);
++  info->totalhigh = 0;
++  info->freehigh = 0;
++  return true;
++}
++
++FloralMeminfo ReadFloralMeminfo() {
++  FloralMeminfo memory;
++  FILE* file = fopen("/proc/meminfo", "re");
++  if (file == nullptr) return memory;
++
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    uint64_t value = 0;
++    if (sscanf(line, "MemTotal: %" SCNu64 " kB", &value) == 1) {
++      memory.total_kb = value;
++      memory.valid = true;
++    } else if (sscanf(line, "MemFree: %" SCNu64 " kB", &value) == 1) {
++      memory.free_kb = value;
++    } else if (sscanf(line, "Buffers: %" SCNu64 " kB", &value) == 1) {
++      memory.buffers_kb = value;
++    } else if (sscanf(line, "Shmem: %" SCNu64 " kB", &value) == 1) {
++      memory.shared_kb = value;
++    } else if (sscanf(line, "SwapTotal: %" SCNu64 " kB", &value) == 1) {
++      memory.swap_total_kb = value;
++    } else if (sscanf(line, "SwapFree: %" SCNu64 " kB", &value) == 1) {
++      memory.swap_free_kb = value;
++    }
++  }
++  free(line);
++  fclose(file);
++  return memory;
++}
++
++void ApplyFloralProcView(struct sysinfo* info) {
++  if (!ApplyFloralCgroupMemory(info)) {
++    const FloralMeminfo memory = ReadFloralMeminfo();
++    if (memory.valid) {
++      const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++      info->totalram = ToSysinfoUnits(memory.total_kb, unit);
++      info->freeram = ToSysinfoUnits(memory.free_kb, unit);
++      info->bufferram = ToSysinfoUnits(memory.buffers_kb, unit);
++      info->sharedram = ToSysinfoUnits(memory.shared_kb, unit);
++      info->totalswap = ToSysinfoUnits(memory.swap_total_kb, unit);
++      info->freeswap = ToSysinfoUnits(memory.swap_free_kb, unit);
++      info->totalhigh = 0;
++      info->freehigh = 0;
++    }
++  }
++
++  FILE* file = fopen("/proc/uptime", "re");
++  if (file != nullptr) {
++    double uptime = 0;
++    if (fscanf(file, "%lf", &uptime) == 1 && uptime >= 0) {
++      info->uptime = static_cast<long>(uptime);
++    }
++    fclose(file);
++  }
++
++  file = fopen("/proc/loadavg", "re");
++  if (file != nullptr) {
++    double load[3] = {};
++    if (fscanf(file, "%lf %lf %lf", &load[0], &load[1], &load[2]) == 3) {
++      for (size_t i = 0; i < 3; ++i) {
++        info->loads[i] = static_cast<unsigned long>(load[i] * (1 << SI_LOAD_SHIFT));
++      }
++    }
++    fclose(file);
++  }
++}
++
++}  // namespace
++
++extern "C" int sysinfo(struct sysinfo* info) {
++  const int result = __sysinfo(info);
++  if (result == 0 && info != nullptr) {
++    // Prefer the current memory cgroup so direct libc queries stay container-scoped.
++    // Fall back to procfs for kernels without readable cgroup memory limits.
++    ApplyFloralProcView(info);
++  }
++  return result;
++}
+ 
+ static bool __matches_cpuN(const char* s) {
+   // The %c trick is to ensure that we have the anchored match "^cpu[0-9]+$".
+diff --git a/libc/bionic/system_property_api.cpp b/libc/bionic/system_property_api.cpp
+index a641f12..0bbd875 100644
+--- a/libc/bionic/system_property_api.cpp
++++ b/libc/bionic/system_property_api.cpp
+@@ -29,10 +29,13 @@
+ #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
+ #include <sys/_system_properties.h>
+ 
++#include <string.h>
++
+ #include <system_properties/prop_area.h>
+ #include <system_properties/system_properties.h>
+ 
+ #include "private/bionic_defs.h"
++#include "private/floral_nativebridge.h"
+ 
+ static SystemProperties system_properties;
+ static_assert(__is_trivially_constructible(SystemProperties),
+@@ -71,7 +74,17 @@ const prop_info* __system_property_find(const char* name) {
+ 
+ __BIONIC_WEAK_FOR_NATIVE_BRIDGE
+ int __system_property_read(const prop_info* pi, char* name, char* value) {
+-  return system_properties.Read(pi, name, value);
++  char local_name[PROP_NAME_MAX];
++  char* property_name = name == nullptr ? local_name : name;
++  const int result = system_properties.Read(pi, property_name, value);
++  if (result < 0) {
++    return result;
++  }
++  const char* override = __floral_nativebridge_property_override(property_name);
++  if (override == nullptr) {
++    return result;
++  }
++  return static_cast<int>(strlcpy(value, override, PROP_VALUE_MAX));
+ }
+ 
+ __BIONIC_WEAK_FOR_NATIVE_BRIDGE
+@@ -79,11 +92,26 @@ void __system_property_read_callback(const prop_info* pi,
+                                      void (*callback)(void* cookie, const char* name,
+                                                       const char* value, uint32_t serial),
+                                      void* cookie) {
+-  return system_properties.ReadCallback(pi, callback, cookie);
++  char name[PROP_NAME_MAX];
++  char value[PROP_VALUE_MAX];
++  if (system_properties.Read(pi, name, value) < 0) {
++    system_properties.ReadCallback(pi, callback, cookie);
++    return;
++  }
++  const char* override = __floral_nativebridge_property_override(name);
++  if (override == nullptr) {
++    system_properties.ReadCallback(pi, callback, cookie);
++    return;
++  }
++  callback(cookie, name, override, atomic_load_explicit(&pi->serial, memory_order_acquire));
+ }
+ 
+ __BIONIC_WEAK_FOR_NATIVE_BRIDGE
+ int __system_property_get(const char* name, char* value) {
++  const char* override = __floral_nativebridge_property_override(name);
++  if (override != nullptr) {
++    return static_cast<int>(strlcpy(value, override, PROP_VALUE_MAX));
++  }
+   return system_properties.Get(name, value);
+ }
+ 
+diff --git a/libc/bionic/uname.cpp b/libc/bionic/uname.cpp
+new file mode 100644
+index 0000000..a989278
+--- /dev/null
++++ b/libc/bionic/uname.cpp
+@@ -0,0 +1,31 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#include <sys/utsname.h>
++
++#include <string.h>
++
++#include "private/floral_nativebridge.h"
++
++extern "C" int __uname(utsname*);
++
++extern "C" int uname(utsname* buffer) {
++  const int result = __uname(buffer);
++  const char* machine = __floral_nativebridge_guest_machine();
++  if (result == 0 && machine != nullptr) {
++    strlcpy(buffer->machine, machine, sizeof(buffer->machine));
++    const char* release = __floral_nativebridge_guest_kernel_release();
++    if (release != nullptr) {
++      strlcpy(buffer->release, release, sizeof(buffer->release));
++    }
++    const char* version = __floral_nativebridge_guest_kernel_version();
++    if (version != nullptr) {
++      strlcpy(buffer->version, version, sizeof(buffer->version));
++    }
++  }
++  return result;
++}
+diff --git a/libc/libc.map.txt b/libc/libc.map.txt
+index c31e306..5859b6b 100644
+--- a/libc/libc.map.txt
++++ b/libc/libc.map.txt
+@@ -1566,6 +1566,7 @@ LIBC_S { # introduced=S
+ 
+ LIBC_PRIVATE {
+   global:
++    __floral_nativebridge_set_guest_arch;
+     __accept4; # arm x86
+     __adddf3; # arm
+     __addsf3; # arm
+diff --git a/libc/private/floral_nativebridge.h b/libc/private/floral_nativebridge.h
+new file mode 100644
+index 0000000..4015596
+--- /dev/null
++++ b/libc/private/floral_nativebridge.h
+@@ -0,0 +1,30 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#pragma once
++
++#include <sys/cdefs.h>
++
++enum FloralNativeBridgeGuestArch {
++  FLORAL_NATIVEBRIDGE_GUEST_NONE = 0,
++  FLORAL_NATIVEBRIDGE_GUEST_ARM = 1,
++  FLORAL_NATIVEBRIDGE_GUEST_ARM64 = 2,
++};
++
++__BEGIN_DECLS
++
++// Called by Floral's NativeBridge router in the forked application process.
++void __floral_nativebridge_set_guest_arch(int arch);
++
++// Internal libc accessors used by architecture-reporting APIs.
++int __floral_nativebridge_guest_arch();
++const char* __floral_nativebridge_guest_machine();
++const char* __floral_nativebridge_guest_kernel_release();
++const char* __floral_nativebridge_guest_kernel_version();
++const char* __floral_nativebridge_property_override(const char* name);
++
++__END_DECLS
+-- 
+2.47.3
