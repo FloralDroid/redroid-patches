@@ -1,0 +1,58 @@
+From e21f78dab2fe3eaea890f15039212818951f3afd Mon Sep 17 00:00:00 2001
+From: FloralDroid <floraldroid@localhost>
+Date: Sat, 8 Aug 2026 16:29:52 +0800
+Subject: [PATCH] Vpn: support Linux standard TUN device path
+
+Android kernels expose the TUN device as /dev/tun, while generic Linux container hosts use /dev/net/tun. Fall back only when the Android path is absent or has no backing device, and report open failures before attempting TUNSETIFF.
+
+Change-Id: I885cc9288679b86305fe33248522918fac257db0
+---
+ .../com_android_server_connectivity_Vpn.cpp   | 30 ++++++++++++++++++-
+ 1 file changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/jni/com_android_server_connectivity_Vpn.cpp b/services/core/jni/com_android_server_connectivity_Vpn.cpp
+index ea5e7183c905..6a1bc32f2f6b 100644
+--- a/services/core/jni/com_android_server_connectivity_Vpn.cpp
++++ b/services/core/jni/com_android_server_connectivity_Vpn.cpp
+@@ -56,9 +56,37 @@ static inline in_addr_t *as_in_addr(sockaddr *sa) {
+ #define SYSTEM_ERROR (-1)
+ #define BAD_ARGUMENT (-2)
+ 
++static int open_tun_device()
++{
++    const int flags = O_RDWR | O_NONBLOCK | O_CLOEXEC;
++    int tun = open("/dev/tun", flags);
++    if (tun >= 0) {
++        return tun;
++    }
++
++    const int android_tun_error = errno;
++    if (android_tun_error != ENOENT && android_tun_error != ENODEV) {
++        ALOGE("Cannot open /dev/tun: %s", strerror(android_tun_error));
++        return SYSTEM_ERROR;
++    }
++
++    // Android kernels expose /dev/tun, while generic Linux container hosts
++    // normally expose the same TUN driver at /dev/net/tun.
++    tun = open("/dev/net/tun", flags);
++    if (tun < 0) {
++        ALOGE("Cannot open /dev/net/tun after /dev/tun failed: %s", strerror(errno));
++        return SYSTEM_ERROR;
++    }
++    ALOGI("Using Linux TUN device path /dev/net/tun");
++    return tun;
++}
++
+ static int create_interface(int mtu)
+ {
+-    int tun = open("/dev/tun", O_RDWR | O_NONBLOCK | O_CLOEXEC);
++    int tun = open_tun_device();
++    if (tun == SYSTEM_ERROR) {
++        return SYSTEM_ERROR;
++    }
+ 
+     ifreq ifr4;
+     memset(&ifr4, 0, sizeof(ifr4));
+-- 
+2.47.3
+

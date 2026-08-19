@@ -1,0 +1,139 @@
+From e74fc4d5355f2c1639a8724b5f3b13ad5f5b5d78 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sun, 16 Aug 2026 00:41:02 +0800
+Subject: [PATCH] sepolicy: allow Floral LXCFS view mount helper
+
+Allow the optional Android helper to bind Floral LXCFS views and keep the frozen API 31 private policy snapshot synchronized with the active Floral policy.
+
+Change-Id: I2ab40ba7bd607db211178c5defddf4e29ceed80f
+
+diff --git a/prebuilts/api/31.0/private/file_contexts b/prebuilts/api/31.0/private/file_contexts
+index 351cd7c..00ac720 100644
+--- a/prebuilts/api/31.0/private/file_contexts
++++ b/prebuilts/api/31.0/private/file_contexts
+@@ -223,6 +223,7 @@
+ /system/bin/e2fsck	--	u:object_r:fsck_exec:s0
+ /system/bin/fsck\.exfat	--	u:object_r:fsck_exec:s0
+ /system/bin/fsck\.f2fs	--	u:object_r:fsck_exec:s0
++/system/bin/floral_lxcfs_bind	u:object_r:floral_lxcfs_bind_exec:s0
+ /system/bin/init		u:object_r:init_exec:s0
+ # TODO(/123600489): merge mini-keyctl into toybox
+ /system/bin/mini-keyctl	--	u:object_r:toolbox_exec:s0
+diff --git a/prebuilts/api/31.0/private/floral_lxcfs_bind.te b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
+new file mode 100644
+index 0000000..3291635
+--- /dev/null
++++ b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
+@@ -0,0 +1,36 @@
++type floral_lxcfs_bind, domain, coredomain;
++type floral_lxcfs_bind_exec, system_file_type, exec_type, file_type;
++
++# Run the short-lived mount helper in its own init domain.
++init_daemon_domain(floral_lxcfs_bind)
++
++# Bind mounts require CAP_SYS_ADMIN even though the source FUSE filesystem
++# already exists in the container mount namespace.
++allow floral_lxcfs_bind self:global_capability_class_set sys_admin;
++
++# The helper reads its source tree from the optional host Floral LXCFS mount.
++allow floral_lxcfs_bind fuse:dir r_dir_perms;
++allow floral_lxcfs_bind fuse:file r_file_perms;
++
++# Avoid stacking duplicate views when init retries the oneshot service.
++allow floral_lxcfs_bind proc_mounts:file r_file_perms;
++
++# Limit mount targets to the resource views installed by the helper.
++allow floral_lxcfs_bind {
++  proc_cpuinfo
++  proc_diskstats
++  proc_loadavg
++  proc_meminfo
++  proc_pressure_cpu
++  proc_pressure_io
++  proc_pressure_mem
++  proc_slabinfo
++  proc_stat
++  proc_swaps
++  proc_uptime
++}:file { getattr mounton };
++allow floral_lxcfs_bind proc:dir { getattr search };
++allow floral_lxcfs_bind sysfs_devices_system_cpu:dir { getattr mounton search };
++
++# floral_lxcfs_bind uses android::base::KernelLogger during early boot.
++allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+diff --git a/prebuilts/api/31.0/private/property_contexts b/prebuilts/api/31.0/private/property_contexts
+index a51fa3a..30e9151 100644
+--- a/prebuilts/api/31.0/private/property_contexts
++++ b/prebuilts/api/31.0/private/property_contexts
+@@ -721,6 +721,14 @@ ro.product.cpu.abi       u:object_r:build_prop:s0 exact string
+ ro.product.cpu.abilist   u:object_r:build_prop:s0 exact string
+ ro.product.cpu.abilist32 u:object_r:build_prop:s0 exact string
+ ro.product.cpu.abilist64 u:object_r:build_prop:s0 exact string
++ro.floral.nb.pubabi       u:object_r:build_prop:s0 exact string
++ro.floral.nb.pubabi32     u:object_r:build_prop:s0 exact string
++ro.floral.nb.pubabi64     u:object_r:build_prop:s0 exact string
++ro.floral.nb.loadabi      u:object_r:system_prop:s0 exact string
++ro.floral.nb.loadabi32    u:object_r:system_prop:s0 exact string
++ro.floral.nb.loadabi64    u:object_r:system_prop:s0 exact string
++ro.floral.webview.vmsize32 u:object_r:system_prop:s0 exact int
++ro.floral.webview.vmsize64 u:object_r:system_prop:s0 exact int
+ 
+ ro.product.system.brand        u:object_r:build_prop:s0 exact string
+ ro.product.system.device       u:object_r:build_prop:s0 exact string
+diff --git a/private/file_contexts b/private/file_contexts
+index 351cd7c..00ac720 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -223,6 +223,7 @@
+ /system/bin/e2fsck	--	u:object_r:fsck_exec:s0
+ /system/bin/fsck\.exfat	--	u:object_r:fsck_exec:s0
+ /system/bin/fsck\.f2fs	--	u:object_r:fsck_exec:s0
++/system/bin/floral_lxcfs_bind	u:object_r:floral_lxcfs_bind_exec:s0
+ /system/bin/init		u:object_r:init_exec:s0
+ # TODO(/123600489): merge mini-keyctl into toybox
+ /system/bin/mini-keyctl	--	u:object_r:toolbox_exec:s0
+diff --git a/private/floral_lxcfs_bind.te b/private/floral_lxcfs_bind.te
+new file mode 100644
+index 0000000..3291635
+--- /dev/null
++++ b/private/floral_lxcfs_bind.te
+@@ -0,0 +1,36 @@
++type floral_lxcfs_bind, domain, coredomain;
++type floral_lxcfs_bind_exec, system_file_type, exec_type, file_type;
++
++# Run the short-lived mount helper in its own init domain.
++init_daemon_domain(floral_lxcfs_bind)
++
++# Bind mounts require CAP_SYS_ADMIN even though the source FUSE filesystem
++# already exists in the container mount namespace.
++allow floral_lxcfs_bind self:global_capability_class_set sys_admin;
++
++# The helper reads its source tree from the optional host Floral LXCFS mount.
++allow floral_lxcfs_bind fuse:dir r_dir_perms;
++allow floral_lxcfs_bind fuse:file r_file_perms;
++
++# Avoid stacking duplicate views when init retries the oneshot service.
++allow floral_lxcfs_bind proc_mounts:file r_file_perms;
++
++# Limit mount targets to the resource views installed by the helper.
++allow floral_lxcfs_bind {
++  proc_cpuinfo
++  proc_diskstats
++  proc_loadavg
++  proc_meminfo
++  proc_pressure_cpu
++  proc_pressure_io
++  proc_pressure_mem
++  proc_slabinfo
++  proc_stat
++  proc_swaps
++  proc_uptime
++}:file { getattr mounton };
++allow floral_lxcfs_bind proc:dir { getattr search };
++allow floral_lxcfs_bind sysfs_devices_system_cpu:dir { getattr mounton search };
++
++# floral_lxcfs_bind uses android::base::KernelLogger during early boot.
++allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+-- 
+2.47.3
+

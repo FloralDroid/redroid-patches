@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FloralDroid <floraldroid@localhost>
+Date: Fri, 7 Aug 2026 14:30:00 +0800
+Subject: [PATCH] Expose binder service lookup to system server modules
+
+System server modules can publish Binder services through SystemService, but
+cannot look up a vendor stable AIDL service without using hidden ServiceManager
+APIs. Export the existing protected lookup method on the system-server API
+surface so modular services can receive a narrow, lifecycle-owned resolver.
+
+Change-Id: I5bbfa29d87c880ad974f066899626644fe0362aa
+---
+ services/api/current.txt                              | 1 +
+ services/api/lint-baseline.txt                        | 3 +++
+ services/core/java/com/android/server/SystemService.java | 6 ++++--
+ 3 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/services/api/current.txt b/services/api/current.txt
+index 50f0052..f8f7d23 100644
+--- a/services/api/current.txt
++++ b/services/api/current.txt
+@@ -8,6 +8,7 @@ package com.android.server {
+ 
+   public abstract class SystemService {
+     ctor public SystemService(@NonNull android.content.Context);
++    method @Nullable protected final android.os.IBinder getBinderService(@NonNull String);
+     method @NonNull public final android.content.Context getContext();
+     method public boolean isUserSupported(@NonNull com.android.server.SystemService.TargetUser);
+     method public void onBootPhase(int);
+diff --git a/services/api/lint-baseline.txt b/services/api/lint-baseline.txt
+index b46d21e..95ee5b5 100644
+--- a/services/api/lint-baseline.txt
++++ b/services/api/lint-baseline.txt
+@@ -7,3 +7,6 @@ ProtectedMember: com.android.server.SystemService#publishBinderService(String, a
+     Protected methods not allowed; must be public: method com.android.server.SystemService.publishBinderService(String,android.os.IBinder)}
+ ProtectedMember: com.android.server.SystemService#publishBinderService(String, android.os.IBinder, boolean):
+     Protected methods not allowed; must be public: method com.android.server.SystemService.publishBinderService(String,android.os.IBinder,boolean)}
++
++ProtectedMember: com.android.server.SystemService#getBinderService(String):
++    Protected methods not allowed; must be public: method com.android.server.SystemService.getBinderService(String)}
+diff --git a/services/core/java/com/android/server/SystemService.java b/services/core/java/com/android/server/SystemService.java
+index 39321bf..b50e6a8 100644
+--- a/services/core/java/com/android/server/SystemService.java
++++ b/services/core/java/com/android/server/SystemService.java
+@@ -445,9 +445,11 @@ public abstract class SystemService {
+     /**
+      * Get a binder service by its name.
+      *
+-     * @hide
++     * @param name the name of the binder service
++     * @return the registered binder, or {@code null} when the service is not available
+      */
+-    protected final IBinder getBinderService(String name) {
++    @Nullable
++    protected final IBinder getBinderService(@NonNull String name) {
+         return ServiceManager.getService(name);
+     }
+ 
+-- 
+2.39.5
