@@ -1,0 +1,207 @@
+From 8ee787f234e6d963c17c38ecf8b95ee41cec3923 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 20 Aug 2026 01:32:45 +0800
+Subject: [PATCH] art: add Floral NativeBridge A/B compatibility switches
+
+Change-Id: I2f8867dffcecc5923d672ad2708a5b468c5be62d
+---
+ libnativebridge/Android.bp                  |  1 +
+ libnativebridge/native_bridge.cc            | 12 ++++-
+ libnativeloader/native_loader.cpp           |  4 +-
+ libnativeloader/native_loader_namespace.cpp | 50 ++++++++++++++++++---
+ libnativeloader/native_loader_namespace.h   |  4 ++
+ 5 files changed, 63 insertions(+), 8 deletions(-)
+
+diff --git a/libnativebridge/Android.bp b/libnativebridge/Android.bp
+index 1972c58..642e751 100644
+--- a/libnativebridge/Android.bp
++++ b/libnativebridge/Android.bp
+@@ -81,6 +81,7 @@ art_cc_library {
+     ],
+     shared_libs: [
+         "liblog",
++        "libbase",
+     ],
+     // TODO(jiyong): remove this line after aosp/885921 lands
+     export_include_dirs: ["include"],
+diff --git a/libnativebridge/native_bridge.cc b/libnativebridge/native_bridge.cc
+index 01def77..cc61f02 100644
+--- a/libnativebridge/native_bridge.cc
++++ b/libnativebridge/native_bridge.cc
+@@ -31,6 +31,7 @@
+ #include <string>
+ 
+ #include <android-base/macros.h>
++#include <android-base/properties.h>
+ #include <log/log.h>
+ 
+ #ifdef ART_TARGET_ANDROID
+@@ -151,6 +152,11 @@ static bool floral_direct_backend_bound = false;
+ // PreInitializeNativeBridge(), which is the last point before callbacks become
+ // visible to the application process.
+ static bool floral_direct_bind_failed = false;
++
++static bool FloralNativeLoaderEnabled() {
++  return !android::base::GetBoolProperty("ro.floral.bridge.compat_aosp", false) &&
++         android::base::GetBoolProperty("ro.floral.bridge.nativeloader", true);
++}
+ // Pointer to the callbacks. Available as soon as LoadNativeBridge succeeds, but only initialized
+ // later.
+ static const NativeBridgeCallbacks* callbacks = nullptr;
+@@ -471,7 +477,8 @@ static bool BindFloralDirectBackend(void* router_handle) {
+ }
+ 
+ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* app_data_dir) {
+-  if (state != NativeBridgeState::kOpened || native_bridge_handle == nullptr ||
++  if (!FloralNativeLoaderEnabled() || state != NativeBridgeState::kOpened ||
++      native_bridge_handle == nullptr ||
+       floral_direct_backend_bound) {
+     return;
+   }
+@@ -495,7 +502,8 @@ void SetFloralNativeBridgeProcessContext(const char* process_name, const char* a
+ }
+ 
+ bool NativeBridgeUseHybridLoader() {
+-  if ((state != NativeBridgeState::kOpened &&
++  if (!FloralNativeLoaderEnabled() ||
++      (state != NativeBridgeState::kOpened &&
+        state != NativeBridgeState::kPreInitialized &&
+        state != NativeBridgeState::kInitialized) ||
+       native_bridge_handle == nullptr) {
+diff --git a/libnativeloader/native_loader.cpp b/libnativeloader/native_loader.cpp
+index 51349b9..a53020e 100644
+--- a/libnativeloader/native_loader.cpp
++++ b/libnativeloader/native_loader.cpp
+@@ -361,7 +361,9 @@ void* OpenNativeLibraryInNamespace(NativeLoaderNamespace* ns, const char* path,
+     *error_msg = strdup(handle.error().message().c_str());
+   }
+   if (needs_native_bridge != nullptr) {
+-    *needs_native_bridge = handle.ok() ? handle->needs_native_bridge : ns->IsBridged();
++    *needs_native_bridge = FloralNativeLoaderEnabled()
++            ? (handle.ok() ? handle->needs_native_bridge : ns->IsBridged())
++            : ns->IsBridged();
+   }
+   return handle.ok() ? handle->handle : nullptr;
+ }
+diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
+index 8108740..79bc9d7 100644
+--- a/libnativeloader/native_loader_namespace.cpp
++++ b/libnativeloader/native_loader_namespace.cpp
+@@ -48,6 +48,8 @@ namespace {
+ 
+ constexpr const char* kDefaultNamespaceName = "default";
+ constexpr const char* kSystemNamespaceName = "system";
++constexpr const char* kCompatAospProperty = "ro.floral.bridge.compat_aosp";
++constexpr const char* kNativeLoaderProperty = "ro.floral.bridge.nativeloader";
+ constexpr const char* kHybridElfProperty = "ro.floral.bridge.hybrid_elf";
+ constexpr const char* kNamespaceAuditProperty = "persist.floral.nb.audit";
+ 
+@@ -57,8 +59,21 @@ enum class ElfTarget {
+   kGuest,
+ };
+ 
++bool IsFloralNativeLoaderEnabled() {
++  if (android::base::GetBoolProperty(kCompatAospProperty, false)) {
++    return false;
++  }
++  return android::base::GetBoolProperty(kNativeLoaderProperty, true);
++}
++
+ bool HybridElfRoutingEnabled() {
+-  return android::base::GetBoolProperty(kHybridElfProperty, false);
++  return IsFloralNativeLoaderEnabled() &&
++         android::base::GetBoolProperty(kHybridElfProperty, true);
++}
++
++bool HybridLoaderEnabled() {
++  return IsFloralNativeLoaderEnabled() && HybridElfRoutingEnabled() &&
++         NativeBridgeUseHybridLoader();
+ }
+ 
+ bool NamespaceAuditEnabled() {
+@@ -128,6 +143,10 @@ std::string GetLinkerError(bool is_bridged) {
+ 
+ }  // namespace
+ 
++bool FloralNativeLoaderEnabled() {
++  return IsFloralNativeLoaderEnabled();
++}
++
+ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetExportedNamespace(const std::string& name,
+                                                                           bool is_bridged) {
+   if (!is_bridged) {
+@@ -142,7 +161,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetExportedNamespace(const
+   } else {
+     auto bridged_raw = NativeBridgeGetExportedNamespace(name.c_str());
+     if (bridged_raw != nullptr) {
+-      if (HybridElfRoutingEnabled() && NativeBridgeUseHybridLoader()) {
++      if (HybridLoaderEnabled()) {
+         auto native_raw = android_get_exported_namespace(name.c_str());
+         if (NamespaceAuditEnabled()) {
+           ALOGI("Floral NB audit: exported name=%s bridged=1 hybrid=1 native=%p guest=%p",
+@@ -180,7 +199,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+     }
+     return NativeLoaderNamespace(kDefaultNamespaceName, static_cast<android_namespace_t*>(nullptr));
+   } else {
+-    if (HybridElfRoutingEnabled() && NativeBridgeUseHybridLoader()) {
++    if (HybridLoaderEnabled()) {
+       if (NamespaceAuditEnabled()) {
+         ALOGI("Floral NB audit: system fallback bridged=1 hybrid=1 native=default guest=default");
+       }
+@@ -213,8 +232,7 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+     return system_ns.error();
+   }
+   const NativeLoaderNamespace& effective_parent = parent != nullptr ? *parent : *system_ns;
+-  const bool use_hybrid =
+-      is_bridged && HybridElfRoutingEnabled() && NativeBridgeUseHybridLoader();
++  const bool use_hybrid = is_bridged && HybridLoaderEnabled();
+   const NativeLoaderNamespace& effective_guest_parent =
+       use_hybrid && guest_fallback_parent != nullptr ? *guest_fallback_parent : effective_parent;
+ 
+@@ -371,6 +389,28 @@ Result<void> NativeLoaderNamespace::LinkNativeBridge(const NativeLoaderNamespace
+ }
+ 
+ Result<NativeLoaderNamespace::LoadResult> NativeLoaderNamespace::Load(const char* lib_name) const {
++  // Keep the original AOSP ownership and loader selection available for A/B tests.
++  // The enhanced path below is intentionally unreachable when either the global
++  // compatibility switch or the dedicated nativeloader switch is disabled.
++  if (!FloralNativeLoaderEnabled()) {
++    if (!IsBridged()) {
++      android_dlextinfo extinfo;
++      extinfo.flags = ANDROID_DLEXT_USE_NAMESPACE;
++      extinfo.library_namespace = this->ToRawAndroidNamespace();
++      void* handle = android_dlopen_ext(lib_name, RTLD_NOW, &extinfo);
++      if (handle != nullptr) {
++        return LoadResult{handle, false};
++      }
++    } else {
++      void* handle = NativeBridgeLoadLibraryExt(
++          lib_name, RTLD_NOW, this->ToRawNativeBridgeNamespace());
++      if (handle != nullptr) {
++        return LoadResult{handle, true};
++      }
++    }
++    return Error() << GetLinkerError(IsBridged());
++  }
++
+   const bool audit = NamespaceAuditEnabled();
+   if (!IsBridged()) {
+     android_dlextinfo extinfo;
+diff --git a/libnativeloader/native_loader_namespace.h b/libnativeloader/native_loader_namespace.h
+index 700fed5..38fad09 100644
+--- a/libnativeloader/native_loader_namespace.h
++++ b/libnativeloader/native_loader_namespace.h
+@@ -32,6 +32,10 @@ namespace android {
+ 
+ using android::base::Result;
+ 
++// Returns whether Floral's enhanced namespace and per-load ownership behavior
++// is enabled. The AOSP-compatible path uses the ordinary NativeBridge rules.
++bool FloralNativeLoaderEnabled();
++
+ // NativeLoaderNamespace abstracts a linker namespace for the native
+ // architecture (ex: arm on arm) or the translated architecture (ex: arm on
+ // x86). Instances of this class are managed by LibraryNamespaces object.
+-- 
+2.47.3
+
