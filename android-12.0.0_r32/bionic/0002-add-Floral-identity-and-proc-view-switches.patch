@@ -1,22 +1,22 @@
-From 91f1bd3e46fedee78c95c29f400bee31ba937c80 Mon Sep 17 00:00:00 2001
+From 64eabee84000e186d71d38841d4cac1333d05bb4 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Thu, 20 Aug 2026 01:32:45 +0800
 Subject: [PATCH] bionic: add Floral identity and proc view switches
 
 Change-Id: Idc0339edd1a40df9820a403c625225cf071157e2
 ---
- libc/bionic/floral_nativebridge.cpp | 37 +++++++++++++++++++++++++----
- libc/bionic/getauxval.cpp           |  3 ++-
- libc/bionic/sysinfo.cpp             |  2 +-
- libc/bionic/uname.cpp               |  3 +++
+ libc/bionic/floral_nativebridge.cpp | 46 ++++++++++++++++++++++++++---
+ libc/bionic/getauxval.cpp           |  5 +++-
+ libc/bionic/sysinfo.cpp             |  3 +-
+ libc/bionic/uname.cpp               |  4 +++
  libc/private/floral_nativebridge.h  |  2 ++
- 5 files changed, 41 insertions(+), 6 deletions(-)
+ 5 files changed, 54 insertions(+), 6 deletions(-)
 
 diff --git a/libc/bionic/floral_nativebridge.cpp b/libc/bionic/floral_nativebridge.cpp
-index 5e31a8c..c63f0e5 100644
+index 5e31a8c..c54b672 100644
 --- a/libc/bionic/floral_nativebridge.cpp
 +++ b/libc/bionic/floral_nativebridge.cpp
-@@ -19,9 +19,22 @@ int g_floral_nativebridge_guest_arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
+@@ -19,8 +19,26 @@ int g_floral_nativebridge_guest_arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
  constexpr size_t kUtsnameFieldLength = 64;
  constexpr char kDefaultGuestKernelRelease[] = "5.10.66-android12-9";
  constexpr char kDefaultGuestKernelVersion[] = "#1 SMP PREEMPT";
@@ -25,21 +25,25 @@ index 5e31a8c..c63f0e5 100644
 +constexpr char kProcViewProperty[] = "ro.floral.libc.procview";
  char g_floral_nativebridge_kernel_release[kUtsnameFieldLength + 1] = {};
  char g_floral_nativebridge_kernel_version[kUtsnameFieldLength + 1] = {};
- 
++static __thread bool g_reading_floral_feature_property;
++
 +bool FloralPropertyEnabled(const char* name, bool default_value) {
-+  char value[PROP_VALUE_MAX] = {};
-+  if (__system_property_get(name, value) <= 0) {
++  if (g_reading_floral_feature_property) {
 +    return default_value;
 +  }
++  g_reading_floral_feature_property = true;
++  char value[PROP_VALUE_MAX] = {};
++  const int length = __system_property_get(name, value);
++  g_reading_floral_feature_property = false;
++  if (length <= 0) return default_value;
 +  return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
 +         strcmp(value, "TRUE") == 0 || strcmp(value, "y") == 0 ||
 +         strcmp(value, "yes") == 0;
 +}
-+
+ 
  void LoadKernelIdentity() {
    char value[PROP_VALUE_MAX] = {};
-   if (__system_property_get("ro.boot.floral_kernel_release", value) > 0 &&
-@@ -71,7 +84,8 @@ extern "C" void __floral_nativebridge_set_guest_arch(int arch) {
+@@ -71,7 +89,8 @@ extern "C" void __floral_nativebridge_set_guest_arch(int arch) {
    if (arch < FLORAL_NATIVEBRIDGE_GUEST_NONE || arch > FLORAL_NATIVEBRIDGE_GUEST_ARM64) {
      arch = FLORAL_NATIVEBRIDGE_GUEST_NONE;
    }
@@ -49,7 +53,7 @@ index 5e31a8c..c63f0e5 100644
      ClearKernelIdentity();
    } else {
      LoadKernelIdentity();
-@@ -83,7 +97,20 @@ extern "C" __LIBC_HIDDEN__ int __floral_nativebridge_guest_arch() {
+@@ -83,7 +102,22 @@ extern "C" __LIBC_HIDDEN__ int __floral_nativebridge_guest_arch() {
    return __atomic_load_n(&g_floral_nativebridge_guest_arch, __ATOMIC_ACQUIRE);
  }
  
@@ -64,60 +68,74 @@ index 5e31a8c..c63f0e5 100644
 +}
 +
  extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_machine() {
-+  if (!__floral_nativebridge_guest_identity_enabled()) {
++  // The dynamic linker can query libc identity before NativeBridge selects a guest.
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE ||
++      !__floral_nativebridge_guest_identity_enabled()) {
 +    return nullptr;
 +  }
    switch (__floral_nativebridge_guest_arch()) {
      case FLORAL_NATIVEBRIDGE_GUEST_ARM:
        return "armv7l";
-@@ -95,7 +122,8 @@ extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_machine() {
+@@ -95,7 +129,8 @@ extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_machine() {
  }
  
  extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_release() {
 -  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
-+  if (!__floral_nativebridge_guest_identity_enabled() ||
-+      __floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE ||
++      !__floral_nativebridge_guest_identity_enabled()) {
      return nullptr;
    }
    return g_floral_nativebridge_kernel_release[0] == '\0' ? kDefaultGuestKernelRelease
-@@ -103,7 +131,8 @@ extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_releas
+@@ -103,7 +138,8 @@ extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_releas
  }
  
  extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_version() {
 -  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
-+  if (!__floral_nativebridge_guest_identity_enabled() ||
-+      __floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE ||
++      !__floral_nativebridge_guest_identity_enabled()) {
      return nullptr;
    }
    return g_floral_nativebridge_kernel_version[0] == '\0' ? kDefaultGuestKernelVersion
-@@ -111,7 +140,7 @@ extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_guest_kernel_versio
- }
- 
- extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(const char* name) {
--  if (name == nullptr) {
-+  if (name == nullptr || !__floral_nativebridge_guest_identity_enabled()) {
+@@ -115,7 +151,9 @@ extern "C" __LIBC_HIDDEN__ const char* __floral_nativebridge_property_override(c
      return nullptr;
    }
    const int arch = __floral_nativebridge_guest_arch();
+-  if (arch == FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++  // Property reads happen during linker startup, before TLS is available.
++  if (arch == FLORAL_NATIVEBRIDGE_GUEST_NONE ||
++      !__floral_nativebridge_guest_identity_enabled()) {
+     return nullptr;
+   }
+   for (const PropertyOverride& property : kPropertyOverrides) {
 diff --git a/libc/bionic/getauxval.cpp b/libc/bionic/getauxval.cpp
-index 312f782..dab5bfc 100644
+index 312f782..9bf3224 100644
 --- a/libc/bionic/getauxval.cpp
 +++ b/libc/bionic/getauxval.cpp
-@@ -87,7 +87,8 @@ extern "C" unsigned long getauxval(unsigned long type) {
+@@ -87,7 +87,10 @@ extern "C" unsigned long getauxval(unsigned long type) {
    bool exists;
    unsigned long result = 0;
    const int guest_arch = __floral_nativebridge_guest_arch();
 -  if (guest_arch != FLORAL_NATIVEBRIDGE_GUEST_NONE) {
-+  if (__floral_nativebridge_guest_identity_enabled() &&
-+      guest_arch != FLORAL_NATIVEBRIDGE_GUEST_NONE) {
++  // The linker calls getauxval before TLS is ready; keep the host path until
++  // NativeBridge has selected a guest architecture.
++  if (guest_arch != FLORAL_NATIVEBRIDGE_GUEST_NONE &&
++      __floral_nativebridge_guest_identity_enabled()) {
      result = FloralGuestAuxValue(type, guest_arch, &exists);
    } else {
      exists = false;
 diff --git a/libc/bionic/sysinfo.cpp b/libc/bionic/sysinfo.cpp
-index 515554b..13ab323 100644
+index 515554b..3f4bf96 100644
 --- a/libc/bionic/sysinfo.cpp
 +++ b/libc/bionic/sysinfo.cpp
-@@ -403,7 +403,7 @@ void ApplyFloralProcView(struct sysinfo* info) {
+@@ -39,6 +39,7 @@
+ #include <unistd.h>
+ 
+ #include "private/ScopedReaddir.h"
++#include "private/floral_nativebridge.h"
+ #include "private/get_cpu_count_from_string.h"
+ 
+ extern "C" int __sysinfo(struct sysinfo*);
+@@ -403,7 +404,7 @@ void ApplyFloralProcView(struct sysinfo* info) {
  
  extern "C" int sysinfo(struct sysinfo* info) {
    const int result = __sysinfo(info);
@@ -127,14 +145,15 @@ index 515554b..13ab323 100644
      // Fall back to procfs for kernels without readable cgroup memory limits.
      ApplyFloralProcView(info);
 diff --git a/libc/bionic/uname.cpp b/libc/bionic/uname.cpp
-index a989278..8e10e57 100644
+index a989278..8aa100b 100644
 --- a/libc/bionic/uname.cpp
 +++ b/libc/bionic/uname.cpp
-@@ -15,6 +15,9 @@ extern "C" int __uname(utsname*);
+@@ -15,6 +15,10 @@ extern "C" int __uname(utsname*);
  
  extern "C" int uname(utsname* buffer) {
    const int result = __uname(buffer);
-+  if (!__floral_nativebridge_guest_identity_enabled()) {
++  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE ||
++      !__floral_nativebridge_guest_identity_enabled()) {
 +    return result;
 +  }
    const char* machine = __floral_nativebridge_guest_machine();
