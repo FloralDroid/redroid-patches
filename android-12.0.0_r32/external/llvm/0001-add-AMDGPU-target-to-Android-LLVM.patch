@@ -1,0 +1,310 @@
+From 4a87a16661e38d949efe2f0cb1c9d80b3c079354 Mon Sep 17 00:00:00 2001
+From: OpenCode <opencode@localhost>
+Date: Sat, 22 Aug 2026 02:43:27 +0800
+Subject: [PATCH] Add AMDGPU target to Android LLVM build
+
+Change-Id: I1bdacf91c052d37aefd6b453a887c49b3ee29bf9
+---
+ Android.bp                                   | 16 +++++-
+ device/include/llvm/Config/AsmParsers.def    |  1 +
+ device/include/llvm/Config/AsmPrinters.def   |  1 +
+ device/include/llvm/Config/Disassemblers.def |  1 +
+ device/include/llvm/Config/Targets.def       |  3 ++
+ lib/Target/AMDGPU/Android.bp                 | 54 ++++++++++++++++++++
+ lib/Target/AMDGPU/AsmParser/Android.bp       | 12 +++++
+ lib/Target/AMDGPU/Disassembler/Android.bp    | 12 +++++
+ lib/Target/AMDGPU/InstPrinter/Android.bp     | 12 +++++
+ lib/Target/AMDGPU/MCTargetDesc/Android.bp    | 12 +++++
+ lib/Target/AMDGPU/TargetInfo/Android.bp      | 12 +++++
+ lib/Target/AMDGPU/Utils/Android.bp           | 12 +++++
+ soong/tblgen.go                              |  4 +-
+ 13 files changed, 149 insertions(+), 3 deletions(-)
+ create mode 100644 lib/Target/AMDGPU/Android.bp
+ create mode 100644 lib/Target/AMDGPU/AsmParser/Android.bp
+ create mode 100644 lib/Target/AMDGPU/Disassembler/Android.bp
+ create mode 100644 lib/Target/AMDGPU/InstPrinter/Android.bp
+ create mode 100644 lib/Target/AMDGPU/MCTargetDesc/Android.bp
+ create mode 100644 lib/Target/AMDGPU/TargetInfo/Android.bp
+ create mode 100644 lib/Target/AMDGPU/Utils/Android.bp
+
+diff --git a/Android.bp b/Android.bp
+index cbc59cb0..87d62fe4 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -226,6 +226,16 @@ llvm_x86_static_libraries = [
+     "libLLVMX86Disassembler",
+ ]
+ 
++llvm_amdgpu_static_libraries = [
++    "libLLVMAMDGPUCodeGen",
++    "libLLVMAMDGPUInfo",
++    "libLLVMAMDGPUDesc",
++    "libLLVMAMDGPUAsmParser",
++    "libLLVMAMDGPUAsmPrinter",
++    "libLLVMAMDGPUDisassembler",
++    "libLLVMAMDGPUUtils",
++]
++
+ llvm_mips_static_libraries = [
+     "libLLVMMipsCodeGen",
+     "libLLVMMipsInfo",
+@@ -328,12 +338,14 @@ cc_library {
+         android_x86: {
+             whole_static_libs: llvm_x86_static_libraries +
+                 llvm_arm_static_libraries +
+-                llvm_aarch64_static_libraries,
++                llvm_aarch64_static_libraries +
++                llvm_amdgpu_static_libraries,
+         },
+         android_x86_64: {
+             whole_static_libs: llvm_x86_static_libraries +
+                 llvm_arm_static_libraries +
+-                llvm_aarch64_static_libraries,
++                llvm_aarch64_static_libraries +
++                llvm_amdgpu_static_libraries,
+         },
+         android_arm64: {
+             whole_static_libs: llvm_aarch64_static_libraries +
+diff --git a/device/include/llvm/Config/AsmParsers.def b/device/include/llvm/Config/AsmParsers.def
+index 845cb51a..3b35c3d2 100755
+--- a/device/include/llvm/Config/AsmParsers.def
++++ b/device/include/llvm/Config/AsmParsers.def
+@@ -31,6 +31,7 @@
+   LLVM_ASM_PARSER(Mips)
+ #elif defined(__i386__) || defined(__x86_64__)
+   LLVM_ASM_PARSER(X86)
++  LLVM_ASM_PARSER(AMDGPU)
+ 
+ #if defined(FORCE_BUILD_ARM)
+   LLVM_ASM_PARSER(ARM)
+diff --git a/device/include/llvm/Config/AsmPrinters.def b/device/include/llvm/Config/AsmPrinters.def
+index 001c795d..d4dcf6b9 100755
+--- a/device/include/llvm/Config/AsmPrinters.def
++++ b/device/include/llvm/Config/AsmPrinters.def
+@@ -31,6 +31,7 @@
+   LLVM_ASM_PRINTER(Mips)
+ #elif defined(__i386__) || defined(__x86_64__)
+   LLVM_ASM_PRINTER(X86)
++  LLVM_ASM_PRINTER(AMDGPU)
+ 
+ #if defined(FORCE_BUILD_ARM)
+   LLVM_ASM_PRINTER(ARM)
+diff --git a/device/include/llvm/Config/Disassemblers.def b/device/include/llvm/Config/Disassemblers.def
+index 6393b42a..48a97439 100755
+--- a/device/include/llvm/Config/Disassemblers.def
++++ b/device/include/llvm/Config/Disassemblers.def
+@@ -31,6 +31,7 @@
+   LLVM_DISASSEMBLER(Mips)
+ #elif defined(__i386__) || defined(__x86_64__)
+   LLVM_DISASSEMBLER(X86)
++  LLVM_DISASSEMBLER(AMDGPU)
+ 
+ #if defined(FORCE_BUILD_ARM)
+   LLVM_DISASSEMBLER(ARM)
+diff --git a/device/include/llvm/Config/Targets.def b/device/include/llvm/Config/Targets.def
+index fe326530..0b35ad35 100755
+--- a/device/include/llvm/Config/Targets.def
++++ b/device/include/llvm/Config/Targets.def
+@@ -30,6 +30,9 @@
+   LLVM_TARGET(Mips)
+ #elif defined(__i386__) || defined(__x86_64__)
+   LLVM_TARGET(X86)
++#if !defined(MCLD_TARGET) && !defined(MCLD_LINKER)
++  LLVM_TARGET(AMDGPU)
++#endif
+ 
+ #if defined(FORCE_BUILD_ARM)
+   LLVM_TARGET(ARM)
+diff --git a/lib/Target/AMDGPU/Android.bp b/lib/Target/AMDGPU/Android.bp
+new file mode 100644
+index 00000000..9b8105dc
+--- /dev/null
++++ b/lib/Target/AMDGPU/Android.bp
+@@ -0,0 +1,54 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUCodeGen",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++    exclude_srcs: ["AMDGPUCallLowering.cpp"],
++    cflags: ["-Wno-unreachable-code-loop-increment"],
++}
++
++cc_defaults {
++    name: "llvm-amdgpu-defaults",
++    generated_headers: ["llvm-gen-amdgpu"],
++    static_libs: ["llvm-amdgpu-headers"],
++}
++
++cc_library_static {
++    name: "llvm-amdgpu-headers",
++    vendor_available: true,
++    product_available: true,
++    host_supported: true,
++    native_bridge_supported: true,
++    target: {
++        windows: {
++            enabled: true,
++        },
++    },
++    export_include_dirs: ["."],
++}
++
++llvm_tblgen {
++    name: "llvm-gen-amdgpu",
++    in: "AMDGPU.td",
++    outs: [
++        "AMDGPUGenRegisterInfo.inc",
++        "AMDGPUGenInstrInfo.inc",
++        "AMDGPUGenDAGISel.inc",
++        "AMDGPUGenCallingConv.inc",
++        "AMDGPUGenSubtargetInfo.inc",
++        "AMDGPUGenIntrinsics.inc",
++        "AMDGPUGenMCCodeEmitter.inc",
++        "AMDGPUGenDFAPacketizer.inc",
++        "AMDGPUGenAsmWriter.inc",
++        "AMDGPUGenAsmMatcher.inc",
++        "AMDGPUGenDisassemblerTables.inc",
++    ],
++}
++
++subdirs = ["*"]
+diff --git a/lib/Target/AMDGPU/AsmParser/Android.bp b/lib/Target/AMDGPU/AsmParser/Android.bp
+new file mode 100644
+index 00000000..23bbde1c
+--- /dev/null
++++ b/lib/Target/AMDGPU/AsmParser/Android.bp
+@@ -0,0 +1,12 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUAsmParser",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++}
+diff --git a/lib/Target/AMDGPU/Disassembler/Android.bp b/lib/Target/AMDGPU/Disassembler/Android.bp
+new file mode 100644
+index 00000000..f50466b7
+--- /dev/null
++++ b/lib/Target/AMDGPU/Disassembler/Android.bp
+@@ -0,0 +1,12 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUDisassembler",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++}
+diff --git a/lib/Target/AMDGPU/InstPrinter/Android.bp b/lib/Target/AMDGPU/InstPrinter/Android.bp
+new file mode 100644
+index 00000000..8853860a
+--- /dev/null
++++ b/lib/Target/AMDGPU/InstPrinter/Android.bp
+@@ -0,0 +1,12 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUAsmPrinter",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++}
+diff --git a/lib/Target/AMDGPU/MCTargetDesc/Android.bp b/lib/Target/AMDGPU/MCTargetDesc/Android.bp
+new file mode 100644
+index 00000000..c7f8c9a1
+--- /dev/null
++++ b/lib/Target/AMDGPU/MCTargetDesc/Android.bp
+@@ -0,0 +1,12 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUDesc",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++}
+diff --git a/lib/Target/AMDGPU/TargetInfo/Android.bp b/lib/Target/AMDGPU/TargetInfo/Android.bp
+new file mode 100644
+index 00000000..75dcd383
+--- /dev/null
++++ b/lib/Target/AMDGPU/TargetInfo/Android.bp
+@@ -0,0 +1,12 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUInfo",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++}
+diff --git a/lib/Target/AMDGPU/Utils/Android.bp b/lib/Target/AMDGPU/Utils/Android.bp
+new file mode 100644
+index 00000000..7cbd9d76
+--- /dev/null
++++ b/lib/Target/AMDGPU/Utils/Android.bp
+@@ -0,0 +1,12 @@
++package {
++    default_applicable_licenses: ["external_llvm_license"],
++}
++
++cc_library_static {
++    name: "libLLVMAMDGPUUtils",
++    defaults: [
++        "llvm-lib-defaults",
++        "llvm-amdgpu-defaults",
++    ],
++    srcs: ["*.cpp"],
++}
+diff --git a/soong/tblgen.go b/soong/tblgen.go
+index b0067be3..383da215 100644
+--- a/soong/tblgen.go
++++ b/soong/tblgen.go
+@@ -95,6 +95,8 @@ func outToGenerator(ctx android.ModuleContext, out string) string {
+ 		return "-gen-register-info"
+ 	case strings.HasSuffix(out, "GenInstrInfo.inc"):
+ 		return "-gen-instr-info"
++	case strings.HasSuffix(out, "GenDFAPacketizer.inc"):
++		return "-gen-dfa-packetizer"
+ 	case strings.HasSuffix(out, "GenAsmWriter.inc"):
+ 		return "-gen-asm-writer"
+ 	case strings.HasSuffix(out, "GenAsmWriter1.inc"):
+@@ -122,7 +124,7 @@ func outToGenerator(ctx android.ModuleContext, out string) string {
+ 	case strings.HasSuffix(out, "GenCallingConv.inc"):
+ 		return "-gen-callingconv"
+ 	case strings.HasSuffix(out, "GenIntrinsics.inc"):
+-		return "-gen-intrinsics"
++		return "-gen-tgt-intrinsic"
+ 	case strings.HasSuffix(out, "GenDecoderTables.inc"):
+ 		return "-gen-arm-decoder"
+ 	case strings.HasSuffix(out, "Options.inc"):
+-- 
+2.47.3
+
