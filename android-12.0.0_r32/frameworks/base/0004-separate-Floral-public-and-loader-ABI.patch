@@ -1,11 +1,11 @@
-From 752e7838b9e4683b5ae5a6d4c8418e2dbc54486c Mon Sep 17 00:00:00 2001
+From a71201c40db066a264a309555f8ec9ffd3311df0 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 14 Aug 2026 02:12:00 +0800
 Subject: [PATCH] frameworks: separate Floral public and loader ABI views
 
-Expose the configured Floral application ABI view through Build while retaining
-build-owned ABI lists for zygote and platform internals. PackageManager keeps an
-APK on the public ARM family whenever any base or split APK contains ARM code.
+Expose the configured Floral application ABI view through Build while retaining build-owned ABI lists for zygote and platform internals. PackageManager keeps an APK on the public ARM family whenever any base or split APK contains ARM code.
+
+Use the loader ABI for framework process defaults and internal dex tests so public ABI virtualization cannot relabel platform processes.
 
 Change-Id: I58859c26b8b3559f7848cc51e3c68f7dfb809822
 ---
@@ -16,8 +16,10 @@ Change-Id: I58859c26b8b3559f7848cc51e3c68f7dfb809822
  .../android/webkit/WebViewLibraryLoader.java  |  6 +-
  core/java/android/webkit/WebViewZygote.java   |  2 +-
  .../internal/content/NativeLibraryHelper.java | 53 +++++++++++++-----
+ .../content/pm/PackageManagerTests.java       |  3 +-
  .../com/android/server/PinnerService.java     |  4 +-
  .../am/ActivityManagerShellCommand.java       |  2 +-
+ .../com/android/server/am/ProcessList.java    |  4 +-
  .../java/com/android/server/pm/Installer.java |  2 +-
  .../android/server/pm/InstructionSets.java    |  8 +--
  .../server/pm/PackageAbiHelperImpl.java       | 55 +++++++++++--------
@@ -26,7 +28,9 @@ Change-Id: I58859c26b8b3559f7848cc51e3c68f7dfb809822
  .../server/pm/PackageManagerShellCommand.java |  2 +-
  .../server/pm/dex/PackageDexUsage.java        |  2 +-
  .../java/com/android/server/SystemServer.java |  2 +-
- 17 files changed, 123 insertions(+), 66 deletions(-)
+ .../server/pm/dex/DexManagerTests.java        |  6 +-
+ .../server/pm/dex/PackageDexUsageTests.java   |  7 ++-
+ 21 files changed, 134 insertions(+), 75 deletions(-)
 
 diff --git a/cmds/am/src/com/android/commands/am/Instrument.java b/cmds/am/src/com/android/commands/am/Instrument.java
 index 1e72ddf8ecfc..01d6737beeab 100644
@@ -302,6 +306,20 @@ index 10750b695a39..10fb82fac225 100644
              }
  
              sum += sumNativeBinariesForSupportedAbi(handle, abiList);
+diff --git a/core/tests/coretests/src/android/content/pm/PackageManagerTests.java b/core/tests/coretests/src/android/content/pm/PackageManagerTests.java
+index 5d75d9b3f70b..4965bea513f3 100644
+--- a/core/tests/coretests/src/android/content/pm/PackageManagerTests.java
++++ b/core/tests/coretests/src/android/content/pm/PackageManagerTests.java
+@@ -2998,7 +2998,8 @@ public class PackageManagerTests extends AndroidTestCase {
+             }
+         }
+ 
+-        return new String[] { VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]) };
++        return new String[] {
++                VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]) };
+     }
+ 
+     /*---------- Recommended install location tests ----*/
 diff --git a/services/core/java/com/android/server/PinnerService.java b/services/core/java/com/android/server/PinnerService.java
 index 8e53101b0eab..5c8f0ae6edde 100644
 --- a/services/core/java/com/android/server/PinnerService.java
@@ -337,6 +355,28 @@ index 685d606f8d41..8408976cf504 100644
              if (inclDevice) {
                  writeDeviceConfig(null, -1, pw, config, metrics);
              }
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index edb5ca3aeb97..6a6164411c0a 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -957,7 +957,7 @@ public final class ProcessList {
+             Slog.i("XXXXXX", "minfree_adj=" + minfree_adj + " minfree_abs=" + minfree_abs);
+         }
+ 
+-        final boolean is64bit = Build.SUPPORTED_64_BIT_ABIS.length > 0;
++        final boolean is64bit = Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0;
+ 
+         for (int i = 0; i < mOomAdj.length; i++) {
+             int low = mOomMinFreeLow[i];
+@@ -1978,7 +1978,7 @@ public final class ProcessList {
+ 
+             String requiredAbi = (abiOverride != null) ? abiOverride : app.info.primaryCpuAbi;
+             if (requiredAbi == null) {
+-                requiredAbi = Build.SUPPORTED_ABIS[0];
++                requiredAbi = Build.INTERNAL_SUPPORTED_ABIS[0];
+             }
+ 
+             String instructionSet = null;
 diff --git a/services/core/java/com/android/server/pm/Installer.java b/services/core/java/com/android/server/pm/Installer.java
 index 8fd545f271f3..bcb42f0b6892 100644
 --- a/services/core/java/com/android/server/pm/Installer.java
@@ -598,3 +638,69 @@ index 33e32393090e..d8476134e820 100644
                          Slog.e(TAG, "Unable to preload default resources");
                      }
                      traceLog.traceEnd();
+diff --git a/services/tests/mockingservicestests/src/com/android/server/pm/dex/DexManagerTests.java b/services/tests/mockingservicestests/src/com/android/server/pm/dex/DexManagerTests.java
+index 8abe46fab1d6..cdac79d491f2 100644
+--- a/services/tests/mockingservicestests/src/com/android/server/pm/dex/DexManagerTests.java
++++ b/services/tests/mockingservicestests/src/com/android/server/pm/dex/DexManagerTests.java
+@@ -109,7 +109,7 @@ public class DexManagerTests {
+         mUser0 = 0;
+         mUser1 = 1;
+ 
+-        String isa = VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]);
++        String isa = VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]);
+         String foo = "foo";
+         String bar = "bar";
+ 
+@@ -351,7 +351,7 @@ public class DexManagerTests {
+     @Test
+     public void testNotifyPackageInstallUsedByOther() {
+         TestData newPackage = new TestData("newPackage",
+-                VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]), mUser0);
++                VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]), mUser0);
+ 
+         List<String> newSecondaries = newPackage.getSecondaryDexPaths();
+         // Before we notify about the installation of the newPackage if mFoo
+@@ -375,7 +375,7 @@ public class DexManagerTests {
+     @Test
+     public void testNotifyPackageInstallSelfUse() {
+         TestData newPackage = new TestData("newPackage",
+-                VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]), mUser0);
++                VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]), mUser0);
+ 
+         List<String> newSecondaries = newPackage.getSecondaryDexPaths();
+         // Packages should be able to find their own dex files even if the notification about
+diff --git a/services/tests/servicestests/src/com/android/server/pm/dex/PackageDexUsageTests.java b/services/tests/servicestests/src/com/android/server/pm/dex/PackageDexUsageTests.java
+index 3450710f60a0..c7dfe6fcf3db 100644
+--- a/services/tests/servicestests/src/com/android/server/pm/dex/PackageDexUsageTests.java
++++ b/services/tests/servicestests/src/com/android/server/pm/dex/PackageDexUsageTests.java
+@@ -52,7 +52,8 @@ import java.util.Set;
+ @RunWith(AndroidJUnit4.class)
+ @SmallTest
+ public class PackageDexUsageTests {
+-    private static final String ISA = VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]);
++    private static final String ISA =
++            VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]);
+ 
+     private PackageDexUsage mPackageDexUsage;
+ 
+@@ -493,7 +494,7 @@ public class PackageDexUsageTests {
+ 
+     @Test
+     public void testRead() {
+-        String isa = VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]);
++        String isa = VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]);
+         // Equivalent to
+         //   record(mFooSplit2UsedByOtherApps0);
+         //   record(mFooSecondary1User0);
+@@ -593,7 +594,7 @@ public class PackageDexUsageTests {
+ 
+     @Test
+     public void testEnsureLoadingPackagesCanBeExtended() {
+-        String isa = VMRuntime.getInstructionSet(Build.SUPPORTED_ABIS[0]);
++        String isa = VMRuntime.getInstructionSet(Build.INTERNAL_SUPPORTED_ABIS[0]);
+         String content = "PACKAGE_MANAGER__PACKAGE_DEX_USAGE__2\n"
+                 + "com.google.foo\n"
+                 + "+/data/app/com.google.foo/split-2.apk\n"
+-- 
+2.47.3
+
