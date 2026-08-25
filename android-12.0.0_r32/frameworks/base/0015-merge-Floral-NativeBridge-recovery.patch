@@ -1,0 +1,1257 @@
+From 62c2653c93d3d1c7b6bce91267315695206f0881 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 26 Aug 2026 00:56:52 +0800
+Subject: [PATCH] frameworks: merge Floral NativeBridge recovery updates
+
+Change-Id: Id799d4e385ca1c7bc141e01e9ea9f48f4da0a776
+---
+ core/java/android/os/ZygoteProcess.java       |  27 +-
+ core/java/com/android/internal/os/Zygote.java |   9 +-
+ .../android/internal/os/ZygoteArguments.java  |  12 +
+ .../android/internal/os/ZygoteConnection.java |   5 +-
+ core/jni/com_android_internal_os_Zygote.cpp   |  34 +-
+ .../java/com/android/server/am/AppErrors.java |  17 +-
+ .../server/am/FloralNativeBridgeManager.java  | 576 +++++++-----------
+ .../com/android/server/am/ProcessList.java    |  49 +-
+ .../android/telephony/TelephonyManager.java   |   6 +
+ 9 files changed, 326 insertions(+), 409 deletions(-)
+
+diff --git a/core/java/android/os/ZygoteProcess.java b/core/java/android/os/ZygoteProcess.java
+index 682f9970ea1a..122e1acf12ee 100644
+--- a/core/java/android/os/ZygoteProcess.java
++++ b/core/java/android/os/ZygoteProcess.java
+@@ -565,7 +565,8 @@ public class ZygoteProcess {
+         "--set-api-denylist-exemptions",
+         "--hidden-api-log-sampling-rate",
+         "--hidden-api-statslog-sampling-rate",
+-        "--invoke-with"
++        "--invoke-with",
++        "--floral-nativebridge-backend"
+     };
+ 
+     /**
+@@ -775,10 +776,24 @@ public class ZygoteProcess {
+             argsForZygote.add(sb.toString());
+         }
+ 
++        if (extraArgs != null) {
++            // The backend is a zygote control argument, not an application main
++            // argument. Keep the channel private to ZygoteArguments.
++            for (String extraArg : extraArgs) {
++                if (extraArg.startsWith("--floral-nativebridge-backend=")) {
++                    argsForZygote.add(extraArg);
++                }
++            }
++        }
++
+         argsForZygote.add(processClass);
+ 
+         if (extraArgs != null) {
+-            Collections.addAll(argsForZygote, extraArgs);
++            for (String extraArg : extraArgs) {
++                if (!extraArg.startsWith("--floral-nativebridge-backend=")) {
++                    argsForZygote.add(extraArg);
++                }
++            }
+         }
+ 
+         synchronized(mLock) {
+@@ -892,11 +907,11 @@ public class ZygoteProcess {
+      */
+     public void bootCompleted() {
+         // Notify both the 32-bit and 64-bit zygote.
+-        if (Build.INTERNAL_SUPPORTED_32_BIT_ABIS.length > 0) {
+-            bootCompleted(Build.INTERNAL_SUPPORTED_32_BIT_ABIS[0]);
++        if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
++            bootCompleted(Build.SUPPORTED_32_BIT_ABIS[0]);
+         }
+-        if (Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0) {
+-            bootCompleted(Build.INTERNAL_SUPPORTED_64_BIT_ABIS[0]);
++        if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
++            bootCompleted(Build.SUPPORTED_64_BIT_ABIS[0]);
+         }
+     }
+ 
+diff --git a/core/java/com/android/internal/os/Zygote.java b/core/java/com/android/internal/os/Zygote.java
+index e4e28a926ed6..8aee719e6157 100644
+--- a/core/java/com/android/internal/os/Zygote.java
++++ b/core/java/com/android/internal/os/Zygote.java
+@@ -339,13 +339,15 @@ public final class Zygote {
+     static int forkAndSpecialize(int uid, int gid, int[] gids, int runtimeFlags,
+             int[][] rlimits, int mountExternal, String seInfo, String niceName, int[] fdsToClose,
+             int[] fdsToIgnore, boolean startChildZygote, String instructionSet, String appDataDir,
+-            boolean isTopApp, String[] pkgDataInfoList, String[] allowlistedDataInfoList,
++            String floralNativeBridgeBackend, boolean isTopApp,
++            String[] pkgDataInfoList, String[] allowlistedDataInfoList,
+             boolean bindMountAppDataDirs, boolean bindMountAppStorageDirs) {
+         ZygoteHooks.preFork();
+ 
+         int pid = nativeForkAndSpecialize(
+                 uid, gid, gids, runtimeFlags, rlimits, mountExternal, seInfo, niceName, fdsToClose,
+-                fdsToIgnore, startChildZygote, instructionSet, appDataDir, isTopApp,
++                fdsToIgnore, startChildZygote, instructionSet, appDataDir,
++                floralNativeBridgeBackend, isTopApp,
+                 pkgDataInfoList, allowlistedDataInfoList, bindMountAppDataDirs,
+                 bindMountAppStorageDirs);
+         if (pid == 0) {
+@@ -368,7 +370,8 @@ public final class Zygote {
+     private static native int nativeForkAndSpecialize(int uid, int gid, int[] gids,
+             int runtimeFlags, int[][] rlimits, int mountExternal, String seInfo, String niceName,
+             int[] fdsToClose, int[] fdsToIgnore, boolean startChildZygote, String instructionSet,
+-            String appDataDir, boolean isTopApp, String[] pkgDataInfoList,
++            String appDataDir, String floralNativeBridgeBackend, boolean isTopApp,
++            String[] pkgDataInfoList,
+             String[] allowlistedDataInfoList, boolean bindMountAppDataDirs,
+             boolean bindMountAppStorageDirs);
+ 
+diff --git a/core/java/com/android/internal/os/ZygoteArguments.java b/core/java/com/android/internal/os/ZygoteArguments.java
+index ef8398294c5b..a291cef27a5a 100644
+--- a/core/java/com/android/internal/os/ZygoteArguments.java
++++ b/core/java/com/android/internal/os/ZygoteArguments.java
+@@ -140,6 +140,9 @@ class ZygoteArguments {
+      */
+     String mAppDataDir;
+ 
++    /** One-shot backend selected by system_server for this translated process. */
++    String mFloralNativeBridgeBackend;
++
+     /**
+      * The APK path of the package to preload, when using --preload-package.
+      */
+@@ -411,6 +414,15 @@ class ZygoteArguments {
+                 mInstructionSet = getAssignmentValue(arg);
+             } else if (arg.startsWith("--app-data-dir=")) {
+                 mAppDataDir = getAssignmentValue(arg);
++            } else if (arg.startsWith("--floral-nativebridge-backend=")) {
++                if (mFloralNativeBridgeBackend != null) {
++                    throw new IllegalArgumentException("Duplicate Floral NativeBridge backend");
++                }
++                mFloralNativeBridgeBackend = getAssignmentValue(arg);
++                if (!"ndk".equals(mFloralNativeBridgeBackend)
++                        && !"houdini".equals(mFloralNativeBridgeBackend)) {
++                    throw new IllegalArgumentException("Invalid Floral NativeBridge backend");
++                }
+             } else if (arg.equals("--preload-app")) {
+                 ++curArg;
+                 mPreloadApp = args.nextArg();
+diff --git a/core/java/com/android/internal/os/ZygoteConnection.java b/core/java/com/android/internal/os/ZygoteConnection.java
+index 993e4e7b4b3d..5cc739e6940b 100644
+--- a/core/java/com/android/internal/os/ZygoteConnection.java
++++ b/core/java/com/android/internal/os/ZygoteConnection.java
+@@ -254,8 +254,9 @@ class ZygoteConnection {
+                             parsedArgs.mGids, parsedArgs.mRuntimeFlags, rlimits,
+                             parsedArgs.mMountExternal, parsedArgs.mSeInfo, parsedArgs.mNiceName,
+                             fdsToClose, fdsToIgnore, parsedArgs.mStartChildZygote,
+-                            parsedArgs.mInstructionSet, parsedArgs.mAppDataDir,
+-                            parsedArgs.mIsTopApp, parsedArgs.mPkgDataInfoList,
++                             parsedArgs.mInstructionSet, parsedArgs.mAppDataDir,
++                             parsedArgs.mFloralNativeBridgeBackend,
++                             parsedArgs.mIsTopApp, parsedArgs.mPkgDataInfoList,
+                             parsedArgs.mAllowlistedDataInfoList, parsedArgs.mBindMountAppDataDirs,
+                             parsedArgs.mBindMountAppStorageDirs);
+ 
+diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
+index 625b718c29af..ca277bb6b1eb 100644
+--- a/core/jni/com_android_internal_os_Zygote.cpp
++++ b/core/jni/com_android_internal_os_Zygote.cpp
+@@ -95,11 +95,6 @@
+ 
+ #include "nativebridge/native_bridge.h"
+ 
+-namespace android {
+-// Private Floral extension; it is intentionally absent from the stable NativeBridge headers.
+-void SetFloralNativeBridgeProcessContext(const char* process_name, const char* app_data_dir);
+-}  // namespace android
+-
+ namespace {
+ 
+ // TODO (chriswailes): Add a function to initialize native Zygote data.
+@@ -1562,9 +1557,10 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+                              jobjectArray rlimits, jlong permitted_capabilities,
+                              jlong effective_capabilities, jint mount_external,
+                              jstring managed_se_info, jstring managed_nice_name,
+-                             bool is_system_server, bool is_child_zygote,
+-                             jstring managed_instruction_set, jstring managed_app_data_dir,
+-                             bool is_top_app, jobjectArray pkg_data_info_list,
++                              bool is_system_server, bool is_child_zygote,
++                              jstring managed_instruction_set, jstring managed_app_data_dir,
++                              jstring managed_floral_nativebridge_backend, bool is_top_app,
++                              jobjectArray pkg_data_info_list,
+                              jobjectArray allowlisted_data_info_list, bool mount_data_dirs,
+                              bool mount_storage_dirs) {
+     const char* process_name = is_system_server ? "system_server" : "zygote";
+@@ -1575,6 +1571,7 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+     auto nice_name = extract_fn(managed_nice_name);
+     auto instruction_set = extract_fn(managed_instruction_set);
+     auto app_data_dir = extract_fn(managed_app_data_dir);
++    auto floral_nativebridge_backend = extract_fn(managed_floral_nativebridge_backend);
+ 
+     // Keep capabilities across UID change, unless we're staying root.
+     if (uid != 0) {
+@@ -1631,7 +1628,9 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+         // instruction_set contains a value.
+         android::SetFloralNativeBridgeProcessContext(
+                 nice_name.has_value() ? nice_name.value().c_str() : nullptr,
+-                app_data_dir.has_value() ? app_data_dir.value().c_str() : nullptr);
++                app_data_dir.has_value() ? app_data_dir.value().c_str() : nullptr,
++                floral_nativebridge_backend.has_value()
++                        ? floral_nativebridge_backend.value().c_str() : nullptr);
+         android::PreInitializeNativeBridge(app_data_dir.has_value() ? app_data_dir.value().c_str()
+                                                                     : nullptr,
+                                            instruction_set.value().c_str());
+@@ -2137,9 +2136,10 @@ static void com_android_internal_os_Zygote_nativePreApplicationInit(JNIEnv*, jcl
+ static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
+         JNIEnv* env, jclass, jint uid, jint gid, jintArray gids, jint runtime_flags,
+         jobjectArray rlimits, jint mount_external, jstring se_info, jstring nice_name,
+-        jintArray managed_fds_to_close, jintArray managed_fds_to_ignore, jboolean is_child_zygote,
+-        jstring instruction_set, jstring app_data_dir, jboolean is_top_app,
+-        jobjectArray pkg_data_info_list, jobjectArray allowlisted_data_info_list,
++         jintArray managed_fds_to_close, jintArray managed_fds_to_ignore, jboolean is_child_zygote,
++         jstring instruction_set, jstring app_data_dir, jstring floral_nativebridge_backend,
++         jboolean is_top_app,
++         jobjectArray pkg_data_info_list, jobjectArray allowlisted_data_info_list,
+         jboolean mount_data_dirs, jboolean mount_storage_dirs) {
+     jlong capabilities = CalculateCapabilities(env, uid, gid, gids, is_child_zygote);
+ 
+@@ -2181,7 +2181,8 @@ static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
+     if (pid == 0) {
+         SpecializeCommon(env, uid, gid, gids, runtime_flags, rlimits, capabilities, capabilities,
+                          mount_external, se_info, nice_name, false, is_child_zygote == JNI_TRUE,
+-                         instruction_set, app_data_dir, is_top_app == JNI_TRUE, pkg_data_info_list,
++                         instruction_set, app_data_dir, floral_nativebridge_backend,
++                         is_top_app == JNI_TRUE, pkg_data_info_list,
+                          allowlisted_data_info_list, mount_data_dirs == JNI_TRUE,
+                          mount_storage_dirs == JNI_TRUE);
+     }
+@@ -2216,7 +2217,7 @@ static jint com_android_internal_os_Zygote_nativeForkSystemServer(
+       // know pkg_data_info_list.
+       SpecializeCommon(env, uid, gid, gids, runtime_flags, rlimits, permitted_capabilities,
+                        effective_capabilities, MOUNT_EXTERNAL_DEFAULT, nullptr, nullptr, true,
+-                       false, nullptr, nullptr, /* is_top_app= */ false,
++                       false, nullptr, nullptr, nullptr, /* is_top_app= */ false,
+                        /* pkg_data_info_list */ nullptr,
+                        /* allowlisted_data_info_list */ nullptr, false, false);
+   } else if (pid > 0) {
+@@ -2373,7 +2374,8 @@ static void com_android_internal_os_Zygote_nativeSpecializeAppProcess(
+ 
+     SpecializeCommon(env, uid, gid, gids, runtime_flags, rlimits, capabilities, capabilities,
+                      mount_external, se_info, nice_name, false, is_child_zygote == JNI_TRUE,
+-                     instruction_set, app_data_dir, is_top_app == JNI_TRUE, pkg_data_info_list,
++                     instruction_set, app_data_dir, nullptr, is_top_app == JNI_TRUE,
++                     pkg_data_info_list,
+                      allowlisted_data_info_list, mount_data_dirs == JNI_TRUE,
+                      mount_storage_dirs == JNI_TRUE);
+ }
+@@ -2653,7 +2655,7 @@ static void com_android_internal_os_Zygote_nativeAllowFilesOpenedByPreload(JNIEn
+ static const JNINativeMethod gMethods[] = {
+         {"nativeForkAndSpecialize",
+          "(II[II[[IILjava/lang/String;Ljava/lang/String;[I[IZLjava/lang/String;Ljava/lang/"
+-         "String;Z[Ljava/lang/String;[Ljava/lang/String;ZZ)I",
++         "String;Ljava/lang/String;Z[Ljava/lang/String;[Ljava/lang/String;ZZ)I",
+          (void*)com_android_internal_os_Zygote_nativeForkAndSpecialize},
+         {"nativeForkSystemServer", "(II[II[[IJJ)I",
+          (void*)com_android_internal_os_Zygote_nativeForkSystemServer},
+diff --git a/services/core/java/com/android/server/am/AppErrors.java b/services/core/java/com/android/server/am/AppErrors.java
+index ccbc9e965aae..ae52523cc8ba 100644
+--- a/services/core/java/com/android/server/am/AppErrors.java
++++ b/services/core/java/com/android/server/am/AppErrors.java
+@@ -571,18 +571,13 @@ class AppErrors {
+             longMsg = shortMsg;
+         }
+ 
+-        if (r != null && "Native crash".equals(shortMsg)) {
++        if (r != null && mService.mFloralNativeBridgeManager != null) {
+             synchronized (mService) {
+-                if (mService.mFloralNativeBridgeManager.handleEarlyNativeCrash(r)) {
+-                    return;
+-                }
+-            }
+-        }
+-
+-        if (r != null) {
+-            synchronized (mService) {
+-                if (mService.mFloralNativeBridgeManager
+-                        .handleEarlyNativeLoaderError(r, crashInfo)) {
++                final boolean recovered = "Native crash".equals(shortMsg)
++                        ? mService.mFloralNativeBridgeManager.handleEarlyNativeCrash(r)
++                        : mService.mFloralNativeBridgeManager.handleEarlyNativeLoaderError(
++                                r, crashInfo);
++                if (recovered) {
+                     return;
+                 }
+             }
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+index d2fb685d7e6a..399bd34829a0 100644
+--- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -16,85 +16,59 @@
+ 
+ package com.android.server.am;
+ 
+-import static android.app.ActivityTaskManager.INVALID_TASK_ID;
+ import static android.app.ActivityManager.isStartResultSuccessful;
++import static android.app.ActivityTaskManager.INVALID_TASK_ID;
+ 
+ import android.app.ActivityOptions;
+-import android.app.ApplicationExitInfo;
+ import android.app.ApplicationErrorReport;
+-import android.os.Build;
++import android.app.ApplicationExitInfo;
+ import android.os.FileUtils;
+-import android.os.SystemProperties;
+ import android.os.SystemClock;
+ import android.os.UserHandle;
+ import android.util.ArrayMap;
+ import android.util.ArraySet;
+-import android.util.AtomicFile;
+ import android.util.Slog;
+ 
+-import com.android.server.wm.WindowProcessController;
+-
+ import org.json.JSONArray;
+ import org.json.JSONException;
+ import org.json.JSONObject;
+ 
+ import java.io.File;
+-import java.io.FileOutputStream;
+-import java.io.IOException;
+-import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ 
+-/** Coordinates deterministic backend selection and bounded recovery. */
++/** Coordinates bounded, non-persistent backend selection for Floral NativeBridge. */
+ final class FloralNativeBridgeManager {
+     private static final String TAG = "FloralNativeBridge";
+     private static final String POLICY_PATH =
+             "/data/system/floral/nativebridge-policy.json";
+-    private static final String STATE_PATH =
+-            "/data/system/floral/nativebridge-state.json";
+-    // Translated games commonly initialize optional native SDKs well after their first frame.
+     private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
++    private static final long FAILURE_CACHE_TTL_MS = 5 * 60_000L;
++    private static final long SUCCESS_CACHE_TTL_MS = 10 * 60_000L;
+     private static final int MAX_JSON_BYTES = 256 * 1024;
+-    // Version 4 changes recovery ownership from process name to package name.
+-    // Earlier state must not pin helper processes to a different backend.
+-    private static final int STATE_VERSION = 4;
++    private static final int MAX_CACHED_PACKAGES = 128;
+ 
+     private static final String BACKEND_AUTO = "auto";
+     private static final String BACKEND_NDK = "ndk";
+     private static final String BACKEND_HOUDINI = "houdini";
+     private static final String MODE_HYBRID = "hybrid";
+     private static final String MODE_DIRECT = "direct";
+-    // State written by older images used this name for the same second-stage
+-    // candidate. It is normalized when read and is never emitted again.
+     private static final String MODE_COMPAT_LEGACY = "compat";
+-    private static final String COMPAT_AOSP_PROPERTY = "ro.floral.bridge.compat_aosp";
+-    private static final String RECOVERY_PROPERTY = "ro.floral.bridge.recovery";
+ 
+     private final ActivityManagerService mService;
+-    private final boolean mEnabled;
+-    private final AtomicFile mStateFile = new AtomicFile(new File(STATE_PATH));
+     private final ArrayMap<ProcessRecord, Launch> mLaunches = new ArrayMap<>();
++    private final ArrayMap<ProcessRecord, Launch> mRunning = new ArrayMap<>();
++    private final ArrayMap<String, RuntimeState> mStates = new ArrayMap<>();
+     private final JSONObject mPolicy;
+-    private JSONObject mState;
+ 
+     FloralNativeBridgeManager(ActivityManagerService service) {
+         mService = service;
+-        mEnabled = !SystemProperties.getBoolean(COMPAT_AOSP_PROPERTY, false)
+-                && SystemProperties.getBoolean(RECOVERY_PROPERTY, true);
+-        // The host policy is refreshed by init at boot. Keep parsing out of the
+-        // AMS lock so starting a translated process stays deterministic and cheap.
+-        mPolicy = mEnabled ? readJsonFile(new File(POLICY_PATH)) : null;
+-        mState = mEnabled ? readJsonFile(mStateFile.getBaseFile()) : emptyState();
+-        if (mState == null || mState.optInt("version", 0) != STATE_VERSION
+-                || !Build.FINGERPRINT.equals(mState.optString("build_fingerprint"))) {
+-            mState = emptyState();
+-        }
++        // Init refreshes this policy once per boot. Runtime decisions never write
++        // back to it, so candidate state is lost with system_server as intended.
++        mPolicy = readJsonFile(new File(POLICY_PATH));
+     }
+ 
+     /** Called while holding the ActivityManagerService lock, before zygote fork. */
+     void onProcessStarting(ProcessRecord app) {
+-        if (!mEnabled) {
+-            return;
+-        }
+         mLaunches.remove(app);
+         if (!isTranslatedApp(app)) {
+             return;
+@@ -105,109 +79,89 @@ final class FloralNativeBridgeManager {
+             return;
+         }
+ 
+-        final String processName = app.processName;
+-        // Persist one selection for the package. Helper processes must inherit
+-        // the same backend and loader mode as the package's main process.
+-        final String stateKey = app.info.packageName;
+-        final long versionCode = app.info.longVersionCode;
+-        final JSONObject packages = packagesState();
+-        JSONObject state = packages.optJSONObject(stateKey);
+-        boolean changed = false;
+-        if (state == null || state.optLong("version_code", Long.MIN_VALUE) != versionCode
+-                || !app.info.packageName.equals(state.optString("package_name"))
+-                || !sameCandidates(state.optJSONArray("candidates"), rule.candidates)) {
+-            state = new JSONObject();
+-            put(state, "package_name", app.info.packageName);
+-            put(state, "version_code", versionCode);
+-            put(state, "candidates", toJsonArray(rule.candidates));
+-            put(state, "failed_candidates", new JSONArray());
+-            put(state, "failed_backends", new JSONArray());
+-            putSelectedCandidate(state, rule.candidates.get(0));
+-            put(state, "stable", false);
+-            put(state, "exhausted", false);
+-            put(state, "failure_count", 0);
+-            put(packages, stateKey, state);
+-            changed = true;
+-        }
+-
+-        if (state.optBoolean("exhausted", false)) {
+-            if (changed) {
+-                writeState();
+-            }
+-            Slog.w(TAG, "NativeBridge recovery exhausted for " + processName);
++        final String instructionSet = app.getInstructionSet();
++        final ArrayList<String> candidates = filterCandidates(rule.candidates, instructionSet);
++        if (candidates.isEmpty()) {
++            Slog.w(TAG, "No NativeBridge backend supports " + instructionSet
++                    + " for " + app.processName);
+             return;
+         }
+ 
+-        final ArraySet<String> failed = readFailedCandidates(state);
+-        String selected = selectedCandidate(state);
+-        if (!rule.candidates.contains(selected) || failed.contains(selected)) {
+-            final String replacement = firstAvailable(rule.candidates, failed);
+-            if (replacement == null) {
+-                put(state, "selected_backend", "");
+-                put(state, "selected_loader_mode", "");
+-                put(state, "exhausted", true);
+-                writeState();
+-                Slog.w(TAG, "NativeBridge candidates exhausted for " + processName);
+-                return;
+-            }
+-            selected = replacement;
+-            putSelectedCandidate(state, selected);
+-            changed = true;
++        trimStates(SystemClock.elapsedRealtime());
++        final String stateKey = app.info.packageName;
++        final long versionCode = app.info.longVersionCode;
++        RuntimeState state = mStates.get(stateKey);
++        if (state == null || !state.matches(app.info.packageName, versionCode, candidates)
++                || state.isExpired(SystemClock.elapsedRealtime())) {
++            state = new RuntimeState(stateKey, app.info.packageName, versionCode, candidates);
++            putState(stateKey, state);
+         }
+-        if (selected.isEmpty()) {
++
++        if (state.exhausted) {
++            Slog.w(TAG, "NativeBridge candidates exhausted for " + app.processName);
+             return;
+         }
+-        if (changed) {
+-            writeState();
+-        }
+ 
+-        // A backend that already survived the probation window is a learned
+-        // result. Later application crashes must not poison that result.
+-        if (state.optBoolean("stable", false)) {
+-            Slog.i(TAG, "Using stable NativeBridge backend " + selected
+-                    + " for " + processName);
+-            return;
++        String selected = state.selected;
++        if (!candidates.contains(selected) || state.failed.contains(selected)) {
++            selected = firstAvailable(candidates, state.failed);
++            if (selected == null) {
++                state.exhausted = true;
++                Slog.w(TAG, "NativeBridge candidates exhausted for " + app.processName);
++                return;
++            }
++            state.selected = selected;
+         }
++        state.expiresAtElapsed = 0;
+ 
+-        final Launch launch = new Launch(processName, stateKey, app.info.packageName, versionCode,
+-                selected, rule.candidates, rule.preserveTaskSurface, app.getStartTime());
++        final Launch launch = new Launch(processName(app), stateKey, app.info.packageName,
++                versionCode, selected, candidates, rule.preserveTaskSurface,
++                app.getStartTime());
++        mRunning.put(app, launch);
+         mLaunches.put(app, launch);
+         mService.mHandler.postDelayed(() -> finishStabilityWindow(app, launch),
+                 EARLY_CRASH_WINDOW_MS);
+-        Slog.i(TAG, "Starting " + processName + " with " + selected);
++        Slog.i(TAG, "Starting " + launch.processName + " with " + selected);
++    }
++
++    /** Returns the selected backend to ProcessList for this one zygote launch. */
++    String getBackendForProcess(ProcessRecord app) {
++        final Launch launch = mRunning.get(app);
++        return launch == null ? null : backendName(launch.candidate);
+     }
+ 
+     private void finishStabilityWindow(ProcessRecord app, Launch launch) {
+-        if (!mEnabled) {
+-            return;
+-        }
+         synchronized (mService) {
+-            if (mLaunches.get(app) != launch) {
+-                return;
+-            }
+-            if (app.getThread() != null && !app.isKilled() && app.getPid() > 0) {
+-                final JSONObject state = packagesState().optJSONObject(launch.stateKey);
+-                if (matchesLaunch(state, launch)) {
+-                    put(state, "stable", true);
+-                    writeState();
+-                    Slog.i(TAG, "NativeBridge stable for " + launch.processName
+-                            + " with " + launch.candidate);
+-                }
++            if (mLaunches.get(app) == launch) {
++                mLaunches.remove(app);
++                Slog.i(TAG, "NativeBridge passed early window for " + launch.processName
++                        + " with " + launch.candidate);
+             }
+-            mLaunches.remove(app);
+         }
+     }
+ 
+-    /** Releases a preserved task if a monitored replacement dies outside the crash callback. */
++    /** Called after the process leaves AMS, including an ordinary app close. */
+     void onProcessDied(ProcessRecord app) {
+-        if (!mEnabled) {
++        final Launch launch = mRunning.remove(app);
++        mLaunches.remove(app);
++        if (launch == null) {
+             return;
+         }
+-        final Launch launch = mLaunches.remove(app);
+-        if (launch != null && launch.preserveTaskSurface) {
+-            mService.mAtmInternal.cancelNativeBridgeRecovery(
+-                    app.getWindowProcessController());
++
++        if (hasActiveProcess(launch.stateKey)) {
++            return;
+         }
++        final RuntimeState state = mStates.get(launch.stateKey);
++        if (state != null && state.selected.equals(launch.candidate) && !state.exhausted) {
++            // The success cache starts when the whole application package is closed,
++            // not when an individual process first passes the startup window.
++            state.expiresAtElapsed = SystemClock.elapsedRealtime() + SUCCESS_CACHE_TTL_MS;
++        }
++    }
++
++    void onProcessStartFailed(ProcessRecord app) {
++        mLaunches.remove(app);
++        mRunning.remove(app);
+     }
+ 
+     /** Handles only an early translated native crash with an available fallback. */
+@@ -215,55 +169,47 @@ final class FloralNativeBridgeManager {
+         return handleEarlyFailure(app, "native crash", ApplicationExitInfo.REASON_CRASH_NATIVE);
+     }
+ 
+-    /**
+-     * Handles the narrow Java failure emitted when a translated JNI method was
+-     * not registered by the selected backend. Ordinary Java crashes stay on
+-     * Android's normal error path.
+-     */
++    /** Handles loader failures attributable to an ARM translation process. */
+     boolean handleEarlyNativeLoaderError(ProcessRecord app,
+             ApplicationErrorReport.CrashInfo crashInfo) {
+         if (crashInfo == null
+                 || !"java.lang.UnsatisfiedLinkError".equals(crashInfo.exceptionClassName)
+-                || crashInfo.exceptionMessage == null
+-                || !crashInfo.exceptionMessage.contains("No implementation found")
+-                || crashInfo.stackTrace == null
+-                || !crashInfo.stackTrace.contains("com.bun.miitmdid")) {
++                || crashInfo.exceptionMessage == null) {
++            return false;
++        }
++        final boolean missingJniImplementation =
++                crashInfo.exceptionMessage.contains("No implementation found");
++        final boolean elfArchitectureMismatch =
++                crashInfo.exceptionMessage.contains("dlopen failed:")
++                        && crashInfo.exceptionMessage.contains(" is for EM_")
++                        && crashInfo.exceptionMessage.contains(" instead of EM_");
++        if (!missingJniImplementation && !elfArchitectureMismatch) {
+             return false;
+         }
+         return handleEarlyFailure(app, "native loader error", ApplicationExitInfo.REASON_CRASH);
+     }
+ 
+-    private boolean handleEarlyFailure(ProcessRecord app, String failure,
+-            int exitReason) {
+-        if (!mEnabled) {
+-            return false;
+-        }
++    private boolean handleEarlyFailure(ProcessRecord app, String failure, int exitReason) {
+         final Launch launch = mLaunches.get(app);
+         if (launch == null || SystemClock.uptimeMillis() - launch.startUptime
+                 > EARLY_CRASH_WINDOW_MS) {
+             return false;
+         }
+ 
+-        final JSONObject state = packagesState().optJSONObject(launch.stateKey);
+-        if (!matchesLaunch(state, launch)) {
++        final RuntimeState state = mStates.get(launch.stateKey);
++        if (state == null || !state.matches(launch.packageName, launch.versionCode,
++                launch.candidates) || !launch.candidate.equals(state.selected)) {
+             return false;
+         }
+-        final ArraySet<String> failed = readFailedCandidates(state);
+-        failed.add(launch.candidate);
+-        final String replacement = firstAvailable(launch.candidates, failed);
+-        put(state, "failed_candidates", toJsonArray(failed));
+-        put(state, "stable", false);
+-        put(state, "failure_count", state.optInt("failure_count", 0) + 1);
+-        put(state, "last_failure_timestamp_ms", System.currentTimeMillis());
++
++        state.failed.add(launch.candidate);
++        state.expiresAtElapsed = SystemClock.elapsedRealtime() + FAILURE_CACHE_TTL_MS;
++        final String replacement = firstAvailable(launch.candidates, state.failed);
+         if (replacement == null) {
+-            put(state, "selected_backend", "");
+-            put(state, "selected_loader_mode", "");
+-            put(state, "exhausted", true);
+-            writeState();
++            state.selected = "";
++            state.exhausted = true;
+             mLaunches.remove(app);
+-            // A previous fallback may have kept this ActivityRecord and its starting surface.
+-            // The ordinary crash path below must be allowed to clean both up when no candidate
+-            // remains.
++            mRunning.remove(app);
+             mService.mAtmInternal.cancelNativeBridgeRecovery(
+                     app.getWindowProcessController());
+             Slog.w(TAG, "NativeBridge candidates exhausted after " + launch.processName
+@@ -271,26 +217,23 @@ final class FloralNativeBridgeManager {
+             return false;
+         }
+ 
+-        putSelectedCandidate(state, replacement);
+-        put(state, "exhausted", false);
+-        writeState();
++        state.selected = replacement;
++        state.expiresAtElapsed = 0;
+         mLaunches.remove(app);
++        mRunning.remove(app);
+ 
+-        // A pre-top activity can crash before WindowManager attaches its ActivityRecord to this
+-        // process. Child services and helper processes still must not tear down the user's task.
+         final HostingRecord hostingRecord = app.getHostingRecord();
+         final boolean restartTask = (hostingRecord != null && hostingRecord.isTopApp())
+                 || (app == mService.getTopApp() && app.hasActivities());
+-        final WindowProcessController crashedProcess = app.getWindowProcessController();
+         final int taskId;
+         if (!restartTask) {
+             taskId = INVALID_TASK_ID;
+         } else if (launch.preserveTaskSurface) {
+             taskId = mService.mAtmInternal.prepareNativeBridgeRecovery(
+-                    crashedProcess, "floral-nativebridge-fallback");
++                    app.getWindowProcessController(), "floral-nativebridge-fallback");
+         } else {
+             taskId = mService.mAtmInternal.finishTopCrashedActivities(
+-                    crashedProcess, "floral-nativebridge-fallback");
++                    app.getWindowProcessController(), "floral-nativebridge-fallback");
+         }
+         mService.mProcessList.removeProcessLocked(app, false, true,
+                 exitReason, "native bridge fallback");
+@@ -298,40 +241,41 @@ final class FloralNativeBridgeManager {
+                 + launch.candidate + " to " + replacement + " (" + failure + ")");
+ 
+         if (taskId != INVALID_TASK_ID) {
+-            // Restart on the next AMS turn after process cleanup. A zero-duration task
+-            // animation prevents the recovery launch itself from exposing an intermediate frame.
+-            mService.mHandler.post(() -> restartTask(
+-                    taskId, launch.preserveTaskSurface, crashedProcess));
++            mService.mHandler.post(() -> restartTask(taskId, launch.preserveTaskSurface,
++                    app.getWindowProcessController()));
+         }
+         return true;
+     }
+ 
+     private void restartTask(int taskId, boolean preserveTaskSurface,
+-            WindowProcessController crashedProcess) {
++            com.android.server.wm.WindowProcessController crashedProcess) {
+         boolean started = false;
+         try {
+             final ActivityOptions options = preserveTaskSurface
+                     ? ActivityOptions.makeCustomTaskAnimation(
+                             mService.mContext, 0, 0, null, null, null)
+                     : ActivityOptions.makeBasic();
+-            final int result = mService.startActivityFromRecents(taskId, options.toBundle());
+-            started = isStartResultSuccessful(result);
+-            if (!started) {
+-                Slog.w(TAG, "Unable to restart task " + taskId
+-                        + " after fallback, result=" + result);
+-            }
++            started = isStartResultSuccessful(
++                    mService.startActivityFromRecents(taskId, options.toBundle()));
+         } catch (RuntimeException e) {
+             Slog.w(TAG, "Unable to restart task " + taskId + " after fallback", e);
+         }
+         if (!started && preserveTaskSurface) {
+-            // The old process has already been removed. Release the preserved record and use
+-            // Android's standard crashed-activity cleanup so it cannot remain in the foreground.
+             mService.mAtmInternal.cancelNativeBridgeRecovery(crashedProcess);
+             mService.mAtmInternal.finishTopCrashedActivities(
+                     crashedProcess, "floral-nativebridge-restart-failed");
+         }
+     }
+ 
++    private boolean hasActiveProcess(String stateKey) {
++        for (int i = 0; i < mRunning.size(); i++) {
++            if (stateKey.equals(mRunning.valueAt(i).stateKey)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private static boolean isTranslatedApp(ProcessRecord app) {
+         if (app.info == null || !UserHandle.isApp(app.uid) || app.isolated) {
+             return false;
+@@ -340,6 +284,33 @@ final class FloralNativeBridgeManager {
+         return "arm".equals(instructionSet) || "arm64".equals(instructionSet);
+     }
+ 
++    private void putState(String key, RuntimeState state) {
++        if (mStates.size() >= MAX_CACHED_PACKAGES && !mStates.containsKey(key)) {
++            trimStates(SystemClock.elapsedRealtime());
++        }
++        if (mStates.size() >= MAX_CACHED_PACKAGES && !mStates.containsKey(key)) {
++            for (int i = mStates.size() - 1; i >= 0; i--) {
++                if (!hasActiveProcess(mStates.keyAt(i))) {
++                    mStates.removeAt(i);
++                    break;
++                }
++            }
++        }
++        if (mStates.size() >= MAX_CACHED_PACKAGES && !mStates.containsKey(key)) {
++            mStates.removeAt(0);
++        }
++        mStates.put(key, state);
++    }
++
++    private void trimStates(long now) {
++        for (int i = mStates.size() - 1; i >= 0; i--) {
++            final RuntimeState state = mStates.valueAt(i);
++            if (state.isExpired(now) && !hasActiveProcess(state.key)) {
++                mStates.removeAt(i);
++            }
++        }
++    }
++
+     private PolicyRule resolvePolicy(String processName, String packageName) {
+         final JSONObject root = mPolicy;
+         if (root == null) {
+@@ -359,29 +330,20 @@ final class FloralNativeBridgeManager {
+         return PolicyRule.preferred(root.optString("preferred_backend", ""));
+     }
+ 
+-    private JSONObject packagesState() {
+-        JSONObject packages = mState.optJSONObject("packages");
+-        if (packages == null) {
+-            packages = new JSONObject();
+-            put(mState, "packages", packages);
++    private static ArrayList<String> filterCandidates(ArrayList<String> candidates,
++            String instructionSet) {
++        final ArrayList<String> filtered = new ArrayList<>();
++        final boolean arm32 = "arm".equals(instructionSet);
++        for (String candidate : candidates) {
++            if (!arm32 || BACKEND_HOUDINI.equals(backendName(candidate))) {
++                filtered.add(candidate);
++            }
+         }
+-        return packages;
++        return filtered;
+     }
+ 
+-    private void writeState() {
+-        FileOutputStream output = null;
+-        try {
+-            output = mStateFile.startWrite();
+-            output.write(mState.toString().getBytes(StandardCharsets.UTF_8));
+-            mStateFile.finishWrite(output);
+-            FileUtils.setPermissions(STATE_PATH,
+-                    FileUtils.S_IRUSR | FileUtils.S_IWUSR, -1, -1);
+-        } catch (IOException e) {
+-            if (output != null) {
+-                mStateFile.failWrite(output);
+-            }
+-            Slog.e(TAG, "Unable to persist NativeBridge state", e);
+-        }
++    private static String processName(ProcessRecord app) {
++        return app.processName == null ? app.info.packageName : app.processName;
+     }
+ 
+     private static JSONObject readJsonFile(File file) {
+@@ -390,100 +352,46 @@ final class FloralNativeBridgeManager {
+         }
+         try {
+             return new JSONObject(FileUtils.readTextFile(file, MAX_JSON_BYTES, null));
+-        } catch (IOException | JSONException e) {
+-            Slog.w(TAG, "Ignoring invalid NativeBridge JSON at " + file, e);
++        } catch (java.io.IOException | JSONException e) {
++            Slog.w(TAG, "Ignoring invalid NativeBridge policy at " + file, e);
+             return null;
+         }
+     }
+ 
+-    private static JSONObject emptyState() {
+-        final JSONObject root = new JSONObject();
+-        put(root, "version", STATE_VERSION);
+-        put(root, "build_fingerprint", Build.FINGERPRINT);
+-        put(root, "packages", new JSONObject());
+-        return root;
+-    }
+-
+-    private static boolean matchesLaunch(JSONObject state, Launch launch) {
+-        return state != null
+-                && launch.packageName.equals(state.optString("package_name"))
+-                && state.optLong("version_code", Long.MIN_VALUE) == launch.versionCode
+-                && launch.candidate.equals(selectedCandidate(state));
+-    }
+-
+-    private static boolean sameCandidates(JSONArray json, ArrayList<String> candidates) {
+-        if (json == null || json.length() != candidates.size()) {
+-            return false;
+-        }
+-        for (int i = 0; i < candidates.size(); i++) {
+-            if (!candidates.get(i).equals(json.optString(i))) {
+-                return false;
+-            }
+-        }
+-        return true;
+-    }
+-
+-    private static ArraySet<String> readCandidates(JSONArray json) {
+-        final ArraySet<String> candidates = new ArraySet<>();
+-        if (json == null) {
+-            return candidates;
+-        }
+-        for (int i = 0; i < json.length(); i++) {
+-            final String candidate = json.optString(i);
+-            if (isCandidate(candidate)) {
+-                candidates.add(candidate);
++    private static String firstAvailable(ArrayList<String> candidates, ArraySet<String> failed) {
++        for (String candidate : candidates) {
++            if (!failed.contains(candidate)) {
++                return candidate;
+             }
+         }
+-        return candidates;
++        return null;
+     }
+ 
+-    private static ArraySet<String> readFailedCandidates(JSONObject state) {
+-        final ArraySet<String> failed = readCandidates(
+-                state.optJSONArray("failed_candidates"));
+-        // State version 2 only knew about backends. Preserve those records as
+-        // failed hybrid attempts when upgrading the candidate schema.
+-        final JSONArray legacy = state.optJSONArray("failed_backends");
+-        if (legacy != null) {
+-            for (int i = 0; i < legacy.length(); i++) {
+-                final String backend = legacy.optString(i);
+-                if (isBackend(backend)) {
+-                    failed.add(candidateName(backend, MODE_HYBRID));
++    private static ArrayList<String> candidatesFromJson(JSONArray array) {
++        final ArrayList<String> candidates = new ArrayList<>();
++        if (array != null) {
++            for (int i = 0; i < array.length(); i++) {
++                final String backend = array.optString(i);
++                if (isBackend(backend) && !candidates.contains(candidateName(backend,
++                        MODE_HYBRID))) {
++                    candidates.add(candidateName(backend, MODE_HYBRID));
+                 }
+             }
+         }
+-        return failed;
+-    }
+-
+-    private static String selectedCandidate(JSONObject state) {
+-        if (state == null) {
+-            return "";
+-        }
+-        final String backend = state.optString("selected_backend", "");
+-        final String mode = normalizeMode(
+-                state.optString("selected_loader_mode", MODE_HYBRID));
+-        return isBackend(backend) && isMode(mode) ? candidateName(backend, mode) : "";
++        return candidates;
+     }
+ 
+-    private static void putSelectedCandidate(JSONObject state, String candidate) {
++    private static String backendName(String candidate) {
+         final int separator = candidate.indexOf('/');
+-        if (separator <= 0 || separator == candidate.length() - 1) {
+-            put(state, "selected_backend", "");
+-            put(state, "selected_loader_mode", "");
+-            return;
+-        }
+-        put(state, "selected_backend", candidate.substring(0, separator));
+-        put(state, "selected_loader_mode", candidate.substring(separator + 1));
++        return separator < 0 ? candidate : candidate.substring(0, separator);
+     }
+ 
+     private static String candidateName(String backend, String mode) {
+         return backend + "/" + mode;
+     }
+ 
+-    private static boolean isCandidate(String value) {
+-        final int separator = value.indexOf('/');
+-        return separator > 0 && separator < value.length() - 1
+-                && isBackend(value.substring(0, separator))
+-                && isMode(value.substring(separator + 1));
++    private static boolean isBackend(String value) {
++        return BACKEND_NDK.equals(value) || BACKEND_HOUDINI.equals(value);
+     }
+ 
+     private static boolean isMode(String value) {
+@@ -495,32 +403,32 @@ final class FloralNativeBridgeManager {
+         return MODE_COMPAT_LEGACY.equals(value) ? MODE_DIRECT : value;
+     }
+ 
+-    private static String firstAvailable(ArrayList<String> candidates, ArraySet<String> failed) {
+-        for (String candidate : candidates) {
+-            if (!failed.contains(candidate)) {
+-                return candidate;
+-            }
++    private static final class RuntimeState {
++        final String key;
++        final String packageName;
++        final long versionCode;
++        final ArrayList<String> candidates;
++        final ArraySet<String> failed = new ArraySet<>();
++        String selected;
++        long expiresAtElapsed;
++        boolean exhausted;
++
++        RuntimeState(String key, String packageName, long versionCode,
++                ArrayList<String> candidates) {
++            this.key = key;
++            this.packageName = packageName;
++            this.versionCode = versionCode;
++            this.candidates = new ArrayList<>(candidates);
++            this.selected = candidates.get(0);
+         }
+-        return null;
+-    }
+ 
+-    private static JSONArray toJsonArray(Iterable<String> values) {
+-        final JSONArray result = new JSONArray();
+-        for (String value : values) {
+-            result.put(value);
++        boolean matches(String packageName, long versionCode, ArrayList<String> candidates) {
++            return this.packageName.equals(packageName) && this.versionCode == versionCode
++                    && this.candidates.equals(candidates);
+         }
+-        return result;
+-    }
+ 
+-    private static boolean isBackend(String value) {
+-        return BACKEND_NDK.equals(value) || BACKEND_HOUDINI.equals(value);
+-    }
+-
+-    private static void put(JSONObject object, String key, Object value) {
+-        try {
+-            object.put(key, value);
+-        } catch (JSONException e) {
+-            throw new IllegalStateException("Unable to construct NativeBridge state", e);
++        boolean isExpired(long now) {
++            return expiresAtElapsed != 0 && expiresAtElapsed <= now;
+         }
+     }
+ 
+@@ -553,7 +461,8 @@ final class FloralNativeBridgeManager {
+         final ArrayList<String> candidates;
+         final boolean preserveTaskSurface;
+ 
+-        PolicyRule(boolean automatic, ArrayList<String> candidates, boolean preserveTaskSurface) {
++        PolicyRule(boolean automatic, ArrayList<String> candidates,
++                boolean preserveTaskSurface) {
+             this.automatic = automatic;
+             this.candidates = new ArrayList<>(candidates);
+             this.preserveTaskSurface = preserveTaskSurface;
+@@ -561,7 +470,8 @@ final class FloralNativeBridgeManager {
+ 
+         static PolicyRule automaticDefaults() {
+             final ArrayList<String> candidates = new ArrayList<>();
+-            addBackendCandidates(candidates, BACKEND_NDK, BACKEND_HOUDINI);
++            candidates.add(candidateName(BACKEND_NDK, MODE_HYBRID));
++            candidates.add(candidateName(BACKEND_HOUDINI, MODE_HYBRID));
+             return new PolicyRule(true, candidates, true);
+         }
+ 
+@@ -569,7 +479,8 @@ final class FloralNativeBridgeManager {
+             final PolicyRule rule = automaticDefaults();
+             if (BACKEND_HOUDINI.equals(backend)) {
+                 rule.candidates.clear();
+-                addBackendCandidates(rule.candidates, BACKEND_HOUDINI, BACKEND_NDK);
++                rule.candidates.add(candidateName(BACKEND_HOUDINI, MODE_HYBRID));
++                rule.candidates.add(candidateName(BACKEND_NDK, MODE_HYBRID));
+             }
+             return rule;
+         }
+@@ -577,109 +488,62 @@ final class FloralNativeBridgeManager {
+         static PolicyRule parse(Object value) {
+             if (value instanceof String) {
+                 final String backend = (String) value;
+-                return BACKEND_AUTO.equals(backend) ? automaticDefaults()
+-                        : explicit(backend);
++                return BACKEND_AUTO.equals(backend) ? automaticDefaults() : explicit(backend);
+             }
+             if (!(value instanceof JSONObject)) {
+                 return automaticDefaults();
+             }
+ 
+             final JSONObject object = (JSONObject) value;
+-            final boolean preserveTaskSurface = object.optBoolean("preserve_starting_surface",
+-                    !"finish_and_restart".equals(object.optString(
+-                            "recovery", "preserve_task_surface")));
+-            final PolicyRule selection = parseSelection(object);
+-            return new PolicyRule(selection.automatic, selection.candidates,
+-                    preserveTaskSurface);
+-        }
+-
+-        private static PolicyRule parseSelection(JSONObject object) {
+             String backend = object.optString("selected_backend", "");
+-            final boolean hasSelectedBackend = isBackend(backend);
++            final boolean selected = isBackend(backend);
+             if (backend.isEmpty()) {
+                 backend = object.optString("backend", "");
+             }
+-            if (backend.isEmpty()) {
+-                final String preferred = object.optString("preferred_backend", "");
+-                if (BACKEND_NDK.equals(preferred) || BACKEND_HOUDINI.equals(preferred)) {
+-                    final JSONArray array = object.optJSONArray("candidates");
+-                    if (array == null || array.length() == 0) {
+-                        return preferred(preferred);
+-                    }
+-                    final PolicyRule rule = fromCandidates(array);
+-                    reorderBackendFirst(rule.candidates, preferred);
+-                    return rule;
+-                }
+-            }
+             if (backend.isEmpty()) {
+                 backend = object.optString("mode", BACKEND_AUTO);
+             }
++            final boolean preserveTaskSurface = object.optBoolean(
++                    "preserve_starting_surface", true);
+             if (!BACKEND_AUTO.equals(backend)) {
+-                final String requestedMode = normalizeMode(object.optString(
+-                        "selected_loader_mode", MODE_HYBRID));
+-                final String loaderMode = hasSelectedBackend && isMode(requestedMode)
+-                        ? requestedMode : MODE_HYBRID;
+-                return explicit(backend, loaderMode);
++                final String mode = selected
++                        ? normalizeMode(object.optString("selected_loader_mode", MODE_HYBRID))
++                        : MODE_HYBRID;
++                return isMode(mode) ? explicit(backend, mode)
++                        : explicit(backend, MODE_HYBRID);
+             }
+ 
+-            return fromCandidates(object.optJSONArray("candidates"));
+-        }
+-
+-        private static PolicyRule fromCandidates(JSONArray array) {
+-            final ArrayList<String> backends = new ArrayList<>();
+-            if (array != null) {
+-                for (int i = 0; i < array.length(); i++) {
+-                    final String candidate = array.optString(i);
+-                    if (isBackend(candidate) && !backends.contains(candidate)) {
+-                        backends.add(candidate);
+-                    }
+-                }
+-            }
+-            if (backends.isEmpty()) {
++            final ArrayList<String> candidates = candidatesFromJson(
++                    object.optJSONArray("candidates"));
++            if (candidates.isEmpty()) {
+                 return automaticDefaults();
+             }
+-            final ArrayList<String> candidates = new ArrayList<>();
+-            addBackendCandidates(candidates, backends.toArray(new String[0]));
+-            return new PolicyRule(true, candidates, true);
++            final String preferred = object.optString("preferred_backend", "");
++            if (isBackend(preferred)) {
++                reorderBackendFirst(candidates, preferred);
++            }
++            return new PolicyRule(true, candidates, preserveTaskSurface);
+         }
+ 
+         private static PolicyRule explicit(String backend) {
+             return explicit(backend, MODE_HYBRID);
+         }
+ 
+-        private static PolicyRule explicit(String backend, String loaderMode) {
++        private static PolicyRule explicit(String backend, String mode) {
+             final ArrayList<String> candidates = new ArrayList<>();
+             if (isBackend(backend)) {
+-                candidates.add(candidateName(backend, loaderMode));
++                candidates.add(candidateName(backend, mode));
+                 return new PolicyRule(false, candidates, true);
+             }
+             return automaticDefaults();
+         }
+ 
+-        private static void addBackendCandidates(ArrayList<String> candidates,
+-                String... backends) {
+-            // Automatic recovery keeps the enhanced loader model for its complete pass.
+-            for (String backend : backends) {
+-                candidates.add(candidateName(backend, MODE_HYBRID));
+-            }
+-        }
+-
+         private static void reorderBackendFirst(ArrayList<String> candidates, String backend) {
+-            final ArrayList<String> backends = new ArrayList<>();
+-            for (String candidate : candidates) {
+-                final int separator = candidate.indexOf('/');
+-                if (separator > 0) {
+-                    final String candidateBackend = candidate.substring(0, separator);
+-                    if (!backends.contains(candidateBackend)) {
+-                        backends.add(candidateBackend);
+-                    }
+-                }
+-            }
+-            if (backends.remove(backend)) {
+-                backends.add(0, backend);
++            final String preferred = candidateName(backend, MODE_HYBRID);
++            if (!candidates.remove(preferred)) {
++                return;
+             }
+-            candidates.clear();
+-            addBackendCandidates(candidates, backends.toArray(new String[0]));
++            candidates.add(0, preferred);
+         }
+     }
+ }
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index 6a6164411c0a..a13555869885 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -957,7 +957,7 @@ public final class ProcessList {
+             Slog.i("XXXXXX", "minfree_adj=" + minfree_adj + " minfree_abs=" + minfree_abs);
+         }
+ 
+-        final boolean is64bit = Build.INTERNAL_SUPPORTED_64_BIT_ABIS.length > 0;
++        final boolean is64bit = Build.SUPPORTED_64_BIT_ABIS.length > 0;
+ 
+         for (int i = 0; i < mOomAdj.length; i++) {
+             int low = mOomMinFreeLow[i];
+@@ -1978,7 +1978,7 @@ public final class ProcessList {
+ 
+             String requiredAbi = (abiOverride != null) ? abiOverride : app.info.primaryCpuAbi;
+             if (requiredAbi == null) {
+-                requiredAbi = Build.INTERNAL_SUPPORTED_ABIS[0];
++                requiredAbi = Build.SUPPORTED_ABIS[0];
+             }
+ 
+             String instructionSet = null;
+@@ -2091,6 +2091,9 @@ public final class ProcessList {
+             } catch (RuntimeException e) {
+                 Slog.e(ActivityManagerService.TAG, "Failure starting process "
+                         + app.processName, e);
++                if (mService.mFloralNativeBridgeManager != null) {
++                    mService.mFloralNativeBridgeManager.onProcessStartFailed(app);
++                }
+                 app.setPendingStart(false);
+                 mService.forceStopPackageLocked(app.info.packageName, UserHandle.getAppId(app.uid),
+                         false, false, true, false, false, app.userId, "start failure");
+@@ -2161,6 +2164,9 @@ public final class ProcessList {
+             synchronized (mService) {
+                 Slog.e(ActivityManagerService.TAG, "Failure starting process "
+                         + app.processName, e);
++                if (mService.mFloralNativeBridgeManager != null) {
++                    mService.mFloralNativeBridgeManager.onProcessStartFailed(app);
++                }
+                 mPendingStarts.remove(startSeq);
+                 app.setPendingStart(false);
+                 mService.forceStopPackageLocked(app.info.packageName,
+@@ -2379,30 +2385,30 @@ public final class ProcessList {
+                 startResult = startWebView(entryPoint,
+                         app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+                         app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+-                        app.info.dataDir, null, app.info.packageName,
+-                        app.getDisabledCompatChanges(),
+-                        new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()});
++                         app.info.dataDir, null, app.info.packageName,
++                         app.getDisabledCompatChanges(),
++                         processStartExtraArgs(app));
+             } else if (hostingRecord.usesAppZygote()) {
+                 final AppZygote appZygote = createAppZygoteForProcessIfNeeded(app);
+ 
+                 // We can't isolate app data and storage data as parent zygote already did that.
+                 startResult = appZygote.getProcess().start(entryPoint,
+                         app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+-                        app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+-                        app.info.dataDir, null, app.info.packageName,
+-                        /*zygotePolicyFlags=*/ ZYGOTE_POLICY_FLAG_EMPTY, isTopApp,
+-                        app.getDisabledCompatChanges(), pkgDataInfoMap, allowlistedAppDataInfoMap,
+-                        false, false,
+-                        new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()});
++                         app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
++                         app.info.dataDir, null, app.info.packageName,
++                         /*zygotePolicyFlags=*/ ZYGOTE_POLICY_FLAG_EMPTY, isTopApp,
++                         app.getDisabledCompatChanges(), pkgDataInfoMap, allowlistedAppDataInfoMap,
++                         false, false,
++                         processStartExtraArgs(app));
+             } else {
+                 regularZygote = true;
+                 startResult = Process.start(entryPoint,
+                         app.processName, uid, uid, gids, runtimeFlags, mountExternal,
+                         app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
+-                        app.info.dataDir, invokeWith, app.info.packageName, zygotePolicyFlags,
+-                        isTopApp, app.getDisabledCompatChanges(), pkgDataInfoMap,
+-                        allowlistedAppDataInfoMap, bindMountAppsData, bindMountAppStorageDirs,
+-                        new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()});
++                         app.info.dataDir, invokeWith, app.info.packageName, zygotePolicyFlags,
++                         isTopApp, app.getDisabledCompatChanges(), pkgDataInfoMap,
++                         allowlistedAppDataInfoMap, bindMountAppsData, bindMountAppStorageDirs,
++                         processStartExtraArgs(app));
+             }
+ 
+             if (!regularZygote) {
+@@ -2427,6 +2433,19 @@ public final class ProcessList {
+         }
+     }
+ 
++    private String[] processStartExtraArgs(ProcessRecord app) {
++        final String backend;
++        synchronized (mService) {
++            backend = mService.mFloralNativeBridgeManager == null
++                    ? null : mService.mFloralNativeBridgeManager.getBackendForProcess(app);
++        }
++        if (backend == null || backend.isEmpty()) {
++            return new String[]{PROC_START_SEQ_IDENT + app.getStartSeq()};
++        }
++        return new String[]{PROC_START_SEQ_IDENT + app.getStartSeq(),
++                "--floral-nativebridge-backend=" + backend};
++    }
++
+     @GuardedBy("mService")
+     void startProcessLocked(ProcessRecord app, HostingRecord hostingRecord, int zygotePolicyFlags) {
+         startProcessLocked(app, hostingRecord, zygotePolicyFlags, null /* abiOverride */);
+diff --git a/telephony/java/android/telephony/TelephonyManager.java b/telephony/java/android/telephony/TelephonyManager.java
+index 989663406a6b..7991e81c7221 100644
+--- a/telephony/java/android/telephony/TelephonyManager.java
++++ b/telephony/java/android/telephony/TelephonyManager.java
+@@ -10833,6 +10833,12 @@ public class TelephonyManager {
+     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
+     public void setBasebandVersionForPhone(int phoneId, String version) {
+         if (SubscriptionManager.isValidPhoneId(phoneId)) {
++            if (SystemProperties.getInt("ro.telephony.sim.count", 1) <= 1) {
++                // A single-SIM product must not retain a stale value from a
++                // previous multi-SIM property list.
++                TelephonyProperties.baseband_version(Collections.singletonList(version));
++                return;
++            }
+             List<String> newList = updateTelephonyProperty(
+                     TelephonyProperties.baseband_version(), phoneId, version);
+             TelephonyProperties.baseband_version(newList);
+-- 
+2.47.3
+
