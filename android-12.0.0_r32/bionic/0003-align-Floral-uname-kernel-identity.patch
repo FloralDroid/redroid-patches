@@ -1,0 +1,70 @@
+From f8e55e6cb7b26d55b1d6f5d3554b332a8a3b87f8 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Tue, 25 Aug 2026 19:23:13 +0800
+Subject: [PATCH] bionic: align uname kernel identity for native processes
+
+Change-Id: I080daa4e811e9cbbb24e1dfc86869f08916af8fa
+---
+ libc/bionic/uname.cpp | 32 ++++++++++++++++++++++----------
+ 1 file changed, 22 insertions(+), 10 deletions(-)
+
+diff --git a/libc/bionic/uname.cpp b/libc/bionic/uname.cpp
+index 8aa100b..316036e 100644
+--- a/libc/bionic/uname.cpp
++++ b/libc/bionic/uname.cpp
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <sys/utsname.h>
++#include <sys/system_properties.h>
+ 
+ #include <string.h>
+ 
+@@ -13,23 +14,34 @@
+ 
+ extern "C" int __uname(utsname*);
+ 
++namespace {
++
++constexpr char kDefaultKernelRelease[] = "5.10.66-android12-9";
++constexpr char kDefaultKernelVersion[] = "#1 SMP PREEMPT";
++
++void CopyProperty(const char* name, const char* fallback, char* destination) {
++  char value[PROP_VALUE_MAX] = {};
++  const char* source = __system_property_get(name, value) > 0 ? value : fallback;
++  strlcpy(destination, source, SYS_NMLN);
++}
++
++}  // namespace
++
+ extern "C" int uname(utsname* buffer) {
+   const int result = __uname(buffer);
+-  if (__floral_nativebridge_guest_arch() == FLORAL_NATIVEBRIDGE_GUEST_NONE ||
++  if (result != 0 || buffer == nullptr ||
+       !__floral_nativebridge_guest_identity_enabled()) {
+     return result;
+   }
++
+   const char* machine = __floral_nativebridge_guest_machine();
+-  if (result == 0 && machine != nullptr) {
++  if (machine != nullptr) {
+     strlcpy(buffer->machine, machine, sizeof(buffer->machine));
+-    const char* release = __floral_nativebridge_guest_kernel_release();
+-    if (release != nullptr) {
+-      strlcpy(buffer->release, release, sizeof(buffer->release));
+-    }
+-    const char* version = __floral_nativebridge_guest_kernel_version();
+-    if (version != nullptr) {
+-      strlcpy(buffer->version, version, sizeof(buffer->version));
+-    }
+   }
++
++  // Keep Java's os.version and direct libc uname() aligned with the container
++  // profile even for native x86 processes.
++  CopyProperty("ro.boot.floral_kernel_release", kDefaultKernelRelease, buffer->release);
++  CopyProperty("ro.boot.floral_kernel_version", kDefaultKernelVersion, buffer->version);
+   return result;
+ }
+-- 
+2.47.3
+
