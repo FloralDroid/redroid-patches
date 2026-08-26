@@ -1,0 +1,335 @@
+From a90767de9123ab720b45c8faa27e89ac27c0380c Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 26 Aug 2026 16:19:34 +0800
+Subject: [PATCH] frameworks: complete NativeBridge backend propagation
+
+Change-Id: I7199473ae7e8fd6395047fb488823a7b64b74c64
+---
+ core/java/android/os/ZygoteProcess.java       |  3 +-
+ core/java/com/android/internal/os/Zygote.java | 12 ++--
+ .../android/internal/os/ZygoteArguments.java  | 12 +++-
+ core/jni/com_android_internal_os_Zygote.cpp   | 17 ++++--
+ .../server/am/FloralNativeBridgeManager.java  | 57 ++++++++++++-------
+ .../com/android/server/am/ProcessList.java    | 12 ++++
+ 6 files changed, 80 insertions(+), 33 deletions(-)
+
+diff --git a/core/java/android/os/ZygoteProcess.java b/core/java/android/os/ZygoteProcess.java
+index 122e1acf12ee..45e97953f431 100644
+--- a/core/java/android/os/ZygoteProcess.java
++++ b/core/java/android/os/ZygoteProcess.java
+@@ -565,8 +565,7 @@ public class ZygoteProcess {
+         "--set-api-denylist-exemptions",
+         "--hidden-api-log-sampling-rate",
+         "--hidden-api-statslog-sampling-rate",
+-        "--invoke-with",
+-        "--floral-nativebridge-backend"
++        "--invoke-with"
+     };
+ 
+     /**
+diff --git a/core/java/com/android/internal/os/Zygote.java b/core/java/com/android/internal/os/Zygote.java
+index 8aee719e6157..b3eb7abd4391 100644
+--- a/core/java/com/android/internal/os/Zygote.java
++++ b/core/java/com/android/internal/os/Zygote.java
+@@ -406,11 +406,13 @@ public final class Zygote {
+      */
+     private static void specializeAppProcess(int uid, int gid, int[] gids, int runtimeFlags,
+             int[][] rlimits, int mountExternal, String seInfo, String niceName,
+-            boolean startChildZygote, String instructionSet, String appDataDir, boolean isTopApp,
++            boolean startChildZygote, String instructionSet, String appDataDir,
++            String floralNativeBridgeBackend, boolean isTopApp,
+             String[] pkgDataInfoList, String[] allowlistedDataInfoList,
+             boolean bindMountAppDataDirs, boolean bindMountAppStorageDirs) {
+         nativeSpecializeAppProcess(uid, gid, gids, runtimeFlags, rlimits, mountExternal, seInfo,
+-                niceName, startChildZygote, instructionSet, appDataDir, isTopApp,
++                niceName, startChildZygote, instructionSet, appDataDir,
++                floralNativeBridgeBackend, isTopApp,
+                 pkgDataInfoList, allowlistedDataInfoList,
+                 bindMountAppDataDirs, bindMountAppStorageDirs);
+ 
+@@ -435,7 +437,8 @@ public final class Zygote {
+ 
+     private static native void nativeSpecializeAppProcess(int uid, int gid, int[] gids,
+             int runtimeFlags, int[][] rlimits, int mountExternal, String seInfo, String niceName,
+-            boolean startChildZygote, String instructionSet, String appDataDir, boolean isTopApp,
++            boolean startChildZygote, String instructionSet, String appDataDir,
++            String floralNativeBridgeBackend, boolean isTopApp,
+             String[] pkgDataInfoList, String[] allowlistedDataInfoList,
+             boolean bindMountAppDataDirs, boolean bindMountAppStorageDirs);
+ 
+@@ -844,7 +847,8 @@ public final class Zygote {
+             specializeAppProcess(args.mUid, args.mGid, args.mGids,
+                                  args.mRuntimeFlags, rlimits, args.mMountExternal,
+                                  args.mSeInfo, args.mNiceName, args.mStartChildZygote,
+-                                 args.mInstructionSet, args.mAppDataDir, args.mIsTopApp,
++                                 args.mInstructionSet, args.mAppDataDir,
++                                 args.mFloralNativeBridgeBackend, args.mIsTopApp,
+                                  args.mPkgDataInfoList, args.mAllowlistedDataInfoList,
+                                  args.mBindMountAppDataDirs, args.mBindMountAppStorageDirs);
+ 
+diff --git a/core/java/com/android/internal/os/ZygoteArguments.java b/core/java/com/android/internal/os/ZygoteArguments.java
+index a291cef27a5a..e30b724cf20b 100644
+--- a/core/java/com/android/internal/os/ZygoteArguments.java
++++ b/core/java/com/android/internal/os/ZygoteArguments.java
+@@ -419,8 +419,16 @@ class ZygoteArguments {
+                     throw new IllegalArgumentException("Duplicate Floral NativeBridge backend");
+                 }
+                 mFloralNativeBridgeBackend = getAssignmentValue(arg);
+-                if (!"ndk".equals(mFloralNativeBridgeBackend)
+-                        && !"houdini".equals(mFloralNativeBridgeBackend)) {
++                final int separator = mFloralNativeBridgeBackend.indexOf('/');
++                final String backend = separator < 0
++                        ? mFloralNativeBridgeBackend
++                        : mFloralNativeBridgeBackend.substring(0, separator);
++                final String mode = separator < 0
++                        ? "hybrid"
++                        : mFloralNativeBridgeBackend.substring(separator + 1);
++                if ((!"ndk".equals(backend) && !"houdini".equals(backend))
++                        || (!"hybrid".equals(mode) && !"direct".equals(mode)
++                        && !"compat".equals(mode))) {
+                     throw new IllegalArgumentException("Invalid Floral NativeBridge backend");
+                 }
+             } else if (arg.equals("--preload-app")) {
+diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
+index ca277bb6b1eb..0803e07dc588 100644
+--- a/core/jni/com_android_internal_os_Zygote.cpp
++++ b/core/jni/com_android_internal_os_Zygote.cpp
+@@ -1623,14 +1623,17 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+     SetGids(env, gids, is_child_zygote, fail_fn);
+     SetRLimits(env, rlimits, fail_fn);
+ 
+-    if (need_pre_initialize_native_bridge) {
+-        // Due to the logic behind need_pre_initialize_native_bridge we know that
+-        // instruction_set contains a value.
++    if (floral_nativebridge_backend.has_value()) {
+         android::SetFloralNativeBridgeProcessContext(
+                 nice_name.has_value() ? nice_name.value().c_str() : nullptr,
+                 app_data_dir.has_value() ? app_data_dir.value().c_str() : nullptr,
+                 floral_nativebridge_backend.has_value()
+                         ? floral_nativebridge_backend.value().c_str() : nullptr);
++    }
++
++    if (need_pre_initialize_native_bridge) {
++        // Due to the logic behind need_pre_initialize_native_bridge we know that
++        // instruction_set contains a value.
+         android::PreInitializeNativeBridge(app_data_dir.has_value() ? app_data_dir.value().c_str()
+                                                                     : nullptr,
+                                            instruction_set.value().c_str());
+@@ -2367,14 +2370,16 @@ static void com_android_internal_os_Zygote_nativeSpecializeAppProcess(
+         JNIEnv* env, jclass, jint uid, jint gid, jintArray gids, jint runtime_flags,
+         jobjectArray rlimits, jint mount_external, jstring se_info, jstring nice_name,
+         jboolean is_child_zygote, jstring instruction_set, jstring app_data_dir,
+-        jboolean is_top_app, jobjectArray pkg_data_info_list,
++        jstring floral_nativebridge_backend, jboolean is_top_app,
++        jobjectArray pkg_data_info_list,
+         jobjectArray allowlisted_data_info_list, jboolean mount_data_dirs,
+         jboolean mount_storage_dirs) {
+     jlong capabilities = CalculateCapabilities(env, uid, gid, gids, is_child_zygote);
+ 
+     SpecializeCommon(env, uid, gid, gids, runtime_flags, rlimits, capabilities, capabilities,
+                      mount_external, se_info, nice_name, false, is_child_zygote == JNI_TRUE,
+-                     instruction_set, app_data_dir, nullptr, is_top_app == JNI_TRUE,
++                     instruction_set, app_data_dir, floral_nativebridge_backend,
++                     is_top_app == JNI_TRUE,
+                      pkg_data_info_list,
+                      allowlisted_data_info_list, mount_data_dirs == JNI_TRUE,
+                      mount_storage_dirs == JNI_TRUE);
+@@ -2671,7 +2676,7 @@ static const JNINativeMethod gMethods[] = {
+          (void*)com_android_internal_os_Zygote_nativeAddUsapTableEntry},
+         {"nativeSpecializeAppProcess",
+          "(II[II[[IILjava/lang/String;Ljava/lang/String;ZLjava/lang/String;Ljava/lang/"
+-         "String;Z[Ljava/lang/String;[Ljava/lang/String;ZZ)V",
++         "String;Ljava/lang/String;Z[Ljava/lang/String;[Ljava/lang/String;ZZ)V",
+          (void*)com_android_internal_os_Zygote_nativeSpecializeAppProcess},
+         {"nativeInitNativeState", "(Z)V",
+          (void*)com_android_internal_os_Zygote_nativeInitNativeState},
+diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+index 399bd34829a0..6958cc2234eb 100644
+--- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
++++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
+@@ -70,11 +70,13 @@ final class FloralNativeBridgeManager {
+     /** Called while holding the ActivityManagerService lock, before zygote fork. */
+     void onProcessStarting(ProcessRecord app) {
+         mLaunches.remove(app);
+-        if (!isTranslatedApp(app)) {
++        if (app.info == null || !UserHandle.isApp(app.uid) || app.isolated) {
+             return;
+         }
+-
+         final PolicyRule rule = resolvePolicy(app.processName, app.info.packageName);
++        if (!isTranslatedApp(app, rule)) {
++            return;
++        }
+         if (!rule.automatic || rule.candidates.isEmpty()) {
+             return;
+         }
+@@ -127,7 +129,7 @@ final class FloralNativeBridgeManager {
+     /** Returns the selected backend to ProcessList for this one zygote launch. */
+     String getBackendForProcess(ProcessRecord app) {
+         final Launch launch = mRunning.get(app);
+-        return launch == null ? null : backendName(launch.candidate);
++        return launch == null ? null : launch.candidate;
+     }
+ 
+     private void finishStabilityWindow(ProcessRecord app, Launch launch) {
+@@ -237,6 +239,11 @@ final class FloralNativeBridgeManager {
+         }
+         mService.mProcessList.removeProcessLocked(app, false, true,
+                 exitReason, "native bridge fallback");
++        if (hostingRecord != null && hostingRecord.usesAppZygote()) {
++            // An AppZygote may already have initialized its NativeBridge. The
++            // replacement backend must therefore start from a fresh zygote.
++            mService.mProcessList.killAppZygoteForProcessLocked(app, hostingRecord);
++        }
+         Slog.w(TAG, "Early NativeBridge failure in " + launch.processName + "; switching "
+                 + launch.candidate + " to " + replacement + " (" + failure + ")");
+ 
+@@ -276,12 +283,16 @@ final class FloralNativeBridgeManager {
+         return false;
+     }
+ 
+-    private static boolean isTranslatedApp(ProcessRecord app) {
++    private static boolean isTranslatedApp(ProcessRecord app, PolicyRule rule) {
+         if (app.info == null || !UserHandle.isApp(app.uid) || app.isolated) {
+             return false;
+         }
+         final String instructionSet = app.getInstructionSet();
+-        return "arm".equals(instructionSet) || "arm64".equals(instructionSet);
++        if ("arm".equals(instructionSet) || "arm64".equals(instructionSet)) {
++            return true;
++        }
++        return rule.allowNativeAbi
++                && ("x86".equals(instructionSet) || "x86_64".equals(instructionSet));
+     }
+ 
+     private void putState(String key, RuntimeState state) {
+@@ -322,10 +333,10 @@ final class FloralNativeBridgeManager {
+             value = packages.opt(processName);
+         }
+         if (value != null) {
+-            return PolicyRule.parse(value);
++            return PolicyRule.parse(value, true);
+         }
+         if (root.has("default_backend")) {
+-            return PolicyRule.parse(root.opt("default_backend"));
++            return PolicyRule.parse(root.opt("default_backend"), false);
+         }
+         return PolicyRule.preferred(root.optString("preferred_backend", ""));
+     }
+@@ -334,9 +345,13 @@ final class FloralNativeBridgeManager {
+             String instructionSet) {
+         final ArrayList<String> filtered = new ArrayList<>();
+         final boolean arm32 = "arm".equals(instructionSet);
++        final boolean nativeX86 = "x86".equals(instructionSet)
++                || "x86_64".equals(instructionSet);
+         for (String candidate : candidates) {
+             if (!arm32 || BACKEND_HOUDINI.equals(backendName(candidate))) {
+-                filtered.add(candidate);
++                if (!nativeX86 || !candidate.endsWith("/direct")) {
++                    filtered.add(candidate);
++                }
+             }
+         }
+         return filtered;
+@@ -458,21 +473,23 @@ final class FloralNativeBridgeManager {
+ 
+     private static final class PolicyRule {
+         final boolean automatic;
++        final boolean allowNativeAbi;
+         final ArrayList<String> candidates;
+         final boolean preserveTaskSurface;
+ 
+         PolicyRule(boolean automatic, ArrayList<String> candidates,
+-                boolean preserveTaskSurface) {
++                boolean preserveTaskSurface, boolean allowNativeAbi) {
+             this.automatic = automatic;
+             this.candidates = new ArrayList<>(candidates);
+             this.preserveTaskSurface = preserveTaskSurface;
++            this.allowNativeAbi = allowNativeAbi;
+         }
+ 
+         static PolicyRule automaticDefaults() {
+             final ArrayList<String> candidates = new ArrayList<>();
+             candidates.add(candidateName(BACKEND_NDK, MODE_HYBRID));
+             candidates.add(candidateName(BACKEND_HOUDINI, MODE_HYBRID));
+-            return new PolicyRule(true, candidates, true);
++            return new PolicyRule(true, candidates, true, false);
+         }
+ 
+         static PolicyRule preferred(String backend) {
+@@ -485,10 +502,11 @@ final class FloralNativeBridgeManager {
+             return rule;
+         }
+ 
+-        static PolicyRule parse(Object value) {
++        static PolicyRule parse(Object value, boolean allowNativeAbi) {
+             if (value instanceof String) {
+                 final String backend = (String) value;
+-                return BACKEND_AUTO.equals(backend) ? automaticDefaults() : explicit(backend);
++                return BACKEND_AUTO.equals(backend)
++                        ? automaticDefaults() : explicit(backend, allowNativeAbi);
+             }
+             if (!(value instanceof JSONObject)) {
+                 return automaticDefaults();
+@@ -509,8 +527,8 @@ final class FloralNativeBridgeManager {
+                 final String mode = selected
+                         ? normalizeMode(object.optString("selected_loader_mode", MODE_HYBRID))
+                         : MODE_HYBRID;
+-                return isMode(mode) ? explicit(backend, mode)
+-                        : explicit(backend, MODE_HYBRID);
++                return isMode(mode) ? explicit(backend, mode, allowNativeAbi)
++                        : explicit(backend, MODE_HYBRID, allowNativeAbi);
+             }
+ 
+             final ArrayList<String> candidates = candidatesFromJson(
+@@ -522,18 +540,19 @@ final class FloralNativeBridgeManager {
+             if (isBackend(preferred)) {
+                 reorderBackendFirst(candidates, preferred);
+             }
+-            return new PolicyRule(true, candidates, preserveTaskSurface);
++            return new PolicyRule(true, candidates, preserveTaskSurface, allowNativeAbi);
+         }
+ 
+-        private static PolicyRule explicit(String backend) {
+-            return explicit(backend, MODE_HYBRID);
++        private static PolicyRule explicit(String backend, boolean allowNativeAbi) {
++            return explicit(backend, MODE_HYBRID, allowNativeAbi);
+         }
+ 
+-        private static PolicyRule explicit(String backend, String mode) {
++        private static PolicyRule explicit(String backend, String mode,
++                boolean allowNativeAbi) {
+             final ArrayList<String> candidates = new ArrayList<>();
+             if (isBackend(backend)) {
+                 candidates.add(candidateName(backend, mode));
+-                return new PolicyRule(false, candidates, true);
++                return new PolicyRule(false, candidates, true, allowNativeAbi);
+             }
+             return automaticDefaults();
+         }
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index a13555869885..96d7ca915e24 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -2189,6 +2189,18 @@ public final class ProcessList {
+         }
+     }
+ 
++    @GuardedBy("mService")
++    void killAppZygoteForProcessLocked(ProcessRecord app, HostingRecord hostingRecord) {
++        if (hostingRecord == null || !hostingRecord.usesAppZygote()) {
++            return;
++        }
++        final AppZygote appZygote = mAppZygotes.get(
++                app.info.processName, hostingRecord.getDefiningUid());
++        if (appZygote != null) {
++            killAppZygoteIfNeededLocked(appZygote, true /* force */);
++        }
++    }
++
+     @GuardedBy("mService")
+     private void removeProcessFromAppZygoteLocked(final ProcessRecord app) {
+         // Free the isolated uid for this process
+-- 
+2.47.3
+
