@@ -1,20 +1,23 @@
-From 01bf4f6230178e0d366ac3fc05b008728b148425 Mon Sep 17 00:00:00 2001
+From bdf4a6c5f982540d75468088f51d0238fff9c808 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 26 Aug 2026 16:47:05 +0800
 Subject: [PATCH] art: complete Floral NativeBridge hybrid process routing
 
 Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
 ---
- libnativebridge/Android.bp                    |  23 --
+ libnativebridge/Android.bp                    |  22 --
+ .../nativebridge/native_bridge_private.h      |  21 --
  .../include/nativebridge/native_bridge.h      |  12 +-
  .../nativebridge/native_bridge_diagnostics.h  | 121 +++++++
  libnativebridge/libnativebridge.map.txt       |   3 +
  libnativebridge/native_bridge.cc              | 190 ++++-------
  libnativebridge/native_bridge_lazy.cc         |  15 +-
  libnativeloader/Android.bp                    |   1 -
+ libnativeloader/library_namespaces.cpp        |  46 +--
  libnativeloader/native_loader.cpp             |   5 +-
  libnativeloader/native_loader_namespace.cpp   | 305 ++++--------------
  libnativeloader/native_loader_namespace.h     |  22 +-
+ libnativeloader/native_loader_test.cpp        |  93 +-----
  libnativeloader/native_loader_test.h          |  14 +-
  runtime/Android.bp                            |   1 +
  .../jni/floral_nativebridge_diagnostics.cc    |  77 +++++
@@ -24,13 +27,14 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  runtime/native_bridge_art_interface.cc        |  32 ++
  runtime/native_bridge_art_interface.h         |   2 +
  runtime/runtime.cc                            |   2 +-
- 19 files changed, 584 insertions(+), 414 deletions(-)
+ 22 files changed, 598 insertions(+), 559 deletions(-)
+ delete mode 100644 libnativebridge/include-private/nativebridge/native_bridge_private.h
  create mode 100644 libnativebridge/include/nativebridge/native_bridge_diagnostics.h
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.cc
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.h
 
 diff --git a/libnativebridge/Android.bp b/libnativebridge/Android.bp
-index 642e751..64dd0e2 100644
+index 642e751..1e8ebd4 100644
 --- a/libnativebridge/Android.bp
 +++ b/libnativebridge/Android.bp
 @@ -40,26 +40,6 @@ cc_library_headers {
@@ -60,7 +64,7 @@ index 642e751..64dd0e2 100644
  art_cc_library {
      name: "libnativebridge",
      defaults: ["libnativebridge-defaults"],
-@@ -77,11 +57,9 @@ art_cc_library {
+@@ -77,7 +57,6 @@ art_cc_library {
      srcs: ["native_bridge.cc"],
      header_libs: [
          "libbase_headers",
@@ -68,11 +72,7 @@ index 642e751..64dd0e2 100644
      ],
      shared_libs: [
          "liblog",
--        "libbase",
-     ],
-     // TODO(jiyong): remove this line after aosp/885921 lands
-     export_include_dirs: ["include"],
-@@ -119,7 +97,6 @@ cc_library {
+@@ -119,7 +98,6 @@ cc_library {
  
      host_supported: false,
      srcs: ["native_bridge_lazy.cc"],
@@ -80,6 +80,33 @@ index 642e751..64dd0e2 100644
      runtime_libs: ["libnativebridge"],
      shared_libs: ["liblog"],
  }
+diff --git a/libnativebridge/include-private/nativebridge/native_bridge_private.h b/libnativebridge/include-private/nativebridge/native_bridge_private.h
+deleted file mode 100644
+index cf63c8f..0000000
+--- a/libnativebridge/include-private/nativebridge/native_bridge_private.h
++++ /dev/null
+@@ -1,21 +0,0 @@
+-/*
+- * Copyright 2026 FloralDroid
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- */
+-
+-#ifndef ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
+-#define ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
+-
+-namespace android {
+-extern "C" {
+-
+-// Returns true only when the selected per-process NativeBridge requests
+-// Floral's mixed-ABI namespace enhancement. This is internal to ART.
+-bool NativeBridgeUseHybridLoader();
+-
+-}  // extern "C"
+-}  // namespace android
+-
+-#endif  // ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
 diff --git a/libnativebridge/include/nativebridge/native_bridge.h b/libnativebridge/include/nativebridge/native_bridge.h
 index 02fd404..6a28b14 100644
 --- a/libnativebridge/include/nativebridge/native_bridge.h
@@ -607,6 +634,118 @@ index 92e18d2..3f13506 100644
      ],
      shared_libs: [
          "liblog",
+diff --git a/libnativeloader/library_namespaces.cpp b/libnativeloader/library_namespaces.cpp
+index a6ae88e..8b87338 100644
+--- a/libnativeloader/library_namespaces.cpp
++++ b/libnativeloader/library_namespaces.cpp
+@@ -21,7 +21,6 @@
+ #include <dirent.h>
+ #include <dlfcn.h>
+ 
+-#include <algorithm>
+ #include <regex>
+ #include <string>
+ #include <vector>
+@@ -283,14 +282,6 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+ 
+   // Create the app namespace
+   NativeLoaderNamespace* parent_ns = FindParentNamespaceByClassLoader(env, class_loader);
+-  // Some plugin frameworks construct a classloader whose Java parent chain
+-  // cannot be associated with the app's main NativeLoader namespace. Preserve
+-  // isolation on the host side, but give a hybrid guest namespace the main app
+-  // namespace as its fallback parent so app-private guest runtimes stay visible.
+-  NativeLoaderNamespace* guest_fallback_parent =
+-      parent_ns == nullptr && app_main_namespace_ != nullptr && app_main_namespace_->IsHybrid()
+-          ? app_main_namespace_
+-          : nullptr;
+   // Heuristic: the first classloader with non-empty library_path is assumed to
+   // be the main classloader for app
+   // TODO(b/139178525) remove this heuristic by determining this in LoadedApk (or its
+@@ -302,7 +293,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+   // Note: this function is executed with g_namespaces_mutex held, thus no
+   // racing here.
+   auto app_ns = NativeLoaderNamespace::Create(
+-      namespace_name, library_path, permitted_path, parent_ns, guest_fallback_parent, is_shared,
++      namespace_name, library_path, permitted_path, parent_ns, is_shared,
+       target_sdk_version < 24 /* is_exempt_list_enabled */, also_used_as_anonymous);
+   if (!app_ns.ok()) {
+     return app_ns.error();
+@@ -315,35 +306,16 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+     return system_ns.error();
+   }
+ 
+-  if (is_bridged) {
+-    if (app_ns->IsHybrid()) {
+-      // The host namespace exists only for platform x86 libraries. It must not
+-      // expose guest ART runtime interfaces to the application classloader.
+-      auto native_linked = app_ns->LinkNative(&system_ns.value(), system_exposed_libraries);
+-      if (!native_linked.ok()) {
+-        ALOGW("Failed to link hybrid host namespace %s: %s",
+-              app_ns->name().c_str(), native_linked.error().message().c_str());
+-      }
+-    }
+-
+-    // Guest classloaders receive the same public-library contract as native
+-    // classloaders. Backend runtime libraries remain private to the backend.
+-    auto linked = app_ns->LinkNativeBridge(&system_ns.value(), system_exposed_libraries);
+-    if (!linked.ok()) {
+-      return linked.error();
+-    }
+-  } else {
+-    auto linked = app_ns->Link(&system_ns.value(), system_exposed_libraries);
+-    if (!linked.ok()) {
+-      return linked.error();
+-    }
++  auto linked = app_ns->Link(&system_ns.value(), system_exposed_libraries);
++  if (!linked.ok()) {
++    return linked.error();
+   }
+ 
+   for (const auto&[apex_ns_name, public_libs] : apex_public_libraries()) {
+     auto ns = NativeLoaderNamespace::GetExportedNamespace(apex_ns_name, is_bridged);
+     // Even if APEX namespace is visible, it may not be available to bridged.
+     if (ns.ok()) {
+-      auto linked = app_ns->Link(&ns.value(), public_libs);
++      linked = app_ns->Link(&ns.value(), public_libs);
+       if (!linked.ok()) {
+         return linked.error();
+       }
+@@ -354,7 +326,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+   if (unbundled_app_origin == APK_ORIGIN_VENDOR && !vndksp_libraries_vendor().empty()) {
+     auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkNamespaceName, is_bridged);
+     if (vndk_ns.ok()) {
+-      auto linked = app_ns->Link(&vndk_ns.value(), vndksp_libraries_vendor());
++      linked = app_ns->Link(&vndk_ns.value(), vndksp_libraries_vendor());
+       if (!linked.ok()) {
+         return linked.error();
+       }
+@@ -365,7 +337,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+   if (unbundled_app_origin == APK_ORIGIN_PRODUCT && !vndksp_libraries_product().empty()) {
+     auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkProductNamespaceName, is_bridged);
+     if (vndk_ns.ok()) {
+-      auto linked = app_ns->Link(&vndk_ns.value(), vndksp_libraries_product());
++      linked = app_ns->Link(&vndk_ns.value(), vndksp_libraries_product());
+       if (!linked.ok()) {
+         return linked.error();
+       }
+@@ -379,7 +351,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+       if (jni_libs != "") {
+         auto apex_ns = NativeLoaderNamespace::GetExportedNamespace(*apex_ns_name, is_bridged);
+         if (apex_ns.ok()) {
+-          auto linked = app_ns->Link(&apex_ns.value(), jni_libs);
++          linked = app_ns->Link(&apex_ns.value(), jni_libs);
+           if (!linked.ok()) {
+             return linked.error();
+           }
+@@ -395,7 +367,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
+     // when vendor_ns is not configured, link to the system namespace
+     auto target_ns = vendor_ns.ok() ? vendor_ns : system_ns;
+     if (target_ns.ok()) {
+-      auto linked = app_ns->Link(&target_ns.value(), vendor_libs);
++      linked = app_ns->Link(&target_ns.value(), vendor_libs);
+       if (!linked.ok()) {
+         return linked.error();
+       }
 diff --git a/libnativeloader/native_loader.cpp b/libnativeloader/native_loader.cpp
 index a53020e..c53df8f 100644
 --- a/libnativeloader/native_loader.cpp
@@ -1135,6 +1274,151 @@ index 38fad09..735a9ac 100644
          native_namespace_(native_ns), bridged_namespace_(bridged_ns) {}
  
    std::string name_;
+diff --git a/libnativeloader/native_loader_test.cpp b/libnativeloader/native_loader_test.cpp
+index ef5e187..c1dd4aa 100644
+--- a/libnativeloader/native_loader_test.cpp
++++ b/libnativeloader/native_loader_test.cpp
+@@ -20,7 +20,6 @@
+ 
+ #include <dlfcn.h>
+ 
+-#include <android-base/properties.h>
+ #include <android-base/strings.h>
+ #include <gtest/gtest.h>
+ 
+@@ -52,14 +51,6 @@ MATCHER_P(NsEq, other, "") {
+   return strcmp(reinterpret_cast<const char*>(arg), reinterpret_cast<const char*>(other)) == 0;
+ }
+ 
+-MATCHER_P(NullableNsEq, other, "") {
+-  if (arg == nullptr || other == nullptr) {
+-    return arg == other;
+-  }
+-  *result_listener << "comparing " << reinterpret_cast<const char*>(arg) << " and " << other;
+-  return strcmp(reinterpret_cast<const char*>(arg), other) == 0;
+-}
+-
+ /////////////////////////////////////////////////////////////////
+ 
+ // Test fixture
+@@ -69,6 +60,7 @@ class NativeLoaderTest : public ::testing::TestWithParam<bool> {
+ 
+   void SetUp() override {
+     mock = std::make_unique<testing::NiceMock<MockPlatform>>(IsBridged());
++
+     env = std::make_unique<JNIEnv>();
+     env->functions = CreateJNINativeInterface();
+   }
+@@ -193,7 +185,6 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
+   std::string expected_library_path = library_path;
+   std::string expected_permitted_path = std::string("/data:/mnt/expand:") + permitted_path;
+   std::string expected_parent_namespace = "system";
+-  bool guest_system_namespace_available = true;
+   bool expected_link_with_platform_ns = true;
+   bool expected_link_with_art_ns = true;
+   bool expected_link_with_i18n_ns = true;
+@@ -218,29 +209,16 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
+ 
+     ON_CALL(*mock, JniObject_getParent(StrEq(class_loader))).WillByDefault(Return(nullptr));
+ 
+-    if (IsBridged() && !guest_system_namespace_available) {
+-      ON_CALL(*mock, mock_get_exported_namespace(true, StrEq("system")))
+-          .WillByDefault(Return(nullptr));
+-      ON_CALL(*mock, mock_get_exported_namespace(true, StrEq("default")))
+-          .WillByDefault(Return(nullptr));
+-    }
+-    const char* system_namespace = IsBridged() && !guest_system_namespace_available
+-                                       ? nullptr
+-                                       : expected_parent_namespace.c_str();
+-
+     EXPECT_CALL(*mock, NativeBridgeIsPathSupported(_)).Times(testing::AnyNumber());
++    EXPECT_CALL(*mock, NativeBridgeInitialized()).Times(testing::AnyNumber());
++
+     EXPECT_CALL(*mock, mock_create_namespace(
+                            Eq(IsBridged()), StrEq(expected_namespace_name), nullptr,
+                            StrEq(expected_library_path), expected_namespace_flags,
+-                           StrEq(expected_permitted_path), NullableNsEq(system_namespace)))
++                           StrEq(expected_permitted_path), NsEq(expected_parent_namespace.c_str())))
+         .WillOnce(Return(TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE(dex_path.c_str()))));
+-    if (IsBridged()) {
+-      // Creating a guest classloader must not materialize runtime sonames as
+-      // an implicit substitute for a namespace link.
+-      EXPECT_CALL(*mock, mock_dlopen_ext(true, _, _, _)).Times(0);
+-    }
+     if (expected_link_with_platform_ns) {
+-      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NullableNsEq(system_namespace),
++      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("system"),
+                                               StrEq(expected_shared_libs_to_platform_ns)))
+           .WillOnce(Return(true));
+     }
+@@ -321,67 +299,6 @@ TEST_P(NativeLoaderTest_Create, DownloadedApp) {
+   RunTest();
+ }
+ 
+-TEST_P(NativeLoaderTest_Create, BridgedDefaultNamespaceFallback) {
+-  if (!IsBridged()) {
+-    GTEST_SKIP() << "The fallback is specific to NativeBridge namespaces";
+-  }
+-  guest_system_namespace_available = false;
+-  SetExpectations();
+-  RunTest();
+-}
+-
+-TEST_P(NativeLoaderTest_Create, HybridOrphanPluginInheritsOnlyMainGuestNamespace) {
+-  if (!IsBridged()) {
+-    GTEST_SKIP() << "The fallback is specific to hybrid NativeBridge namespaces";
+-  }
+-
+-  NativeLoaderTest::SetExpectations();
+-  ASSERT_TRUE(android::base::SetProperty("ro.floral.bridge.hybrid_elf", "1") ||
+-              android::base::GetBoolProperty("ro.floral.bridge.hybrid_elf", false));
+-  ON_CALL(*mock, NativeBridgeUseHybridLoader()).WillByDefault(Return(true));
+-  EXPECT_CALL(*mock, NativeBridgeIsPathSupported(_)).Times(testing::AnyNumber());
+-
+-  const std::string main_path = "/data/app/foo/lib/arm64";
+-  const std::string plugin_path = "/data/user/0/foo/files/plugins/lib";
+-  const std::string permitted_path = "/data:/mnt/expand:/data/user/0/foo";
+-  constexpr uint64_t kMainType = ANDROID_NAMESPACE_TYPE_ISOLATED |
+-                                 ANDROID_NAMESPACE_TYPE_ALSO_USED_AS_ANONYMOUS;
+-
+-  EXPECT_CALL(*mock, mock_create_namespace(false, StrEq("main-native"), nullptr,
+-                                            StrEq(main_path), kMainType,
+-                                            StrEq(permitted_path), NsEq("system")))
+-      .WillOnce(Return(TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("main-host"))));
+-  EXPECT_CALL(*mock, mock_create_namespace(true, StrEq("main"), nullptr,
+-                                            StrEq(main_path), kMainType,
+-                                            StrEq(permitted_path), NsEq("system")))
+-      .WillOnce(Return(TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("main-guest"))));
+-
+-  auto main_ns = NativeLoaderNamespace::Create(
+-      "main", main_path, permitted_path, /*parent=*/nullptr,
+-      /*guest_fallback_parent=*/nullptr, /*is_shared=*/false,
+-      /*is_exempt_list_enabled=*/false, /*also_used_as_anonymous=*/true);
+-  ASSERT_TRUE(main_ns.ok()) << main_ns.error().message();
+-
+-  // The host plugin remains an isolated child of the system namespace. Only
+-  // its guest peer becomes a shared child of the main application namespace.
+-  EXPECT_CALL(*mock, mock_create_namespace(false, StrEq("plugin-native"), nullptr,
+-                                            StrEq(plugin_path), ANDROID_NAMESPACE_TYPE_ISOLATED,
+-                                            StrEq(permitted_path), NsEq("system")))
+-      .WillOnce(Return(TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("plugin-host"))));
+-  EXPECT_CALL(*mock, mock_create_namespace(
+-                         true, StrEq("plugin"), nullptr, StrEq(plugin_path),
+-                         ANDROID_NAMESPACE_TYPE_SHARED_ISOLATED, StrEq(permitted_path),
+-                         NsEq("main-guest")))
+-      .WillOnce(Return(TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("plugin-guest"))));
+-
+-  auto plugin_ns = NativeLoaderNamespace::Create(
+-      "plugin", plugin_path, permitted_path, /*parent=*/nullptr,
+-      /*guest_fallback_parent=*/&main_ns.value(), /*is_shared=*/false,
+-      /*is_exempt_list_enabled=*/false, /*also_used_as_anonymous=*/false);
+-  ASSERT_TRUE(plugin_ns.ok()) << plugin_ns.error().message();
+-  EXPECT_TRUE(plugin_ns->IsHybrid());
+-}
+-
+ TEST_P(NativeLoaderTest_Create, BundledSystemApp) {
+   dex_path = "/system/app/foo/foo.apk";
+   is_shared = true;
 diff --git a/libnativeloader/native_loader_test.h b/libnativeloader/native_loader_test.h
 index 32ac08a..0f623c3 100644
 --- a/libnativeloader/native_loader_test.h
