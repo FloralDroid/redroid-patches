@@ -1,4 +1,4 @@
-From bdf4a6c5f982540d75468088f51d0238fff9c808 Mon Sep 17 00:00:00 2001
+From 576349ca33183113ab72a959f98b3a32f37815b8 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 26 Aug 2026 16:47:05 +0800
 Subject: [PATCH] art: complete Floral NativeBridge hybrid process routing
@@ -7,15 +7,15 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
 ---
  libnativebridge/Android.bp                    |  22 --
  .../nativebridge/native_bridge_private.h      |  21 --
- .../include/nativebridge/native_bridge.h      |  12 +-
+ .../include/nativebridge/native_bridge.h      |   5 +-
  .../nativebridge/native_bridge_diagnostics.h  | 121 +++++++
  libnativebridge/libnativebridge.map.txt       |   3 +
  libnativebridge/native_bridge.cc              | 190 ++++-------
- libnativebridge/native_bridge_lazy.cc         |  15 +-
+ libnativebridge/native_bridge_lazy.cc         |  18 +-
  libnativeloader/Android.bp                    |   1 -
  libnativeloader/library_namespaces.cpp        |  46 +--
  libnativeloader/native_loader.cpp             |   5 +-
- libnativeloader/native_loader_namespace.cpp   | 305 ++++--------------
+ libnativeloader/native_loader_namespace.cpp   | 307 ++++--------------
  libnativeloader/native_loader_namespace.h     |  22 +-
  libnativeloader/native_loader_test.cpp        |  93 +-----
  libnativeloader/native_loader_test.h          |  14 +-
@@ -23,11 +23,11 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  .../jni/floral_nativebridge_diagnostics.cc    |  77 +++++
  runtime/jni/floral_nativebridge_diagnostics.h |  46 +++
  runtime/jni/java_vm_ext.cc                    |  37 ++-
- runtime/jni/jni_internal.cc                   |  90 ++++++
- runtime/native_bridge_art_interface.cc        |  32 ++
+ runtime/jni/jni_internal.cc                   |  90 +++++
+ runtime/native_bridge_art_interface.cc        |  36 ++
  runtime/native_bridge_art_interface.h         |   2 +
  runtime/runtime.cc                            |   2 +-
- 22 files changed, 598 insertions(+), 559 deletions(-)
+ 22 files changed, 600 insertions(+), 559 deletions(-)
  delete mode 100644 libnativebridge/include-private/nativebridge/native_bridge_private.h
  create mode 100644 libnativebridge/include/nativebridge/native_bridge_diagnostics.h
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.cc
@@ -108,10 +108,10 @@ index cf63c8f..0000000
 -
 -#endif  // ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
 diff --git a/libnativebridge/include/nativebridge/native_bridge.h b/libnativebridge/include/nativebridge/native_bridge.h
-index 02fd404..6a28b14 100644
+index 02fd404..09dd1c9 100644
 --- a/libnativebridge/include/nativebridge/native_bridge.h
 +++ b/libnativebridge/include/nativebridge/native_bridge.h
-@@ -59,11 +59,21 @@ bool PreInitializeNativeBridge(const char* app_data_dir, const char* instruction
+@@ -59,11 +59,14 @@ bool PreInitializeNativeBridge(const char* app_data_dir, const char* instruction
  // close emulated file descriptors, after doPreload() in app-zygote.
  void PreZygoteForkNativeBridge();
  
@@ -122,14 +122,7 @@ index 02fd404..6a28b14 100644
                                           const char* app_data_dir,
                                           const char* selected_backend);
  
-+bool NativeBridgeProcessContextSelected();
-+
-+bool NativeBridgeUseDirectLoader();
-+
 +bool NativeBridgeUseHybridLoader();
-+
-+// Legacy name retained for incremental images. New callers use the direct name.
-+bool NativeBridgeUseCompatibilityLoader();
 +
  // Initialize the native bridge, if any. Should be called by Runtime::DidForkFromZygote. The JNIEnv*
  // will be used to modify the app environment for the bridge.
@@ -585,7 +578,7 @@ index 4cccf12..2d009e3 100644
        break;
  
 diff --git a/libnativebridge/native_bridge_lazy.cc b/libnativebridge/native_bridge_lazy.cc
-index 76e2a8d..514a888 100644
+index 76e2a8d..9cd0ee8 100644
 --- a/libnativebridge/native_bridge_lazy.cc
 +++ b/libnativebridge/native_bridge_lazy.cc
 @@ -15,7 +15,6 @@
@@ -596,7 +589,17 @@ index 76e2a8d..514a888 100644
  #define LOG_TAG "nativebridge"
  
  #include <dlfcn.h>
-@@ -62,11 +61,25 @@ void SetFloralNativeBridgeProcessContext(const char* process_name,
+@@ -26,6 +25,9 @@
+ 
+ namespace android {
+ 
++bool NativeBridgeProcessContextSelected();
++bool NativeBridgeUseDirectLoader();
++
+ namespace {
+ 
+ void* GetLibHandle() {
+@@ -62,11 +64,25 @@ void SetFloralNativeBridgeProcessContext(const char* process_name,
    f(process_name, app_data_dir, selected_backend);
  }
  
@@ -770,7 +773,7 @@ index a53020e..c53df8f 100644
    return handle.ok() ? handle->handle : nullptr;
  }
 diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
-index 376775d..9aa69f1 100644
+index 376775d..f097a73 100644
 --- a/libnativeloader/native_loader_namespace.cpp
 +++ b/libnativeloader/native_loader_namespace.cpp
 @@ -25,8 +25,6 @@
@@ -790,7 +793,13 @@ index 376775d..9aa69f1 100644
  
  #include "nativeloader/dlext_namespaces.h"
  
-@@ -48,10 +45,7 @@ namespace {
+@@ -44,14 +41,13 @@ using android::base::Error;
+ 
+ namespace android {
+ 
++bool NativeBridgeUseDirectLoader();
++
+ namespace {
  
  constexpr const char* kDefaultNamespaceName = "default";
  constexpr const char* kSystemNamespaceName = "system";
@@ -801,7 +810,7 @@ index 376775d..9aa69f1 100644
  
  enum class ElfTarget {
    kUnknown,
-@@ -59,29 +53,8 @@ enum class ElfTarget {
+@@ -59,29 +55,8 @@ enum class ElfTarget {
    kGuest,
  };
  
@@ -832,7 +841,7 @@ index 376775d..9aa69f1 100644
  }
  
  ElfTarget ReadElfTarget(const char* path) {
-@@ -119,20 +92,6 @@ ElfTarget ReadElfTarget(const char* path) {
+@@ -119,20 +94,6 @@ ElfTarget ReadElfTarget(const char* path) {
    return ElfTarget::kUnknown;
  }
  
@@ -853,7 +862,7 @@ index 376775d..9aa69f1 100644
  std::string GetLinkerError(bool is_bridged) {
    const char* msg = is_bridged ? NativeBridgeGetError() : dlerror();
    if (msg == nullptr) {
-@@ -143,41 +102,22 @@ std::string GetLinkerError(bool is_bridged) {
+@@ -143,41 +104,22 @@ std::string GetLinkerError(bool is_bridged) {
  
  }  // namespace
  
@@ -896,7 +905,7 @@ index 376775d..9aa69f1 100644
    }
    return Errorf("namespace {} does not exist or exported", name);
  }
-@@ -194,22 +134,13 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+@@ -194,22 +136,13 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
    // If nothing is found, return NativeLoaderNamespace constructed from nullptr.
    // nullptr also means default namespace to the linker.
    if (!is_bridged) {
@@ -920,7 +929,7 @@ index 376775d..9aa69f1 100644
      return NativeLoaderNamespace(kDefaultNamespaceName,
                                   static_cast<native_bridge_namespace_t*>(nullptr));
    }
-@@ -217,13 +148,18 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+@@ -217,13 +150,18 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
  
  Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
      const std::string& name, const std::string& search_paths, const std::string& permitted_paths,
@@ -946,7 +955,7 @@ index 376775d..9aa69f1 100644
    }
  
    // Fall back to the system namespace if no parent is set.
-@@ -232,9 +168,6 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+@@ -232,9 +170,6 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
      return system_ns.error();
    }
    const NativeLoaderNamespace& effective_parent = parent != nullptr ? *parent : *system_ns;
@@ -956,7 +965,7 @@ index 376775d..9aa69f1 100644
  
    // All namespaces for apps are isolated
    uint64_t type = ANDROID_NAMESPACE_TYPE_ISOLATED;
-@@ -253,48 +186,32 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+@@ -253,48 +188,32 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
    if (is_exempt_list_enabled) {
      type |= ANDROID_NAMESPACE_TYPE_EXEMPT_LIST_ENABLED;
    }
@@ -1020,7 +1029,7 @@ index 376775d..9aa69f1 100644
        }
        return NativeLoaderNamespace(name, raw);
      }
-@@ -308,160 +225,76 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
+@@ -308,160 +227,76 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
    LOG_ALWAYS_FATAL_IF(shared_libs.empty(), "empty share lib when linking %s to %s",
                        this->name().c_str(), target == nullptr ? "default" : target->name().c_str());
    if (!IsBridged()) {
@@ -1066,9 +1075,13 @@ index 376775d..9aa69f1 100644
 -    if (NamespaceAuditEnabled()) {
 -      ALOGI("Floral NB audit: link result=ok owner=host from=%s to=%s",
 -            name_.c_str(), target == nullptr ? "default" : target->name().c_str());
--    }
++    if (NativeBridgeLinkNamespaces(this->ToRawNativeBridgeNamespace(),
++                                   target == nullptr ? nullptr : target->ToRawNativeBridgeNamespace(),
++                                   shared_libs.c_str())) {
++      return {};
+     }
 -    return {};
--  }
+   }
 -  const std::string error = GetLinkerError(false);
 -  ALOGW("Floral NB namespace link failed: owner=host from=%s to=%s error=%s",
 -        name_.c_str(), target == nullptr ? "default" : target->name().c_str(), error.c_str());
@@ -1095,13 +1108,9 @@ index 376775d..9aa69f1 100644
 -    if (NamespaceAuditEnabled()) {
 -      ALOGI("Floral NB audit: link result=ok owner=guest from=%s to=%s",
 -            name_.c_str(), target == nullptr ? "default" : target->name().c_str());
-+    if (NativeBridgeLinkNamespaces(this->ToRawNativeBridgeNamespace(),
-+                                   target == nullptr ? nullptr : target->ToRawNativeBridgeNamespace(),
-+                                   shared_libs.c_str())) {
-+      return {};
-     }
+-    }
 -    return {};
-   }
+-  }
 -  const std::string error = GetLinkerError(true);
 -  ALOGW("Floral NB namespace link failed: owner=guest from=%s to=%s error=%s",
 -        name_.c_str(), target == nullptr ? "default" : target->name().c_str(), error.c_str());
@@ -1825,7 +1834,7 @@ index f483ad3..f6fb6ca 100644
    }
  
 diff --git a/runtime/native_bridge_art_interface.cc b/runtime/native_bridge_art_interface.cc
-index 0651f0c..0a08d35 100644
+index 0651f0c..bea056f 100644
 --- a/runtime/native_bridge_art_interface.cc
 +++ b/runtime/native_bridge_art_interface.cc
 @@ -17,6 +17,7 @@
@@ -1836,8 +1845,14 @@ index 0651f0c..0a08d35 100644
  
  #include "nativebridge/native_bridge.h"
  
-@@ -32,6 +33,30 @@
+@@ -30,8 +31,36 @@
+ #include "scoped_thread_state_change-inl.h"
+ #include "sigchain.h"
  
++namespace android {
++bool NativeBridgeProcessContextSelected();
++}
++
  namespace art {
  
 +// Bionic provides this optional process-local identity hook. The weak
@@ -1867,7 +1882,7 @@ index 0651f0c..0a08d35 100644
  static const char* GetMethodShorty(JNIEnv* env, jmethodID mid) {
    ScopedObjectAccess soa(env);
    ArtMethod* m = jni::DecodeArtMethod(mid);
-@@ -114,13 +139,19 @@ void PreZygoteForkNativeBridge() {
+@@ -114,13 +143,19 @@ void PreZygoteForkNativeBridge() {
    android::PreZygoteForkNativeBridge();
  }
  
@@ -1887,7 +1902,7 @@ index 0651f0c..0a08d35 100644
      if (android::NativeBridgeGetVersion() >= 2U) {
  #ifdef _NSIG  // Undefined on Apple, but we don't support running on Mac, anyways.
        // Managed signal handling support added in version 2.
-@@ -144,6 +175,7 @@ void InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {
+@@ -144,6 +179,7 @@ void InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {
  }
  
  void UnloadNativeBridge() {
