@@ -1,4 +1,4 @@
-From d3ec46002cc55fc944e4001e090ec4ec109cf25e Mon Sep 17 00:00:00 2001
+From c4ea162fc09c76adae432159a467ae6455824706 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 26 Aug 2026 16:47:05 +0800
 Subject: [PATCH] art: complete Floral NativeBridge hybrid process routing
@@ -15,7 +15,7 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  libnativeloader/Android.bp                    |   1 -
  libnativeloader/library_namespaces.cpp        |  46 +--
  libnativeloader/native_loader.cpp             |   5 +-
- libnativeloader/native_loader_namespace.cpp   | 307 ++++--------------
+ libnativeloader/native_loader_namespace.cpp   | 308 +++++-------------
  libnativeloader/native_loader_namespace.h     |  22 +-
  libnativeloader/native_loader_test.cpp        |  93 +-----
  libnativeloader/native_loader_test.h          |  14 +-
@@ -27,7 +27,7 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  runtime/native_bridge_art_interface.cc        |  36 ++
  runtime/native_bridge_art_interface.h         |   2 +
  runtime/runtime.cc                            |   2 +-
- 22 files changed, 601 insertions(+), 559 deletions(-)
+ 22 files changed, 603 insertions(+), 558 deletions(-)
  delete mode 100644 libnativebridge/include-private/nativebridge/native_bridge_private.h
  create mode 100644 libnativebridge/include/nativebridge/native_bridge_diagnostics.h
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.cc
@@ -774,7 +774,7 @@ index a53020e..c53df8f 100644
    return handle.ok() ? handle->handle : nullptr;
  }
 diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
-index 376775d..77827d3 100644
+index 376775d..4f29698 100644
 --- a/libnativeloader/native_loader_namespace.cpp
 +++ b/libnativeloader/native_loader_namespace.cpp
 @@ -25,8 +25,6 @@
@@ -863,7 +863,7 @@ index 376775d..77827d3 100644
  std::string GetLinkerError(bool is_bridged) {
    const char* msg = is_bridged ? NativeBridgeGetError() : dlerror();
    if (msg == nullptr) {
-@@ -143,41 +104,22 @@ std::string GetLinkerError(bool is_bridged) {
+@@ -143,41 +104,25 @@ std::string GetLinkerError(bool is_bridged) {
  
  }  // namespace
  
@@ -891,7 +891,9 @@ index 376775d..77827d3 100644
 -        if (NamespaceAuditEnabled()) {
 -          ALOGI("Floral NB audit: exported name=%s bridged=1 hybrid=1 native=%p guest=%p",
 -                name.c_str(), static_cast<void*>(native_raw), static_cast<void*>(bridged_raw));
--        }
++        if (native_raw == nullptr && name == kSystemNamespaceName) {
++          native_raw = android_get_exported_namespace(kDefaultNamespaceName);
+         }
          return NativeLoaderNamespace(name, native_raw, bridged_raw);
        }
 -      if (NamespaceAuditEnabled()) {
@@ -906,7 +908,7 @@ index 376775d..77827d3 100644
    }
    return Errorf("namespace {} does not exist or exported", name);
  }
-@@ -194,22 +136,13 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+@@ -194,22 +139,13 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
    // If nothing is found, return NativeLoaderNamespace constructed from nullptr.
    // nullptr also means default namespace to the linker.
    if (!is_bridged) {
@@ -930,7 +932,7 @@ index 376775d..77827d3 100644
      return NativeLoaderNamespace(kDefaultNamespaceName,
                                   static_cast<native_bridge_namespace_t*>(nullptr));
    }
-@@ -217,13 +150,18 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
+@@ -217,13 +153,18 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::GetSystemNamespace(bool is_
  
  Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
      const std::string& name, const std::string& search_paths, const std::string& permitted_paths,
@@ -956,7 +958,7 @@ index 376775d..77827d3 100644
    }
  
    // Fall back to the system namespace if no parent is set.
-@@ -232,9 +170,6 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+@@ -232,9 +173,6 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
      return system_ns.error();
    }
    const NativeLoaderNamespace& effective_parent = parent != nullptr ? *parent : *system_ns;
@@ -966,7 +968,7 @@ index 376775d..77827d3 100644
  
    // All namespaces for apps are isolated
    uint64_t type = ANDROID_NAMESPACE_TYPE_ISOLATED;
-@@ -253,48 +188,32 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
+@@ -253,48 +191,32 @@ Result<NativeLoaderNamespace> NativeLoaderNamespace::Create(
    if (is_exempt_list_enabled) {
      type |= ANDROID_NAMESPACE_TYPE_EXEMPT_LIST_ENABLED;
    }
@@ -1030,7 +1032,7 @@ index 376775d..77827d3 100644
        }
        return NativeLoaderNamespace(name, raw);
      }
-@@ -308,160 +227,76 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
+@@ -308,160 +230,76 @@ Result<void> NativeLoaderNamespace::Link(const NativeLoaderNamespace* target,
    LOG_ALWAYS_FATAL_IF(shared_libs.empty(), "empty share lib when linking %s to %s",
                        this->name().c_str(), target == nullptr ? "default" : target->name().c_str());
    if (!IsBridged()) {
@@ -1076,13 +1078,9 @@ index 376775d..77827d3 100644
 -    if (NamespaceAuditEnabled()) {
 -      ALOGI("Floral NB audit: link result=ok owner=host from=%s to=%s",
 -            name_.c_str(), target == nullptr ? "default" : target->name().c_str());
-+    if (NativeBridgeLinkNamespaces(this->ToRawNativeBridgeNamespace(),
-+                                   target == nullptr ? nullptr : target->ToRawNativeBridgeNamespace(),
-+                                   shared_libs.c_str())) {
-+      return {};
-     }
+-    }
 -    return {};
-   }
+-  }
 -  const std::string error = GetLinkerError(false);
 -  ALOGW("Floral NB namespace link failed: owner=host from=%s to=%s error=%s",
 -        name_.c_str(), target == nullptr ? "default" : target->name().c_str(), error.c_str());
@@ -1109,9 +1107,13 @@ index 376775d..77827d3 100644
 -    if (NamespaceAuditEnabled()) {
 -      ALOGI("Floral NB audit: link result=ok owner=guest from=%s to=%s",
 -            name_.c_str(), target == nullptr ? "default" : target->name().c_str());
--    }
++    if (NativeBridgeLinkNamespaces(this->ToRawNativeBridgeNamespace(),
++                                   target == nullptr ? nullptr : target->ToRawNativeBridgeNamespace(),
++                                   shared_libs.c_str())) {
++      return {};
+     }
 -    return {};
--  }
+   }
 -  const std::string error = GetLinkerError(true);
 -  ALOGW("Floral NB namespace link failed: owner=guest from=%s to=%s error=%s",
 -        name_.c_str(), target == nullptr ? "default" : target->name().c_str(), error.c_str());
