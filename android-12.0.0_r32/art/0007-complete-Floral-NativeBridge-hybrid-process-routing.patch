@@ -1,4 +1,4 @@
-From c08ea65d3c701695b72af79717d4f5c46cd7284b Mon Sep 17 00:00:00 2001
+From 01bf4f6230178e0d366ac3fc05b008728b148425 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 26 Aug 2026 16:47:05 +0800
 Subject: [PATCH] art: complete Floral NativeBridge hybrid process routing
@@ -11,6 +11,7 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  libnativebridge/libnativebridge.map.txt       |   3 +
  libnativebridge/native_bridge.cc              | 190 ++++-------
  libnativebridge/native_bridge_lazy.cc         |  15 +-
+ libnativeloader/Android.bp                    |   1 -
  libnativeloader/native_loader.cpp             |   5 +-
  libnativeloader/native_loader_namespace.cpp   | 305 ++++--------------
  libnativeloader/native_loader_namespace.h     |  22 +-
@@ -23,7 +24,7 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  runtime/native_bridge_art_interface.cc        |  32 ++
  runtime/native_bridge_art_interface.h         |   2 +
  runtime/runtime.cc                            |   2 +-
- 18 files changed, 584 insertions(+), 413 deletions(-)
+ 19 files changed, 584 insertions(+), 414 deletions(-)
  create mode 100644 libnativebridge/include/nativebridge/native_bridge_diagnostics.h
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.cc
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.h
@@ -594,6 +595,18 @@ index 76e2a8d..514a888 100644
  bool NativeBridgeAvailable() {
    static auto f = GET_FUNC_PTR(NativeBridgeAvailable);
    return f();
+diff --git a/libnativeloader/Android.bp b/libnativeloader/Android.bp
+index 92e18d2..3f13506 100644
+--- a/libnativeloader/Android.bp
++++ b/libnativeloader/Android.bp
+@@ -34,7 +34,6 @@ art_cc_library {
+     ],
+     header_libs: [
+         "libnativehelper_header_only",
+-        "libnativebridge-private-headers",
+     ],
+     shared_libs: [
+         "liblog",
 diff --git a/libnativeloader/native_loader.cpp b/libnativeloader/native_loader.cpp
 index a53020e..c53df8f 100644
 --- a/libnativeloader/native_loader.cpp
