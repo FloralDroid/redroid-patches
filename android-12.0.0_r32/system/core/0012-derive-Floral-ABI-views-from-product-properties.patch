@@ -1,0 +1,446 @@
+From ac4b4c5ab17e69a218d1f8cab03c112f48d24389 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 28 Aug 2026 01:16:06 +0800
+Subject: [PATCH] init: derive NativeBridge ABI views from product properties
+
+Change-Id: I4f3e2ff8ca5337973a344850ac7f3e1d25a04e78
+---
+ init/floral_nativebridge_config.cpp      | 206 ++++++-----------------
+ init/floral_nativebridge_config.h        |  20 +--
+ init/floral_nativebridge_config_test.cpp |  80 ++++-----
+ init/property_service.cpp                |  19 +--
+ 4 files changed, 88 insertions(+), 237 deletions(-)
+
+diff --git a/init/floral_nativebridge_config.cpp b/init/floral_nativebridge_config.cpp
+index 5b45e6a86..8a5786675 100644
+--- a/init/floral_nativebridge_config.cpp
++++ b/init/floral_nativebridge_config.cpp
+@@ -16,71 +16,16 @@
+ 
+ #include "floral_nativebridge_config.h"
+ 
+-#include <sys/stat.h>
+-
+-#include <algorithm>
+-#include <array>
+-#include <memory>
+-#include <set>
+ #include <string>
+-#include <utility>
++#include <string_view>
++#include <vector>
+ 
+-#include <android-base/file.h>
+-#include <android-base/result.h>
+ #include <android-base/strings.h>
+-#include <json/json.h>
+ 
+ namespace android {
+ namespace init {
+ namespace {
+ 
+-constexpr size_t kMaximumConfigSize = 256 * 1024;
+-constexpr std::string_view kDefaultPolicy =
+-        R"({"version":1,"default_backend":"auto","packages":{}})";
+-
+-constexpr std::array<std::string_view, 5> kKnownAbis = {
+-        "arm64-v8a", "armeabi-v7a", "armeabi", "x86_64", "x86",
+-};
+-
+-bool IsKnownAbi(std::string_view abi) {
+-    return std::find(kKnownAbis.begin(), kKnownAbis.end(), abi) != kKnownAbis.end();
+-}
+-
+-bool IsKnownBackend(std::string_view backend) {
+-    return backend == "auto" || backend == "ndk" || backend == "houdini";
+-}
+-
+-android::base::Result<std::vector<std::string>> ParseAbiList(const Json::Value& value,
+-                                                               std::string_view field) {
+-    if (!value.isArray() || value.empty()) {
+-        return android::base::Error() << "abi.public." << field << " must be a non-empty array";
+-    }
+-
+-    std::vector<std::string> result;
+-    std::set<std::string> seen;
+-    for (const Json::Value& item : value) {
+-        if (!item.isString()) {
+-            return android::base::Error() << "abi.public." << field
+-                                          << " contains a non-string ABI";
+-        }
+-        const std::string abi = item.asString();
+-        if (!IsKnownAbi(abi) || !seen.insert(abi).second) {
+-            return android::base::Error() << "abi.public." << field
+-                                          << " contains an unknown or duplicate ABI '" << abi
+-                                          << "'";
+-        }
+-        result.push_back(abi);
+-    }
+-    return result;
+-}
+-
+-std::string JoinAbis(const std::vector<std::string>& first,
+-                     const std::vector<std::string>& second) {
+-    std::vector<std::string> all = first;
+-    all.insert(all.end(), second.begin(), second.end());
+-    return android::base::Join(all, ",");
+-}
+-
+ std::string PropertyOrDefault(const std::map<std::string, std::string>& properties,
+                               std::string_view name, std::string_view fallback) {
+     const auto it = properties.find(std::string(name));
+@@ -90,6 +35,24 @@ std::string PropertyOrDefault(const std::map<std::string, std::string>& properti
+     return std::string(fallback);
+ }
+ 
++std::string AbiPropertyOrDefault(const std::map<std::string, std::string>& properties,
++                                 std::string_view suffix, std::string_view fallback) {
++    const std::string direct = PropertyOrDefault(
++            properties, std::string("ro.product.cpu.abilist") + std::string(suffix), "");
++    if (!direct.empty()) {
++        return direct;
++    }
++    for (std::string_view partition : {"product", "odm", "vendor", "system"}) {
++        const std::string partition_property = std::string("ro.") + std::string(partition) +
++                ".product.cpu.abilist" + std::string(suffix);
++        const std::string value = PropertyOrDefault(properties, partition_property, "");
++        if (!value.empty()) {
++            return value;
++        }
++    }
++    return std::string(fallback);
++}
++
+ bool PropertyEnabled(const std::map<std::string, std::string>& properties,
+                      std::string_view name, bool default_value) {
+     const std::string value = PropertyOrDefault(
+@@ -97,118 +60,51 @@ bool PropertyEnabled(const std::map<std::string, std::string>& properties,
+     return value != "0" && value != "false" && value != "FALSE" && value != "no";
+ }
+ 
+-}  // namespace
+-
+-FloralNativeBridgeConfig DefaultFloralNativeBridgeConfig() {
+-    return {
+-            std::string(kDefaultPolicy),
+-            {"arm64-v8a"},
+-            {"armeabi-v7a", "armeabi"},
+-    };
+-}
+-
+-android::base::Result<FloralNativeBridgeConfig> ParseFloralNativeBridgeConfig(
+-        std::string_view content) {
+-    Json::Value root;
+-    Json::CharReaderBuilder builder;
+-    std::string errors;
+-    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+-    const std::string input(content);
+-    if (!reader->parse(input.data(), input.data() + input.size(), &root, &errors) ||
+-        !root.isObject()) {
+-        return android::base::Error() << "cannot parse nativebridge.json: " << errors;
+-    }
+-    if (root["version"].isInt() && root["version"].asInt() != 1) {
+-        return android::base::Error() << "unsupported nativebridge.json version";
+-    }
+-
+-    if (root.isMember("default_backend")) {
+-        const Json::Value backend = root["default_backend"];
+-        if ((!backend.isString() && !backend.isObject()) ||
+-            (backend.isString() && !IsKnownBackend(backend.asString()))) {
+-            return android::base::Error()
+-                    << "default_backend must be auto, ndk, houdini, or a rule object";
+-        }
+-    } else if (root.isMember("preferred_backend")) {
+-        const Json::Value preferred = root["preferred_backend"];
+-        if (!preferred.isString() ||
+-            (preferred.asString() != "ndk" && preferred.asString() != "houdini")) {
+-            return android::base::Error() << "preferred_backend must be ndk or houdini";
++std::string TranslatedAbis(std::string_view abilist) {
++    std::vector<std::string> translated;
++    for (const std::string& abi : android::base::Split(std::string(abilist), ",")) {
++        if (abi == "arm64-v8a" || abi == "armeabi-v7a" || abi == "armeabi") {
++            translated.push_back(abi);
+         }
+     }
+-
+-    FloralNativeBridgeConfig config = DefaultFloralNativeBridgeConfig();
+-    Json::StreamWriterBuilder writer;
+-    writer["indentation"] = "";
+-    config.policy_json = Json::writeString(writer, root);
+-
+-    const Json::Value public_abi = root["abi"]["public"];
+-    if (!public_abi.isNull()) {
+-        if (!public_abi.isObject()) {
+-            return android::base::Error() << "abi.public must be an object";
+-        }
+-        if (public_abi.isMember("64")) {
+-            auto parsed = ParseAbiList(public_abi["64"], "64");
+-            if (!parsed.ok()) return parsed.error();
+-            config.public_abis64 = std::move(*parsed);
+-        }
+-        if (public_abi.isMember("32")) {
+-            auto parsed = ParseAbiList(public_abi["32"], "32");
+-            if (!parsed.ok()) return parsed.error();
+-            config.public_abis32 = std::move(*parsed);
+-        }
+-    }
+-    return config;
++    return android::base::Join(translated, ",");
+ }
+ 
+-android::base::Result<FloralNativeBridgeConfig> ReadFloralNativeBridgeConfig(
+-        const std::string& path) {
+-    struct stat status = {};
+-    if (stat(path.c_str(), &status) != 0) {
+-        return android::base::ErrnoError() << "cannot stat nativebridge.json";
+-    }
+-    if (!S_ISREG(status.st_mode) || status.st_size < 0 ||
+-        static_cast<size_t>(status.st_size) > kMaximumConfigSize) {
+-        return android::base::Error() << "nativebridge.json must be a regular file no larger than "
+-                                      << kMaximumConfigSize << " bytes";
+-    }
+-
+-    std::string content;
+-    if (!android::base::ReadFileToString(path, &content)) {
+-        return android::base::ErrnoError() << "cannot read nativebridge.json";
+-    }
+-    return ParseFloralNativeBridgeConfig(content);
+-}
++}  // namespace
+ 
+ std::map<std::string, std::string> FloralNativeBridgeConfigProperties(
+-        const FloralNativeBridgeConfig& config,
+         const std::map<std::string, std::string>& build_properties) {
+     const std::string loader_abilist = PropertyOrDefault(
+-            build_properties, "ro.product.cpu.abilist", "x86_64,arm64-v8a,x86,armeabi-v7a,armeabi");
+-    const std::string loader_abilist32 = PropertyOrDefault(
+-            build_properties, "ro.product.cpu.abilist32", "x86,armeabi-v7a,armeabi");
+-    const std::string loader_abilist64 = PropertyOrDefault(
+-            build_properties, "ro.product.cpu.abilist64", "x86_64,arm64-v8a");
+-    const bool abi_virtualization_enabled =
++            build_properties, "ro.product.cpu.abilist", "");
++    const std::string loader_abilist32 = AbiPropertyOrDefault(build_properties, "32", "");
++    const std::string loader_abilist64 = AbiPropertyOrDefault(build_properties, "64", "");
++    std::string effective_loader_abilist = loader_abilist;
++    if (effective_loader_abilist.empty()) {
++        effective_loader_abilist = loader_abilist64;
++        if (!loader_abilist32.empty()) {
++            if (!effective_loader_abilist.empty()) {
++                effective_loader_abilist += ",";
++            }
++            effective_loader_abilist += loader_abilist32;
++        }
++    }
++    const bool virtualize_public_abis =
+             !PropertyEnabled(build_properties, "ro.floral.bridge.compat_aosp", false) &&
+-            PropertyEnabled(build_properties, "ro.floral.bridge.abi_virtualization", true);
+-    const bool virtualize_public_abis = abi_virtualization_enabled &&
++            PropertyEnabled(build_properties, "ro.floral.bridge.abi_virtualization", true) &&
+             PropertyOrDefault(build_properties, "ro.dalvik.vm.native.bridge", "") ==
+-            "libmixbridge.so";
+-    const std::string public_abilist = virtualize_public_abis
+-            ? JoinAbis(config.public_abis64, config.public_abis32) : loader_abilist;
+-    const std::string public_abilist32 = virtualize_public_abis
+-            ? android::base::Join(config.public_abis32, ",") : loader_abilist32;
+-    const std::string public_abilist64 = virtualize_public_abis
+-            ? android::base::Join(config.public_abis64, ",") : loader_abilist64;
++                    "libmixbridge.so";
+ 
+     return {
+-            {"ro.floral.nb.loadabi", loader_abilist},
++            {"ro.floral.nb.loadabi", effective_loader_abilist},
+             {"ro.floral.nb.loadabi32", loader_abilist32},
+             {"ro.floral.nb.loadabi64", loader_abilist64},
+-            {"ro.floral.nb.pubabi", public_abilist},
+-            {"ro.floral.nb.pubabi32", public_abilist32},
+-            {"ro.floral.nb.pubabi64", public_abilist64},
++            {"ro.floral.nb.pubabi",
++             virtualize_public_abis ? TranslatedAbis(effective_loader_abilist)
++                                    : effective_loader_abilist},
++            {"ro.floral.nb.pubabi32",
++             virtualize_public_abis ? TranslatedAbis(loader_abilist32) : loader_abilist32},
++            {"ro.floral.nb.pubabi64",
++             virtualize_public_abis ? TranslatedAbis(loader_abilist64) : loader_abilist64},
+     };
+ }
+ 
+diff --git a/init/floral_nativebridge_config.h b/init/floral_nativebridge_config.h
+index 2f7c53ccc..5cb3de66e 100644
+--- a/init/floral_nativebridge_config.h
++++ b/init/floral_nativebridge_config.h
+@@ -18,30 +18,12 @@
+ 
+ #include <map>
+ #include <string>
+-#include <string_view>
+-#include <vector>
+-
+-#include <android-base/result.h>
+ 
+ namespace android {
+ namespace init {
+ 
+-struct FloralNativeBridgeConfig {
+-    std::string policy_json;
+-    std::vector<std::string> public_abis64;
+-    std::vector<std::string> public_abis32;
+-};
+-
+-FloralNativeBridgeConfig DefaultFloralNativeBridgeConfig();
+-android::base::Result<FloralNativeBridgeConfig> ParseFloralNativeBridgeConfig(
+-        std::string_view content);
+-android::base::Result<FloralNativeBridgeConfig> ReadFloralNativeBridgeConfig(
+-        const std::string& path);
+-
+-// Keep build-owned ABI properties available to framework internals while the
+-// public Build ABI view is supplied by nativebridge.json.
++// Preserve the build-owned loader ABI list while exposing translated ABIs to apps.
+ std::map<std::string, std::string> FloralNativeBridgeConfigProperties(
+-        const FloralNativeBridgeConfig& config,
+         const std::map<std::string, std::string>& build_properties);
+ 
+ }  // namespace init
+diff --git a/init/floral_nativebridge_config_test.cpp b/init/floral_nativebridge_config_test.cpp
+index d88c9d81e..e32dd5735 100644
+--- a/init/floral_nativebridge_config_test.cpp
++++ b/init/floral_nativebridge_config_test.cpp
+@@ -21,64 +21,54 @@
+ namespace android {
+ namespace init {
+ 
+-TEST(FloralNativeBridgeConfig, ParsesPreferredBackendAndPublicAbis) {
+-    const auto config = ParseFloralNativeBridgeConfig(R"({
+-        "version": 1,
+-        "preferred_backend": "houdini",
+-        "abi": {"public": {"64": ["arm64-v8a"], "32": ["armeabi-v7a", "armeabi"]}},
+-        "packages": {}
+-    })");
+-    ASSERT_TRUE(config.ok()) << config.error();
+-    EXPECT_EQ(config->public_abis64, std::vector<std::string>({"arm64-v8a"}));
+-    EXPECT_EQ(config->public_abis32,
+-              std::vector<std::string>({"armeabi-v7a", "armeabi"}));
+-    EXPECT_NE(config->policy_json.find("preferred_backend"), std::string::npos);
+-}
++TEST(FloralNativeBridgeConfig, DerivesPublicAbisFromTranslatedLoaderAbis) {
++    const std::map<std::string, std::string> build = {
++            {"ro.product.cpu.abilist", "x86_64,arm64-v8a,x86,armeabi-v7a,armeabi"},
++            {"ro.product.cpu.abilist32", "x86,armeabi-v7a,armeabi"},
++            {"ro.product.cpu.abilist64", "x86_64,arm64-v8a"},
++            {"ro.dalvik.vm.native.bridge", "libmixbridge.so"},
++            {"ro.floral.bridge.abi_virtualization", "1"},
++    };
+ 
+-TEST(FloralNativeBridgeConfig, RejectsInvalidAbi) {
+-    const auto config = ParseFloralNativeBridgeConfig(R"({
+-        "version": 1,
+-        "default_backend": "ndk",
+-        "abi": {"public": {"64": ["mips64"]}}
+-    })");
+-    EXPECT_FALSE(config.ok());
++    const auto properties = FloralNativeBridgeConfigProperties(build);
++    EXPECT_EQ(properties.at("ro.floral.nb.loadabi"),
++              "x86_64,arm64-v8a,x86,armeabi-v7a,armeabi");
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi"),
++              "arm64-v8a,armeabi-v7a,armeabi");
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi32"), "armeabi-v7a,armeabi");
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi64"), "arm64-v8a");
+ }
+ 
+-TEST(FloralNativeBridgeConfig, RejectsNonSpecificPreferredBackend) {
+-    const auto config = ParseFloralNativeBridgeConfig(R"({
+-        "version": 1,
+-        "preferred_backend": "auto"
+-    })");
+-    EXPECT_FALSE(config.ok());
++TEST(FloralNativeBridgeConfig, KeepsArm32EmptyFor64BitOnlyProduct) {
++    const std::map<std::string, std::string> build = {
++            {"ro.system.product.cpu.abilist", "x86_64,arm64-v8a"},
++            {"ro.system.product.cpu.abilist64", "x86_64,arm64-v8a"},
++            {"ro.dalvik.vm.native.bridge", "libmixbridge.so"},
++            {"ro.floral.bridge.abi_virtualization", "1"},
++    };
++
++    const auto properties = FloralNativeBridgeConfigProperties(build);
++    EXPECT_EQ(properties.at("ro.floral.nb.loadabi"), "x86_64,arm64-v8a");
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi"), "arm64-v8a");
++    EXPECT_TRUE(properties.at("ro.floral.nb.pubabi32").empty());
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi64"), "arm64-v8a");
+ }
+ 
+-TEST(FloralNativeBridgeConfig, KeepsLoaderViewSeparate) {
+-    const auto config = DefaultFloralNativeBridgeConfig();
++TEST(FloralNativeBridgeConfig, SwitchesBackToLoaderAbiView) {
+     std::map<std::string, std::string> build = {
+             {"ro.product.cpu.abilist", "x86_64,arm64-v8a"},
+-            {"ro.product.cpu.abilist32", "x86,armeabi-v7a"},
+             {"ro.product.cpu.abilist64", "x86_64,arm64-v8a"},
+             {"ro.dalvik.vm.native.bridge", "libmixbridge.so"},
++            {"ro.floral.bridge.abi_virtualization", "0"},
+     };
+-    const auto properties = FloralNativeBridgeConfigProperties(config, build);
+-    EXPECT_EQ(properties.at("ro.floral.nb.loadabi"),
+-              "x86_64,arm64-v8a");
+-    EXPECT_EQ(properties.at("ro.floral.nb.pubabi"),
+-              "arm64-v8a,armeabi-v7a,armeabi");
+-
+-    build.erase("ro.dalvik.vm.native.bridge");
+-    const auto native_properties = FloralNativeBridgeConfigProperties(config, build);
+-    EXPECT_EQ(native_properties.at("ro.floral.nb.pubabi"), "x86_64,arm64-v8a");
+ 
+-    build["ro.dalvik.vm.native.bridge"] = "libmixbridge.so";
+-    build["ro.floral.bridge.abi_virtualization"] = "0";
+-    const auto disabled_properties = FloralNativeBridgeConfigProperties(config, build);
+-    EXPECT_EQ(disabled_properties.at("ro.floral.nb.pubabi"), "x86_64,arm64-v8a");
++    auto properties = FloralNativeBridgeConfigProperties(build);
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi"), "x86_64,arm64-v8a");
+ 
+-    build.erase("ro.floral.bridge.abi_virtualization");
++    build["ro.floral.bridge.abi_virtualization"] = "1";
+     build["ro.floral.bridge.compat_aosp"] = "1";
+-    const auto compat_properties = FloralNativeBridgeConfigProperties(config, build);
+-    EXPECT_EQ(compat_properties.at("ro.floral.nb.pubabi"), "x86_64,arm64-v8a");
++    properties = FloralNativeBridgeConfigProperties(build);
++    EXPECT_EQ(properties.at("ro.floral.nb.pubabi"), "x86_64,arm64-v8a");
+ }
+ 
+ }  // namespace init
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index 0728c49a6..f157e656a 100755
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -103,7 +103,6 @@ constexpr auto LEGACY_ID_PROP = "ro.build.legacy.id";
+ constexpr auto VBMETA_DIGEST_PROP = "ro.boot.vbmeta.digest";
+ constexpr auto DIGEST_SIZE_USED = 8;
+ constexpr auto FLORAL_DEVICE_PROFILE_PATH = "/ipc/floral_stream/device.prop";
+-constexpr auto FLORAL_NATIVEBRIDGE_CONFIG_PATH = "/ipc/floral_stream/nativebridge.json";
+ 
+ static bool persistent_properties_loaded = false;
+ 
+@@ -1115,23 +1114,7 @@ void PropertyLoadBootDefaults() {
+         properties.insert_or_assign(name, value);
+     }
+ 
+-    FloralNativeBridgeConfig nativebridge_config = DefaultFloralNativeBridgeConfig();
+-    if (access(FLORAL_NATIVEBRIDGE_CONFIG_PATH, F_OK) == 0) {
+-        auto mounted_config = ReadFloralNativeBridgeConfig(FLORAL_NATIVEBRIDGE_CONFIG_PATH);
+-        if (mounted_config.ok()) {
+-            nativebridge_config = std::move(*mounted_config);
+-            LOG(INFO) << "Using mounted Floral NativeBridge configuration";
+-        } else {
+-            LOG(WARNING) << "Ignoring invalid Floral NativeBridge configuration: "
+-                         << mounted_config.error();
+-        }
+-    } else if (errno == ENOENT) {
+-        LOG(INFO) << "Using default Floral NativeBridge configuration";
+-    } else {
+-        PLOG(WARNING) << "Cannot inspect Floral NativeBridge configuration; using defaults";
+-    }
+-    for (auto&& [name, value] :
+-         FloralNativeBridgeConfigProperties(nativebridge_config, properties)) {
++    for (auto&& [name, value] : FloralNativeBridgeConfigProperties(properties)) {
+         floral_properties.insert_or_assign(name, value);
+         properties.insert_or_assign(std::move(name), std::move(value));
+     }
+-- 
+2.47.3
+

@@ -1,0 +1,58 @@
+From c5b706ea73d7c274fbcecc975b3f6e5185a18d22 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 28 Aug 2026 12:54:30 +0800
+Subject: [PATCH] sepolicy: allow Floral LXCFS extended proc views
+
+Change-Id: I7575d5ebf6a61520251958e00df2e65f0278bf54
+---
+ prebuilts/api/31.0/private/floral_lxcfs_bind.te | 4 ++++
+ private/floral_lxcfs_bind.te                    | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+diff --git a/prebuilts/api/31.0/private/floral_lxcfs_bind.te b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
+index 0c61b30..e83f956 100644
+--- a/prebuilts/api/31.0/private/floral_lxcfs_bind.te
++++ b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
+@@ -26,6 +26,7 @@ allow floral_lxcfs_bind proc_mounts:file r_file_perms;
+ allow floral_lxcfs_bind {
+   proc_cpuinfo
+   proc_diskstats
++  proc_buddyinfo
+   proc_loadavg
+   proc_meminfo
+   proc_pressure_cpu
+@@ -35,6 +36,9 @@ allow floral_lxcfs_bind {
+   proc_stat
+   proc_swaps
+   proc_uptime
++  proc_version
++  proc_vmstat
++  proc_zoneinfo
+ }:file { getattr mounton };
+ allow floral_lxcfs_bind proc:dir { getattr search };
+ allow floral_lxcfs_bind {
+diff --git a/private/floral_lxcfs_bind.te b/private/floral_lxcfs_bind.te
+index 0c61b30..e83f956 100644
+--- a/private/floral_lxcfs_bind.te
++++ b/private/floral_lxcfs_bind.te
+@@ -26,6 +26,7 @@ allow floral_lxcfs_bind proc_mounts:file r_file_perms;
+ allow floral_lxcfs_bind {
+   proc_cpuinfo
+   proc_diskstats
++  proc_buddyinfo
+   proc_loadavg
+   proc_meminfo
+   proc_pressure_cpu
+@@ -35,6 +36,9 @@ allow floral_lxcfs_bind {
+   proc_stat
+   proc_swaps
+   proc_uptime
++  proc_version
++  proc_vmstat
++  proc_zoneinfo
+ }:file { getattr mounton };
+ allow floral_lxcfs_bind proc:dir { getattr search };
+ allow floral_lxcfs_bind {
+-- 
+2.47.3
+
