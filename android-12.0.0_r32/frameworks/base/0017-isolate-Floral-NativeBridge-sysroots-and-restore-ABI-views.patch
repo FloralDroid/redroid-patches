@@ -1,4 +1,4 @@
-From 0872505d257ee194aed054a65c6478f454b4edf1 Mon Sep 17 00:00:00 2001
+From 8061cf4d9e5d1a4c0415309780f3e0ec6de5013b Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 28 Aug 2026 02:19:19 +0800
 Subject: [PATCH] frameworks: isolate NativeBridge sysroots and restore ABI
@@ -8,11 +8,11 @@ Change-Id: I26c44194535a748e7818d27d63912ddc617d6595
 ---
  core/java/android/os/Build.java               |  15 +-
  core/java/android/os/ZygoteProcess.java       |   8 +-
- core/jni/com_android_internal_os_Zygote.cpp   |  95 ++++++++
+ core/jni/com_android_internal_os_Zygote.cpp   | 101 ++++++++
  .../server/am/FloralNativeBridgeManager.java  | 225 +++---------------
  .../com/android/server/am/ProcessList.java    |   4 +-
  .../java/com/android/server/SystemServer.java |   3 +
- 6 files changed, 137 insertions(+), 213 deletions(-)
+ 6 files changed, 143 insertions(+), 213 deletions(-)
 
 diff --git a/core/java/android/os/Build.java b/core/java/android/os/Build.java
 index ba380545ac6b..7ead13038b7e 100755
@@ -82,10 +82,10 @@ index 45e97953f431..823ee6c50107 100644
      }
  
 diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
-index 0803e07dc588..a9c85565693c 100644
+index 0803e07dc588..164fe9a31f60 100644
 --- a/core/jni/com_android_internal_os_Zygote.cpp
 +++ b/core/jni/com_android_internal_os_Zygote.cpp
-@@ -789,6 +789,96 @@ static void BindMount(const std::string& source_dir, const std::string& target_d
+@@ -789,6 +789,102 @@ static void BindMount(const std::string& source_dir, const std::string& target_d
    }
  }
  
@@ -97,6 +97,12 @@ index 0803e07dc588..a9c85565693c 100644
 +          ? backend : backend.substr(0, separator);
 +  if (backend_name != "ndk" && backend_name != "houdini") {
 +    fail_fn(CREATE_ERROR("Unknown Floral NativeBridge backend: %s", backend.c_str()));
++    return;
++  }
++
++  // NDK Translation uses the ARM guest userspace produced by this AOSP
++  // build. Only Houdini owns a private guest sysroot that must be mounted.
++  if (backend_name == "ndk") {
 +    return;
 +  }
 +
@@ -182,7 +188,7 @@ index 0803e07dc588..a9c85565693c 100644
  static void MountAppDataTmpFs(const std::string& target_dir,
                        fail_fn_t fail_fn) {
    if (TEMP_FAILURE_RETRY(mount("tmpfs", target_dir.c_str(), "tmpfs",
-@@ -1594,6 +1684,11 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+@@ -1594,6 +1690,11 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
      // Make sure app is running in its own mount namespace before isolating its data directories.
      ensureInAppMountNamespace(fail_fn);
  
