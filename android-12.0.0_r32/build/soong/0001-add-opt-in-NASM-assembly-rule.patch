@@ -1,0 +1,278 @@
+From fde25644e4736d7f490aeeb824e24ee72e3c882b Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 28 Aug 2026 20:39:27 +0800
+Subject: [PATCH] build/soong: add opt-in NASM assembly rule
+
+Change-Id: If82005301eb6e988263f4199fe549b8b722a36bd
+---
+ cc/builder.go  | 42 +++++++++++++++++++++++++++++++++++++-----
+ cc/cc.go       |  2 ++
+ cc/cc_test.go  | 42 ++++++++++++++++++++++++++++++++++++++++++
+ cc/compiler.go | 12 ++++++++++++
+ cc/library.go  |  1 +
+ cc/util.go     |  2 ++
+ 6 files changed, 96 insertions(+), 5 deletions(-)
+
+diff --git a/cc/builder.go b/cc/builder.go
+index 51c8a0bdf..2a9ba806f 100644
+--- a/cc/builder.go
++++ b/cc/builder.go
+@@ -25,6 +25,7 @@ import (
+ 
+ 	"github.com/google/blueprint"
+ 	"github.com/google/blueprint/pathtools"
++	"github.com/google/blueprint/proptools"
+ 
+ 	"android/soong/android"
+ 	"android/soong/cc/config"
+@@ -213,6 +214,8 @@ var (
+ 		}, []string{"cFlags", "tidyFlags"}, []string{})
+ 
+ 	_ = pctx.SourcePathVariable("yasmCmd", "prebuilts/misc/${config.HostPrebuiltTag}/yasm/yasm")
++	_ = pctx.SourcePathVariableWithEnvOverride("nasmCmd",
++		"prebuilts/misc/${config.HostPrebuiltTag}/nasm/nasm", "SOONG_NASM")
+ 
+ 	// Rule for invoking yasm to compile .asm assembly files.
+ 	yasm = pctx.AndroidStaticRule("yasm",
+@@ -224,6 +227,17 @@ var (
+ 		},
+ 		"asFlags")
+ 
++	// Rule for invoking NASM to compile .asm assembly files. The command is
++	// opt-in per module through the `nasm` compiler property.
++	nasm = pctx.AndroidStaticRule("nasm",
++		blueprint.RuleParams{
++			Command:     "$nasmCmd $nasmFlags -o $out $in && $nasmCmd $nasmFlags -M $in >$out.d",
++			CommandDeps: []string{"$nasmCmd"},
++			Depfile:     "$out.d",
++			Deps:        blueprint.DepsGCC,
++		},
++		"nasmFlags")
++
+ 	// Rule to invoke windres, for interaction with Windows resources.
+ 	windres = pctx.AndroidStaticRule("windres",
+ 		blueprint.RuleParams{
+@@ -359,6 +373,7 @@ type builderFlags struct {
+ 	localCommonFlags     string
+ 	localAsFlags         string
+ 	localYasmFlags       string
++	localNasmFlags       string
+ 	localCFlags          string
+ 	localToolingCFlags   string // A separate set of cFlags for clang LibTooling tools
+ 	localToolingCppFlags string // A separate set of cppFlags for clang LibTooling tools
+@@ -373,6 +388,7 @@ type builderFlags struct {
+ 	aidlFlags     string // Flags that apply to aidl source files
+ 	rsFlags       string // Flags that apply to renderscript source files
+ 	toolchain     config.Toolchain
++	nasm          bool
+ 
+ 	// True if these extra features are enabled.
+ 	tidy         bool
+@@ -513,16 +529,32 @@ func transformSourceToObj(ctx android.ModuleContext, subdir string, srcFiles and
+ 		// Register compilation build statements. The actual rule used depends on the source file type.
+ 		switch srcFile.Ext() {
+ 		case ".asm":
++			rule := yasm
++			description := "yasm "
++			args := map[string]string{
++				"asFlags": flags.globalYasmFlags + " " + flags.localYasmFlags,
++			}
++			if flags.nasm {
++				// NASM resolves basename includes relative to its include path, while
++				// FFmpeg assembly sources include helpers from their own directory.
++				nasmFlags := flags.localNasmFlags
++				if sourceDir := filepath.Dir(srcFile.Rel()); sourceDir != "." {
++					nasmFlags += " " + proptools.NinjaAndShellEscape("-I"+sourceDir)
++				}
++				rule = nasm
++				description = "nasm "
++				args = map[string]string{
++					"nasmFlags": nasmFlags,
++				}
++			}
+ 			ctx.Build(pctx, android.BuildParams{
+-				Rule:        yasm,
+-				Description: "yasm " + srcFile.Rel(),
++				Rule:        rule,
++				Description: description + srcFile.Rel(),
+ 				Output:      objFile,
+ 				Input:       srcFile,
+ 				Implicits:   cFlagsDeps,
+ 				OrderOnly:   pathDeps,
+-				Args: map[string]string{
+-					"asFlags": flags.globalYasmFlags + " " + flags.localYasmFlags,
+-				},
++				Args:        args,
+ 			})
+ 			continue
+ 		case ".rc":
+diff --git a/cc/cc.go b/cc/cc.go
+index c62fd6c8f..68c9e92e0 100644
+--- a/cc/cc.go
++++ b/cc/cc.go
+@@ -193,6 +193,7 @@ type LocalOrGlobalFlags struct {
+ 	CommonFlags     []string // Flags that apply to C, C++, and assembly source files
+ 	AsFlags         []string // Flags that apply to assembly source files
+ 	YasmFlags       []string // Flags that apply to yasm assembly source files
++	NasmFlags       []string // Flags that apply to nasm assembly source files
+ 	CFlags          []string // Flags that apply to C and C++ source files
+ 	ToolingCFlags   []string // Flags that apply to C and C++ source files parsed by clang LibTooling tools
+ 	ConlyFlags      []string // Flags that apply to C source files
+@@ -221,6 +222,7 @@ type Flags struct {
+ 	SystemIncludeFlags []string
+ 
+ 	Toolchain    config.Toolchain
++	Nasm         bool // Use NASM instead of Yasm for .asm sources.
+ 	Tidy         bool // True if clang-tidy is enabled.
+ 	GcovCoverage bool // True if coverage files should be generated.
+ 	SAbiDump     bool // True if header abi dumps should be generated.
+diff --git a/cc/cc_test.go b/cc/cc_test.go
+index 5acafbe2a..f18db1687 100644
+--- a/cc/cc_test.go
++++ b/cc/cc_test.go
+@@ -3152,6 +3152,48 @@ func TestCompilerFlags(t *testing.T) {
+ 	}
+ }
+ 
++func TestNasmAssemblyRule(t *testing.T) {
++	ctx := PrepareForTestWithCcBuildComponents.RunTestWithBp(t, `
++		cc_object {
++			name: "nasm_obj",
++			srcs: ["sub/foo.asm"],
++			stl: "none",
++			nasm: true,
++			nasm_flags: ["-felf64"],
++		}
++		cc_object {
++			name: "yasm_obj",
++			srcs: ["sub/foo.asm"],
++			stl: "none",
++		}
++	`).TestContext
++
++	variants := ctx.ModuleVariantsForTests("nasm_obj")
++	if len(variants) == 0 {
++		t.Fatal("nasm_obj has no variants")
++	}
++
++	nasmRule := ctx.ModuleForTests("nasm_obj", variants[0]).Rule("nasm")
++	if !strings.Contains(nasmRule.Description, "nasm ") {
++		t.Fatalf("expected NASM description, got %q", nasmRule.Description)
++	}
++	if !strings.Contains(nasmRule.Args["nasmFlags"], "-felf64") {
++		t.Fatalf("expected NASM format flag, got %q", nasmRule.Args["nasmFlags"])
++	}
++	if !strings.Contains(nasmRule.Args["nasmFlags"], "-Isub") {
++		t.Fatalf("expected source directory include flag, got %q", nasmRule.Args["nasmFlags"])
++	}
++
++	yasmVariants := ctx.ModuleVariantsForTests("yasm_obj")
++	if len(yasmVariants) == 0 {
++		t.Fatal("yasm_obj has no variants")
++	}
++	yasmRule := ctx.ModuleForTests("yasm_obj", yasmVariants[0]).Rule("yasm")
++	if !strings.Contains(yasmRule.Description, "yasm ") {
++		t.Fatalf("expected default Yasm description, got %q", yasmRule.Description)
++	}
++}
++
+ func TestRecovery(t *testing.T) {
+ 	ctx := testCc(t, `
+ 		cc_library_shared {
+diff --git a/cc/compiler.go b/cc/compiler.go
+index 78a5a5da3..a9587ab9c 100644
+--- a/cc/compiler.go
++++ b/cc/compiler.go
+@@ -55,6 +55,12 @@ type BaseCompilerProperties struct {
+ 	// list of module-specific flags that will be used for .S compiles
+ 	Asflags []string `android:"arch_variant"`
+ 
++	// use the host NASM executable for .asm compiles instead of the AOSP Yasm prebuilt
++	Nasm *bool `android:"arch_variant"`
++
++	// list of module-specific flags that will be used for NASM .asm compiles
++	Nasm_flags []string `android:"arch_variant"`
++
+ 	// list of module-specific flags that will be used for C and C++ compiles when
+ 	// compiling with clang
+ 	Clang_cflags []string `android:"arch_variant"`
+@@ -298,6 +304,7 @@ func addToModuleList(ctx ModuleContext, key android.OnceKey, module string) {
+ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps PathDeps) Flags {
+ 	tc := ctx.toolchain()
+ 	modulePath := android.PathForModuleSrc(ctx).String()
++	flags.Nasm = Bool(compiler.Properties.Nasm)
+ 
+ 	compiler.srcsBeforeGen = android.PathsForModuleSrcExcludes(ctx, compiler.Properties.Srcs, compiler.Properties.Exclude_srcs)
+ 	compiler.srcsBeforeGen = append(compiler.srcsBeforeGen, deps.GeneratedSources...)
+@@ -306,6 +313,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
+ 	CheckBadCompilerFlags(ctx, "cppflags", compiler.Properties.Cppflags)
+ 	CheckBadCompilerFlags(ctx, "conlyflags", compiler.Properties.Conlyflags)
+ 	CheckBadCompilerFlags(ctx, "asflags", compiler.Properties.Asflags)
++	CheckBadCompilerFlags(ctx, "nasm_flags", compiler.Properties.Nasm_flags)
+ 	CheckBadCompilerFlags(ctx, "vendor.cflags", compiler.Properties.Target.Vendor.Cflags)
+ 	CheckBadCompilerFlags(ctx, "product.cflags", compiler.Properties.Target.Product.Cflags)
+ 	CheckBadCompilerFlags(ctx, "recovery.cflags", compiler.Properties.Target.Recovery.Cflags)
+@@ -318,6 +326,7 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
+ 	flags.Local.ConlyFlags = append(flags.Local.ConlyFlags, esc(compiler.Properties.Conlyflags)...)
+ 	flags.Local.AsFlags = append(flags.Local.AsFlags, esc(compiler.Properties.Asflags)...)
+ 	flags.Local.YasmFlags = append(flags.Local.YasmFlags, esc(compiler.Properties.Asflags)...)
++	flags.Local.NasmFlags = append(flags.Local.NasmFlags, esc(compiler.Properties.Nasm_flags)...)
+ 
+ 	flags.Yacc = compiler.Properties.Yacc
+ 	flags.Lex = compiler.Properties.Lex
+@@ -328,17 +337,20 @@ func (compiler *baseCompiler) compilerFlags(ctx ModuleContext, flags Flags, deps
+ 		f := includeDirsToFlags(localIncludeDirs)
+ 		flags.Local.CommonFlags = append(flags.Local.CommonFlags, f)
+ 		flags.Local.YasmFlags = append(flags.Local.YasmFlags, f)
++		flags.Local.NasmFlags = append(flags.Local.NasmFlags, f)
+ 	}
+ 	rootIncludeDirs := android.PathsForSource(ctx, compiler.Properties.Include_dirs)
+ 	if len(rootIncludeDirs) > 0 {
+ 		f := includeDirsToFlags(rootIncludeDirs)
+ 		flags.Local.CommonFlags = append(flags.Local.CommonFlags, f)
+ 		flags.Local.YasmFlags = append(flags.Local.YasmFlags, f)
++		flags.Local.NasmFlags = append(flags.Local.NasmFlags, f)
+ 	}
+ 
+ 	if compiler.includeBuildDirectory() {
+ 		flags.Local.CommonFlags = append(flags.Local.CommonFlags, "-I"+modulePath)
+ 		flags.Local.YasmFlags = append(flags.Local.YasmFlags, "-I"+modulePath)
++		flags.Local.NasmFlags = append(flags.Local.NasmFlags, "-I"+modulePath)
+ 	}
+ 
+ 	if !(ctx.useSdk() || ctx.useVndk()) || ctx.Host() {
+diff --git a/cc/library.go b/cc/library.go
+index 1ba359758..4d75cfb2e 100644
+--- a/cc/library.go
++++ b/cc/library.go
+@@ -765,6 +765,7 @@ func (library *libraryDecorator) compilerFlags(ctx ModuleContext, flags Flags, d
+ 		f := includeDirsToFlags(exportIncludeDirs)
+ 		flags.Local.CommonFlags = append(flags.Local.CommonFlags, f)
+ 		flags.Local.YasmFlags = append(flags.Local.YasmFlags, f)
++		flags.Local.NasmFlags = append(flags.Local.NasmFlags, f)
+ 	}
+ 
+ 	flags = library.baseCompiler.compilerFlags(ctx, flags, deps)
+diff --git a/cc/util.go b/cc/util.go
+index 1220d8432..b9e63158d 100644
+--- a/cc/util.go
++++ b/cc/util.go
+@@ -68,6 +68,7 @@ func flagsToBuilderFlags(in Flags) builderFlags {
+ 		localCommonFlags:     strings.Join(in.Local.CommonFlags, " "),
+ 		localAsFlags:         strings.Join(in.Local.AsFlags, " "),
+ 		localYasmFlags:       strings.Join(in.Local.YasmFlags, " "),
++		localNasmFlags:       strings.Join(in.Local.NasmFlags, " "),
+ 		localCFlags:          strings.Join(in.Local.CFlags, " "),
+ 		localToolingCFlags:   strings.Join(in.Local.ToolingCFlags, " "),
+ 		localToolingCppFlags: strings.Join(in.Local.ToolingCppFlags, " "),
+@@ -82,6 +83,7 @@ func flagsToBuilderFlags(in Flags) builderFlags {
+ 		tidyFlags:     strings.Join(in.TidyFlags, " "),
+ 		sAbiFlags:     strings.Join(in.SAbiFlags, " "),
+ 		toolchain:     in.Toolchain,
++		nasm:          in.Nasm,
+ 		gcovCoverage:  in.GcovCoverage,
+ 		tidy:          in.Tidy,
+ 		sAbiDump:      in.SAbiDump,
+-- 
+2.47.3
+
