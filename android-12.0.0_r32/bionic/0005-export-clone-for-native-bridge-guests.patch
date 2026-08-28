@@ -1,20 +1,19 @@
-From 922e36bdd55c09a84a2c66013e09b77e4bcab1c0 Mon Sep 17 00:00:00 2001
+From 656496f412ee2fe702a48c9bfc99c2e17ed8095d Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
-Date: Fri, 28 Aug 2026 22:00:00 +0800
+Date: Fri, 28 Aug 2026 22:05:19 +0800
 Subject: [PATCH] bionic: export clone-for-fork for NativeBridge guests
 
-The NDK translation runtime resolves __clone_for_fork from the guest libc
-during backend initialization. Keep the symbol hidden in regular libc builds,
-but export it from the native-bridge guest variant.
+The NDK translation runtime resolves __clone_for_fork from the guest libc during backend initialization. Keep the symbol hidden in regular libc builds, but export it from the native-bridge guest variant.
 
 Change-Id: I874b0b1724b95338cf70bbf49243a97be7840528
 ---
- libc/bionic/fork.cpp            | 2 +-
- libc/libc.map.txt               | 1 +
- libc/private/bionic_defs.h      | 3 +++
+ libc/bionic/fork.cpp       | 2 +-
+ libc/libc.map.txt          | 1 +
+ libc/private/bionic_defs.h | 3 +++
  3 files changed, 5 insertions(+), 1 deletion(-)
 
 diff --git a/libc/bionic/fork.cpp b/libc/bionic/fork.cpp
+index d432c6db7..651d5a52b 100644
 --- a/libc/bionic/fork.cpp
 +++ b/libc/bionic/fork.cpp
 @@ -34,7 +34,7 @@
@@ -27,14 +26,19 @@ diff --git a/libc/bionic/fork.cpp b/libc/bionic/fork.cpp
    pthread_internal_t* self = __get_thread();
  
 diff --git a/libc/libc.map.txt b/libc/libc.map.txt
+index 5859b6bf2..6c34162ad 100644
 --- a/libc/libc.map.txt
 +++ b/libc/libc.map.txt
-@@ -1569,3 +1569,4 @@
+@@ -1566,6 +1566,7 @@ LIBC_S { # introduced=S
+ 
+ LIBC_PRIVATE {
+   global:
 +    __clone_for_fork; # arm arm64
+     __floral_nativebridge_set_guest_arch;
      __accept4; # arm x86
      __adddf3; # arm
-     __addsf3; # arm
 diff --git a/libc/private/bionic_defs.h b/libc/private/bionic_defs.h
+index 5a48f259c..8fa100eb6 100644
 --- a/libc/private/bionic_defs.h
 +++ b/libc/private/bionic_defs.h
 @@ -38,10 +38,13 @@
@@ -53,3 +57,4 @@ diff --git a/libc/private/bionic_defs.h b/libc/private/bionic_defs.h
  #endif /* __BIONIC_PRIVATE_BIONIC_DEFS_H_ */
 -- 
 2.47.3
+
