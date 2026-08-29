@@ -1,39 +1,19 @@
-From 2138852978f0374217dfd1aa3e42a24450c27e15 Mon Sep 17 00:00:00 2001
+From 21c8688fe2150b1e047e3a609f4ffb56830de0cf Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 28 Aug 2026 01:07:32 +0800
 Subject: [PATCH] linkerconfig: permit isolated Floral NativeBridge sysroots
 
 Change-Id: If2dd6fe122e2820a8b0e0a86c00558d0ee34704e
 ---
- contents/namespace/sphal.cc                        |  4 ++++
- contents/namespace/systemdefault.cc                |  7 +++++++
- .../tests/backward_compatibility/default_test.cc   | 14 ++++++++++++++
- 3 files changed, 25 insertions(+)
+ contents/namespace/systemdefault.cc                   | 5 +++++
+ contents/tests/backward_compatibility/default_test.cc | 4 ++++
+ 2 files changed, 9 insertions(+)
 
-diff --git a/contents/namespace/sphal.cc b/contents/namespace/sphal.cc
-index 729b9b0..2a2146d 100644
---- a/contents/namespace/sphal.cc
-+++ b/contents/namespace/sphal.cc
-@@ -41,10 +41,14 @@ Namespace BuildSphalNamespace([[maybe_unused]] const Context& ctx) {
-   ns.AddSearchPath("/vendor/${LIB}");
-   ns.AddSearchPath("/vendor/${LIB}/egl");
-   ns.AddSearchPath("/vendor/${LIB}/hw");
-+  ns.AddSearchPath("/system/${LIB}/arm");
-+  ns.AddSearchPath("/system/${LIB}/arm64");
- 
-   ns.AddPermittedPath("/odm/${LIB}");
-   ns.AddPermittedPath("/vendor/${LIB}");
-   ns.AddPermittedPath("/system/vendor/${LIB}");
-+  ns.AddPermittedPath("/system/${LIB}/arm");
-+  ns.AddPermittedPath("/system/${LIB}/arm64");
- 
-   if (ctx.IsApexBinaryConfig() && !ctx.IsVndkAvailable()) {
-     // If device is legacy, let Sphal libraries access to system lib path for
 diff --git a/contents/namespace/systemdefault.cc b/contents/namespace/systemdefault.cc
-index 0d5c42b..7fbaa2a 100644
+index 0d5c42b..19361fc 100644
 --- a/contents/namespace/systemdefault.cc
 +++ b/contents/namespace/systemdefault.cc
-@@ -72,6 +72,13 @@ void SetupSystemPermittedPaths(Namespace* ns) {
+@@ -72,6 +72,11 @@ void SetupSystemPermittedPaths(Namespace* ns) {
        "/mnt/expand",
        "/apex/com.android.runtime/${LIB}/bionic",
        "/system/${LIB}/bootstrap",
@@ -42,16 +22,14 @@ index 0d5c42b..7fbaa2a 100644
 +      // standard system library directories.
 +      "/system/floral/ndk/${LIB}",
 +      "/system/floral/houdini/${LIB}",
-+      "/system/${LIB}/arm",
-+      "/system/${LIB}/arm64",
    };
  
    for (const std::string& path : permitted_paths) {
 diff --git a/contents/tests/backward_compatibility/default_test.cc b/contents/tests/backward_compatibility/default_test.cc
-index 36ebc52..1326c52 100644
+index 36ebc52..d05252a 100644
 --- a/contents/tests/backward_compatibility/default_test.cc
 +++ b/contents/tests/backward_compatibility/default_test.cc
-@@ -55,6 +55,14 @@ TEST_F(linkerconfig_default_backward_compatibility, common_system_section) {
+@@ -55,6 +55,10 @@ TEST_F(linkerconfig_default_backward_compatibility, common_system_section) {
    ASSERT_TRUE(ContainsPermittedPath(default_namespace, "/odm/framework"));
    ASSERT_TRUE(ContainsPermittedPath(default_namespace, "/odm/app"));
    ASSERT_TRUE(ContainsPermittedPath(default_namespace, "/odm/priv-app"));
@@ -59,30 +37,9 @@ index 36ebc52..1326c52 100644
 +      default_namespace, "/system/floral/ndk/${LIB}"));
 +  ASSERT_TRUE(ContainsPermittedPath(
 +      default_namespace, "/system/floral/houdini/${LIB}"));
-+  ASSERT_TRUE(
-+      ContainsPermittedPath(default_namespace, "/system/${LIB}/arm"));
-+  ASSERT_TRUE(
-+      ContainsPermittedPath(default_namespace, "/system/${LIB}/arm64"));
  
    auto sphal_namespace = system_section->GetNamespace("sphal");
    ASSERT_TRUE(sphal_namespace);
-@@ -62,10 +70,16 @@ TEST_F(linkerconfig_default_backward_compatibility, common_system_section) {
-   ASSERT_TRUE(ContainsSearchPath(sphal_namespace, "/odm/${LIB}"));
-   ASSERT_TRUE(ContainsSearchPath(sphal_namespace, "/vendor/${LIB}"));
-   ASSERT_TRUE(ContainsSearchPath(sphal_namespace, "/vendor/${LIB}/hw"));
-+  ASSERT_TRUE(ContainsSearchPath(sphal_namespace, "/system/${LIB}/arm"));
-+  ASSERT_TRUE(ContainsSearchPath(sphal_namespace, "/system/${LIB}/arm64"));
- 
-   ASSERT_TRUE(ContainsPermittedPath(sphal_namespace, "/odm/${LIB}"));
-   ASSERT_TRUE(ContainsPermittedPath(sphal_namespace, "/vendor/${LIB}"));
-   ASSERT_TRUE(ContainsPermittedPath(sphal_namespace, "/system/vendor/${LIB}"));
-+  ASSERT_TRUE(
-+      ContainsPermittedPath(sphal_namespace, "/system/${LIB}/arm"));
-+  ASSERT_TRUE(
-+      ContainsPermittedPath(sphal_namespace, "/system/${LIB}/arm64"));
- 
-   auto rs_namespace = system_section->GetNamespace("rs");
-   ASSERT_TRUE(rs_namespace);
 -- 
 2.47.3
 

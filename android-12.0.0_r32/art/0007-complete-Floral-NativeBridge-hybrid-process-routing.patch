@@ -1,4 +1,4 @@
-From c4ea162fc09c76adae432159a467ae6455824706 Mon Sep 17 00:00:00 2001
+From 1f00e277d0c2e6522b86339e1715ea444c127819 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 26 Aug 2026 16:47:05 +0800
 Subject: [PATCH] art: complete Floral NativeBridge hybrid process routing
@@ -10,7 +10,7 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  .../include/nativebridge/native_bridge.h      |   5 +-
  .../nativebridge/native_bridge_diagnostics.h  | 121 +++++++
  libnativebridge/libnativebridge.map.txt       |   3 +
- libnativebridge/native_bridge.cc              | 190 ++++-------
+ libnativebridge/native_bridge.cc              | 112 +++++--
  libnativebridge/native_bridge_lazy.cc         |  19 +-
  libnativeloader/Android.bp                    |   1 -
  libnativeloader/library_namespaces.cpp        |  46 +--
@@ -27,14 +27,14 @@ Change-Id: If7dccd9af4dc6348df71d6684032a541e35f08a8
  runtime/native_bridge_art_interface.cc        |  36 ++
  runtime/native_bridge_art_interface.h         |   2 +
  runtime/runtime.cc                            |   2 +-
- 22 files changed, 603 insertions(+), 558 deletions(-)
+ 22 files changed, 617 insertions(+), 466 deletions(-)
  delete mode 100644 libnativebridge/include-private/nativebridge/native_bridge_private.h
  create mode 100644 libnativebridge/include/nativebridge/native_bridge_diagnostics.h
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.cc
  create mode 100644 runtime/jni/floral_nativebridge_diagnostics.h
 
 diff --git a/libnativebridge/Android.bp b/libnativebridge/Android.bp
-index 642e751..1e8ebd4 100644
+index 642e751b44..1e8ebd4a4f 100644
 --- a/libnativebridge/Android.bp
 +++ b/libnativebridge/Android.bp
 @@ -40,26 +40,6 @@ cc_library_headers {
@@ -82,7 +82,7 @@ index 642e751..1e8ebd4 100644
  }
 diff --git a/libnativebridge/include-private/nativebridge/native_bridge_private.h b/libnativebridge/include-private/nativebridge/native_bridge_private.h
 deleted file mode 100644
-index cf63c8f..0000000
+index cf63c8f876..0000000000
 --- a/libnativebridge/include-private/nativebridge/native_bridge_private.h
 +++ /dev/null
 @@ -1,21 +0,0 @@
@@ -108,7 +108,7 @@ index cf63c8f..0000000
 -
 -#endif  // ART_LIBNATIVEBRIDGE_INCLUDE_PRIVATE_NATIVEBRIDGE_NATIVE_BRIDGE_PRIVATE_H_
 diff --git a/libnativebridge/include/nativebridge/native_bridge.h b/libnativebridge/include/nativebridge/native_bridge.h
-index 02fd404..09dd1c9 100644
+index 02fd404c5e..09dd1c9932 100644
 --- a/libnativebridge/include/nativebridge/native_bridge.h
 +++ b/libnativebridge/include/nativebridge/native_bridge.h
 @@ -59,11 +59,14 @@ bool PreInitializeNativeBridge(const char* app_data_dir, const char* instruction
@@ -129,7 +129,7 @@ index 02fd404..09dd1c9 100644
  bool InitializeNativeBridge(JNIEnv* env, const char* instruction_set);
 diff --git a/libnativebridge/include/nativebridge/native_bridge_diagnostics.h b/libnativebridge/include/nativebridge/native_bridge_diagnostics.h
 new file mode 100644
-index 0000000..b28fed3
+index 0000000000..b28fed35e0
 --- /dev/null
 +++ b/libnativebridge/include/nativebridge/native_bridge_diagnostics.h
 @@ -0,0 +1,121 @@
@@ -255,7 +255,7 @@ index 0000000..b28fed3
 +
 +#endif  // ART_LIBNATIVEBRIDGE_INCLUDE_NATIVEBRIDGE_NATIVE_BRIDGE_DIAGNOSTICS_H_
 diff --git a/libnativebridge/libnativebridge.map.txt b/libnativebridge/libnativebridge.map.txt
-index cd28465..6b4b901 100644
+index cd28465067..6b4b90133a 100644
 --- a/libnativebridge/libnativebridge.map.txt
 +++ b/libnativebridge/libnativebridge.map.txt
 @@ -27,7 +27,10 @@ LIBNATIVEBRIDGE_1 {
@@ -270,7 +270,7 @@ index cd28465..6b4b901 100644
      *;
  };
 diff --git a/libnativebridge/native_bridge.cc b/libnativebridge/native_bridge.cc
-index 4cccf12..2d009e3 100644
+index 4cccf12c30..307620f811 100644
 --- a/libnativebridge/native_bridge.cc
 +++ b/libnativebridge/native_bridge.cc
 @@ -17,7 +17,6 @@
@@ -281,15 +281,7 @@ index 4cccf12..2d009e3 100644
  
  #include <dlfcn.h>
  #include <errno.h>
-@@ -28,7 +27,6 @@
- #include <unistd.h>
- 
- #include <cstring>
--#include <string>
- 
- #include <android-base/macros.h>
- #include <android-base/properties.h>
-@@ -116,6 +114,11 @@ static const char* GetNativeBridgeStateString(NativeBridgeState state) {
+@@ -116,6 +115,11 @@ static const char* GetNativeBridgeStateString(NativeBridgeState state) {
  
  // Current state of the native bridge.
  static NativeBridgeState state = NativeBridgeState::kNotSetup;
@@ -301,7 +293,7 @@ index 4cccf12..2d009e3 100644
  
  // The version of NativeBridge implementation.
  // Different Nativebridge interface needs the service of different version of
-@@ -141,22 +144,6 @@ static bool had_error = false;
+@@ -141,16 +145,12 @@ static bool had_error = false;
  
  // Handle of the loaded library.
  static void* native_bridge_handle = nullptr;
@@ -309,148 +301,78 @@ index 4cccf12..2d009e3 100644
 -// package rule, then releases it after ART owns the selected backend callbacks.
 -// Application callbacks and namespace operations therefore cannot return to
 -// libmixbridge after the direct binding point.
--static void* floral_router_handle = nullptr;
--static bool floral_direct_backend_bound = false;
++// Direct mode briefly uses the aggregate router to resolve the selected
++// backend, then releases it after ART owns the backend callbacks.
+ static void* floral_router_handle = nullptr;
+ static bool floral_direct_backend_bound = false;
 -// A direct package must never continue with the aggregate router after its
 -// selected backend failed to bind. The flag is consumed by
 -// PreInitializeNativeBridge(), which is the last point before callbacks become
 -// visible to the application process.
--static bool floral_direct_bind_failed = false;
--
--static bool FloralNativeLoaderEnabled() {
--  return !android::base::GetBoolProperty("ro.floral.bridge.compat_aosp", false) &&
--         android::base::GetBoolProperty("ro.floral.bridge.nativeloader", true);
--}
- // Pointer to the callbacks. Available as soon as LoadNativeBridge succeeds, but only initialized
- // later.
- static const NativeBridgeCallbacks* callbacks = nullptr;
-@@ -224,27 +211,24 @@ bool NativeBridgeNameAcceptable(const char* nb_library_filename) {
++// Never continue with the aggregate router after a direct backend failed to
++// bind. PreInitializeNativeBridge consumes this before callbacks are exposed.
+ static bool floral_direct_bind_failed = false;
+ 
+ static bool FloralNativeLoaderEnabled() {
+@@ -224,7 +224,8 @@ bool NativeBridgeNameAcceptable(const char* nb_library_filename) {
  
  // The policy of invoking Nativebridge changed in v3 with/without namespace.
  // Suggest Nativebridge implementation not maintain backward-compatible.
 -static bool isCompatibleWithCallbacks(const NativeBridgeCallbacks* cbs, const uint32_t version) {
-+static bool isCompatibleWith(const uint32_t version) {
++static bool isCompatibleWithCallbacks(const NativeBridgeCallbacks* cbs,
++                                      const uint32_t version) {
    // Libnativebridge is now designed to be forward-compatible. So only "0" is an unsupported
    // version.
--  if (cbs == nullptr || cbs->version == 0 || version == 0) {
-+  if (callbacks == nullptr || callbacks->version == 0 || version == 0) {
-     return false;
-   }
+   if (cbs == nullptr || cbs->version == 0 || version == 0) {
+@@ -245,6 +246,7 @@ static bool isCompatibleWith(const uint32_t version) {
  
-   // If this is a v2+ bridge, it may not be forwards- or backwards-compatible. Check.
--  if (cbs->version >= SIGNAL_VERSION) {
--    return cbs->isCompatibleWith(version);
-+  if (callbacks->version >= SIGNAL_VERSION) {
-+    return callbacks->isCompatibleWith(version);
-   }
- 
-   return true;
- }
- 
--static bool isCompatibleWith(const uint32_t version) {
--  return isCompatibleWithCallbacks(callbacks, version);
--}
--
  static void CloseNativeBridge(bool with_error) {
    state = NativeBridgeState::kClosed;
 +  floral_process_context_selected = false;
    had_error |= with_error;
    ReleaseAppCodeCacheDir();
  }
-@@ -265,10 +249,6 @@ bool LoadNativeBridge(const char* nb_library_filename,
+@@ -426,16 +428,17 @@ static bool BindFloralDirectBackend(void* router_handle) {
+   auto prepare_direct_backend = reinterpret_cast<PrepareDirectBackendFn>(
+       dlsym(router_handle, "FloralNativeBridgePrepareDirectBackend"));
+   if (prepare_direct_backend == nullptr) {
++    ALOGE("Floral direct NativeBridge preparation hook is unavailable");
      return false;
    }
  
--  floral_direct_bind_failed = false;
--  floral_direct_backend_bound = false;
--  floral_router_handle = nullptr;
--
-   if (nb_library_filename == nullptr || *nb_library_filename == 0) {
-     CloseNativeBridge(false);
-     return false;
-@@ -391,17 +371,6 @@ bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
+   const char* backend_path_ptr = prepare_direct_backend();
+   if (backend_path_ptr == nullptr || backend_path_ptr[0] == '\0') {
++    ALOGE("Floral direct NativeBridge selected backend is unavailable");
      return false;
    }
- 
--  if (floral_direct_bind_failed) {
--    ALOGE("Floral direct NativeBridge binding failed; refusing to continue with the router");
--    if (native_bridge_handle != nullptr) {
--      dlclose(native_bridge_handle);
--      native_bridge_handle = nullptr;
--      callbacks = nullptr;
--    }
--    CloseNativeBridge(true);
--    return false;
--  }
--
-   if (app_data_dir_in != nullptr) {
-     // Create the path to the application code cache directory.
-     // The memory will be release after Initialization or when the native bridge is closed.
-@@ -421,67 +390,20 @@ bool PreInitializeNativeBridge(const char* app_data_dir_in, const char* instruct
-   return true;
- }
- 
--static bool BindFloralDirectBackend(void* router_handle) {
--  using PrepareDirectBackendFn = const char* (*)();
--  auto prepare_direct_backend = reinterpret_cast<PrepareDirectBackendFn>(
--      dlsym(router_handle, "FloralNativeBridgePrepareDirectBackend"));
--  if (prepare_direct_backend == nullptr) {
--    return false;
--  }
--
--  const char* backend_path_ptr = prepare_direct_backend();
--  if (backend_path_ptr == nullptr || backend_path_ptr[0] == '\0') {
--    return false;
--  }
 -  // The path belongs to the router's BackendManager. Copy it before the
 -  // router can be released so direct-mode diagnostics never dereference a
 -  // dangling pointer.
--  const std::string backend_path(backend_path_ptr);
--
--  void* backend_handle = OpenSystemLibrary(backend_path.c_str(), RTLD_LAZY);
--  if (backend_handle == nullptr) {
--    ALOGE("Failed to bind Floral direct NativeBridge backend %s: %s", backend_path.c_str(),
--          dlerror());
--    return false;
--  }
--  if (backend_handle == router_handle) {
--    ALOGE("Floral direct NativeBridge backend resolved to the aggregate router: %s",
--          backend_path.c_str());
--    dlclose(backend_handle);
--    return false;
--  }
--
--  auto direct_callbacks = reinterpret_cast<const NativeBridgeCallbacks*>(
--      dlsym(backend_handle, kNativeBridgeInterfaceSymbol));
--  if (!isCompatibleWithCallbacks(direct_callbacks, NAMESPACE_VERSION)) {
--    ALOGE("Floral direct NativeBridge backend %s has an incompatible interface",
--          backend_path.c_str());
--    dlclose(backend_handle);
--    return false;
--  }
--
--  floral_router_handle = router_handle;
--  native_bridge_handle = backend_handle;
--  callbacks = direct_callbacks;
--  floral_direct_backend_bound = true;
++  // The path belongs to the router's BackendManager. Copy it before releasing
++  // the router so diagnostics never dereference a dangling string.
+   const std::string backend_path(backend_path_ptr);
+ 
+   void* backend_handle = OpenSystemLibrary(backend_path.c_str(), RTLD_LAZY);
+@@ -464,24 +467,30 @@ static bool BindFloralDirectBackend(void* router_handle) {
+   native_bridge_handle = backend_handle;
+   callbacks = direct_callbacks;
+   floral_direct_backend_bound = true;
 -  // The router is a selection shim only. Do not leave it mapped in a direct
 -  // process where an app could observe Floral's loader or diagnostics path.
--  if (dlclose(router_handle) != 0) {
--    ALOGW("Failed to release Floral direct NativeBridge router: %s", dlerror());
--  }
--  floral_router_handle = nullptr;
--  ALOGI("Bound Floral direct NativeBridge backend %s (interface v%u)",
+   if (dlclose(router_handle) != 0) {
+     ALOGW("Failed to release Floral direct NativeBridge router: %s", dlerror());
+   }
+   floral_router_handle = nullptr;
+   ALOGI("Bound Floral direct NativeBridge backend %s (interface v%u)",
 -        backend_path.c_str(),
 -        direct_callbacks->version);
--  return true;
--}
--
++        backend_path.c_str(), direct_callbacks->version);
+   return true;
+ }
+ 
  void SetFloralNativeBridgeProcessContext(const char* process_name,
                                           const char* app_data_dir,
                                           const char* selected_backend) {
--  if (!FloralNativeLoaderEnabled() || state != NativeBridgeState::kOpened ||
--      native_bridge_handle == nullptr ||
--      floral_direct_backend_bound) {
 +  if (FloralNativeBridgeAuditEnabled()) {
 +    ALOGI("Floral NativeBridge audit: ART context state=%d handle=%p process=%s selected=%s",
 +          static_cast<int>(state),
@@ -458,37 +380,37 @@ index 4cccf12..2d009e3 100644
 +          process_name == nullptr ? "<null>" : process_name,
 +          selected_backend == nullptr ? "<null>" : selected_backend);
 +  }
-+  if (state != NativeBridgeState::kOpened || native_bridge_handle == nullptr) {
+   if (!FloralNativeLoaderEnabled() || state != NativeBridgeState::kOpened ||
+-      native_bridge_handle == nullptr ||
+-      floral_direct_backend_bound) {
++      native_bridge_handle == nullptr || floral_direct_backend_bound) {
 +    if (FloralNativeBridgeAuditEnabled()) {
 +      ALOGI("Floral NativeBridge audit: ART context ignored reason=invalid_state");
 +    }
      return;
    }
  
-@@ -490,28 +412,48 @@ void SetFloralNativeBridgeProcessContext(const char* process_name,
+@@ -490,6 +499,11 @@ void SetFloralNativeBridgeProcessContext(const char* process_name,
        dlsym(native_bridge_handle, "FloralNativeBridgeSetProcessContext"));
    if (set_process_context != nullptr) {
      set_process_context(process_name, app_data_dir, selected_backend);
--    using HybridLoaderFn = bool (*)();
--    auto use_hybrid_loader = reinterpret_cast<HybridLoaderFn>(
--        dlsym(native_bridge_handle, "FloralNativeBridgeUseHybridLoader"));
--    if (use_hybrid_loader != nullptr && use_hybrid_loader()) {
--      return;
--    }
--    if (!BindFloralDirectBackend(native_bridge_handle)) {
--      floral_direct_bind_failed = true;
--      ALOGE("Floral direct NativeBridge backend failed to bind; refusing half-direct state");
--    }
 +    floral_process_context_selected = selected_backend != nullptr &&
 +        *selected_backend != '\0';
++    if (!floral_process_context_selected) {
++      return;
++    }
+     using HybridLoaderFn = bool (*)();
+     auto use_hybrid_loader = reinterpret_cast<HybridLoaderFn>(
+         dlsym(native_bridge_handle, "FloralNativeBridgeUseHybridLoader"));
+@@ -500,12 +514,46 @@ void SetFloralNativeBridgeProcessContext(const char* process_name,
+       floral_direct_bind_failed = true;
+       ALOGE("Floral direct NativeBridge backend failed to bind; refusing half-direct state");
+     }
 +  } else if (FloralNativeBridgeAuditEnabled()) {
 +    ALOGW("Floral NativeBridge audit: runtime context symbol unavailable");
-   }
- }
- 
--bool NativeBridgeUseHybridLoader() {
--  if (!FloralNativeLoaderEnabled() ||
--      (state != NativeBridgeState::kOpened &&
++  }
++}
++
 +bool NativeBridgeProcessContextSelected() {
 +  return state != NativeBridgeState::kNotSetup &&
 +      state != NativeBridgeState::kClosed &&
@@ -497,19 +419,21 @@ index 4cccf12..2d009e3 100644
 +
 +bool NativeBridgeUseDirectLoader() {
 +  if ((state != NativeBridgeState::kOpened &&
-        state != NativeBridgeState::kPreInitialized &&
-        state != NativeBridgeState::kInitialized) ||
-       native_bridge_handle == nullptr) {
-     return false;
-   }
--  if (floral_direct_backend_bound) {
++       state != NativeBridgeState::kPreInitialized &&
++       state != NativeBridgeState::kInitialized) ||
++      native_bridge_handle == nullptr) {
++    return false;
++  }
++  if (floral_direct_backend_bound) {
++    return true;
++  }
 +
 +  using DirectLoaderFn = bool (*)();
 +  auto use_direct_loader = reinterpret_cast<DirectLoaderFn>(
 +      dlsym(native_bridge_handle, "FloralNativeBridgeUseDirectLoader"));
 +  if (use_direct_loader != nullptr) {
 +    return use_direct_loader();
-+  }
+   }
 +  auto use_legacy_loader = reinterpret_cast<DirectLoaderFn>(
 +      dlsym(native_bridge_handle, "FloralNativeBridgeUseCompatibilityLoader"));
 +  if (FloralNativeBridgeAuditEnabled()) {
@@ -518,17 +442,16 @@ index 4cccf12..2d009e3 100644
 +          reinterpret_cast<void*>(use_legacy_loader));
 +  }
 +  return use_legacy_loader != nullptr && use_legacy_loader();
-+}
-+
-+bool NativeBridgeUseHybridLoader() {
-+  if ((state != NativeBridgeState::kOpened &&
-+       state != NativeBridgeState::kPreInitialized &&
-+       state != NativeBridgeState::kInitialized) ||
-+      native_bridge_handle == nullptr) {
-     return false;
-   }
+ }
  
-@@ -521,6 +463,10 @@ bool NativeBridgeUseHybridLoader() {
+ bool NativeBridgeUseHybridLoader() {
+-  if (!FloralNativeLoaderEnabled() ||
+-      (state != NativeBridgeState::kOpened &&
++  if ((state != NativeBridgeState::kOpened &&
+        state != NativeBridgeState::kPreInitialized &&
+        state != NativeBridgeState::kInitialized) ||
+       native_bridge_handle == nullptr) {
+@@ -521,6 +569,10 @@ bool NativeBridgeUseHybridLoader() {
    return use_hybrid_loader != nullptr && use_hybrid_loader();
  }
  
@@ -539,7 +462,7 @@ index 4cccf12..2d009e3 100644
  void PreZygoteForkNativeBridge() {
    if (NativeBridgeInitialized()) {
      if (isCompatibleWith(PRE_ZYGOTE_FORK_VERSION)) {
-@@ -641,17 +587,21 @@ bool InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {
+@@ -641,17 +693,21 @@ bool InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {
      // If we're still PreInitialized (didn't fail the code cache checks) try to initialize.
      if (state == NativeBridgeState::kPreInitialized) {
        if (callbacks->initialize(runtime_callbacks, app_code_cache_dir, instruction_set)) {
@@ -566,7 +489,7 @@ index 4cccf12..2d009e3 100644
          CloseNativeBridge(true);
        }
      }
-@@ -672,10 +622,6 @@ void UnloadNativeBridge() {
+@@ -672,10 +728,6 @@ void UnloadNativeBridge() {
      case NativeBridgeState::kInitialized:
        // Unload.
        dlclose(native_bridge_handle);
@@ -578,7 +501,7 @@ index 4cccf12..2d009e3 100644
        break;
  
 diff --git a/libnativebridge/native_bridge_lazy.cc b/libnativebridge/native_bridge_lazy.cc
-index 76e2a8d..d445e0f 100644
+index 76e2a8db0b..d445e0fa52 100644
 --- a/libnativebridge/native_bridge_lazy.cc
 +++ b/libnativebridge/native_bridge_lazy.cc
 @@ -15,7 +15,6 @@
@@ -627,7 +550,7 @@ index 76e2a8d..d445e0f 100644
    static auto f = GET_FUNC_PTR(NativeBridgeAvailable);
    return f();
 diff --git a/libnativeloader/Android.bp b/libnativeloader/Android.bp
-index 92e18d2..3f13506 100644
+index 92e18d2ba2..3f13506e33 100644
 --- a/libnativeloader/Android.bp
 +++ b/libnativeloader/Android.bp
 @@ -34,7 +34,6 @@ art_cc_library {
@@ -639,7 +562,7 @@ index 92e18d2..3f13506 100644
      shared_libs: [
          "liblog",
 diff --git a/libnativeloader/library_namespaces.cpp b/libnativeloader/library_namespaces.cpp
-index a6ae88e..8b87338 100644
+index a6ae88eec7..8b87338fba 100644
 --- a/libnativeloader/library_namespaces.cpp
 +++ b/libnativeloader/library_namespaces.cpp
 @@ -21,7 +21,6 @@
@@ -751,7 +674,7 @@ index a6ae88e..8b87338 100644
          return linked.error();
        }
 diff --git a/libnativeloader/native_loader.cpp b/libnativeloader/native_loader.cpp
-index a53020e..c53df8f 100644
+index a53020e3ff..c53df8f7f4 100644
 --- a/libnativeloader/native_loader.cpp
 +++ b/libnativeloader/native_loader.cpp
 @@ -100,7 +100,6 @@ Result<NativeLoaderNamespace*> GetNativeloaderExtraLibsNamespace() REQUIRES(g_na
@@ -774,7 +697,7 @@ index a53020e..c53df8f 100644
    return handle.ok() ? handle->handle : nullptr;
  }
 diff --git a/libnativeloader/native_loader_namespace.cpp b/libnativeloader/native_loader_namespace.cpp
-index 376775d..4f29698 100644
+index 376775dd2c..4f29698eb7 100644
 --- a/libnativeloader/native_loader_namespace.cpp
 +++ b/libnativeloader/native_loader_namespace.cpp
 @@ -25,8 +25,6 @@
@@ -1233,7 +1156,7 @@ index 376775d..4f29698 100644
  
  }  // namespace android
 diff --git a/libnativeloader/native_loader_namespace.h b/libnativeloader/native_loader_namespace.h
-index 38fad09..735a9ac 100644
+index 38fad09cf1..735a9aca7a 100644
 --- a/libnativeloader/native_loader_namespace.h
 +++ b/libnativeloader/native_loader_namespace.h
 @@ -32,10 +32,6 @@ namespace android {
@@ -1287,7 +1210,7 @@ index 38fad09..735a9ac 100644
  
    std::string name_;
 diff --git a/libnativeloader/native_loader_test.cpp b/libnativeloader/native_loader_test.cpp
-index ef5e187..c1dd4aa 100644
+index ef5e187fad..c1dd4aaf1d 100644
 --- a/libnativeloader/native_loader_test.cpp
 +++ b/libnativeloader/native_loader_test.cpp
 @@ -20,7 +20,6 @@
@@ -1432,7 +1355,7 @@ index ef5e187..c1dd4aa 100644
    dex_path = "/system/app/foo/foo.apk";
    is_shared = true;
 diff --git a/libnativeloader/native_loader_test.h b/libnativeloader/native_loader_test.h
-index 32ac08a..0f623c3 100644
+index 32ac08a73c..0f623c30e6 100644
 --- a/libnativeloader/native_loader_test.h
 +++ b/libnativeloader/native_loader_test.h
 @@ -55,7 +55,8 @@ class Platform {
@@ -1471,7 +1394,7 @@ index 32ac08a..0f623c3 100644
  
  bool NativeBridgeInitAnonymousNamespace(const char* public_ns_sonames,
 diff --git a/runtime/Android.bp b/runtime/Android.bp
-index e9343e7..f54f82a 100644
+index e9343e7315..f54f82a53c 100644
 --- a/runtime/Android.bp
 +++ b/runtime/Android.bp
 @@ -158,6 +158,7 @@ libart_cc_defaults {
@@ -1484,7 +1407,7 @@ index e9343e7..f54f82a 100644
          "jni/jni_id_manager.cc",
 diff --git a/runtime/jni/floral_nativebridge_diagnostics.cc b/runtime/jni/floral_nativebridge_diagnostics.cc
 new file mode 100644
-index 0000000..5aec5cf
+index 0000000000..5aec5cf2d2
 --- /dev/null
 +++ b/runtime/jni/floral_nativebridge_diagnostics.cc
 @@ -0,0 +1,77 @@
@@ -1567,7 +1490,7 @@ index 0000000..5aec5cf
 +}  // namespace art
 diff --git a/runtime/jni/floral_nativebridge_diagnostics.h b/runtime/jni/floral_nativebridge_diagnostics.h
 new file mode 100644
-index 0000000..63f80af
+index 0000000000..63f80afb0a
 --- /dev/null
 +++ b/runtime/jni/floral_nativebridge_diagnostics.h
 @@ -0,0 +1,46 @@
@@ -1618,7 +1541,7 @@ index 0000000..63f80af
 +
 +#endif  // ART_RUNTIME_JNI_FLORAL_NATIVEBRIDGE_DIAGNOSTICS_H_
 diff --git a/runtime/jni/java_vm_ext.cc b/runtime/jni/java_vm_ext.cc
-index e085cd9..4be5e7a 100644
+index e085cd98cb..4be5e7ad08 100644
 --- a/runtime/jni/java_vm_ext.cc
 +++ b/runtime/jni/java_vm_ext.cc
 @@ -31,6 +31,7 @@
@@ -1688,7 +1611,7 @@ index e085cd9..4be5e7a 100644
      if (IsSdkVersionSetAndAtMost(runtime_->GetTargetSdkVersion(), SdkVersion::kL)) {
        // Make sure that sigchain owns SIGSEGV.
 diff --git a/runtime/jni/jni_internal.cc b/runtime/jni/jni_internal.cc
-index f483ad3..f6fb6ca 100644
+index f483ad3f98..f6fb6caa53 100644
 --- a/runtime/jni/jni_internal.cc
 +++ b/runtime/jni/jni_internal.cc
 @@ -37,6 +37,7 @@
@@ -1837,7 +1760,7 @@ index f483ad3..f6fb6ca 100644
    }
  
 diff --git a/runtime/native_bridge_art_interface.cc b/runtime/native_bridge_art_interface.cc
-index 0651f0c..963b907 100644
+index 0651f0ca6a..963b907857 100644
 --- a/runtime/native_bridge_art_interface.cc
 +++ b/runtime/native_bridge_art_interface.cc
 @@ -17,6 +17,7 @@
@@ -1914,7 +1837,7 @@ index 0651f0c..963b907 100644
  }
  
 diff --git a/runtime/native_bridge_art_interface.h b/runtime/native_bridge_art_interface.h
-index 873cd1f..500043d 100644
+index 873cd1fdef..500043d482 100644
 --- a/runtime/native_bridge_art_interface.h
 +++ b/runtime/native_bridge_art_interface.h
 @@ -33,6 +33,8 @@ void PreInitializeNativeBridge(const std::string& dir);
@@ -1927,7 +1850,7 @@ index 873cd1f..500043d 100644
  
  void UnloadNativeBridge();
 diff --git a/runtime/runtime.cc b/runtime/runtime.cc
-index 6c99c1f..52c3b1e 100644
+index 6c99c1fa8d..52c3b1e929 100644
 --- a/runtime/runtime.cc
 +++ b/runtime/runtime.cc
 @@ -952,7 +952,7 @@ bool Runtime::Start() {
