@@ -1,4 +1,4 @@
-From 8061cf4d9e5d1a4c0415309780f3e0ec6de5013b Mon Sep 17 00:00:00 2001
+From d71a0a77a8dca0456902664262f959a22a7422a2 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 28 Aug 2026 02:19:19 +0800
 Subject: [PATCH] frameworks: isolate NativeBridge sysroots and restore ABI
@@ -8,11 +8,11 @@ Change-Id: I26c44194535a748e7818d27d63912ddc617d6595
 ---
  core/java/android/os/Build.java               |  15 +-
  core/java/android/os/ZygoteProcess.java       |   8 +-
- core/jni/com_android_internal_os_Zygote.cpp   | 101 ++++++++
- .../server/am/FloralNativeBridgeManager.java  | 225 +++---------------
+ core/jni/com_android_internal_os_Zygote.cpp   | 128 ++++++++++
+ .../server/am/FloralNativeBridgeManager.java  | 227 +++---------------
  .../com/android/server/am/ProcessList.java    |   4 +-
  .../java/com/android/server/SystemServer.java |   3 +
- 6 files changed, 143 insertions(+), 213 deletions(-)
+ 6 files changed, 171 insertions(+), 214 deletions(-)
 
 diff --git a/core/java/android/os/Build.java b/core/java/android/os/Build.java
 index ba380545ac6b..7ead13038b7e 100755
@@ -82,10 +82,10 @@ index 45e97953f431..823ee6c50107 100644
      }
  
 diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
-index 0803e07dc588..164fe9a31f60 100644
+index 0803e07dc588..daaf02688e87 100644
 --- a/core/jni/com_android_internal_os_Zygote.cpp
 +++ b/core/jni/com_android_internal_os_Zygote.cpp
-@@ -789,6 +789,102 @@ static void BindMount(const std::string& source_dir, const std::string& target_d
+@@ -789,6 +789,129 @@ static void BindMount(const std::string& source_dir, const std::string& target_d
    }
  }
  
@@ -101,8 +101,32 @@ index 0803e07dc588..164fe9a31f60 100644
 +  }
 +
 +  // NDK Translation uses the ARM guest userspace produced by this AOSP
-+  // build. Only Houdini owns a private guest sysroot that must be mounted.
++  // build. Its private linker config is mounted only for the selected app.
 +  if (backend_name == "ndk") {
++    const bool arm64 = instruction_set == "arm64" || instruction_set == "arm64-v8a";
++    const std::string config = std::string("/system/floral/ndk/etc/ld.config.") +
++                               (arm64 ? "arm64" : "arm") + ".txt";
++    struct stat source_stat;
++    if (TEMP_FAILURE_RETRY(stat(config.c_str(), &source_stat)) == 0 &&
++        S_ISREG(source_stat.st_mode)) {
++      const char* target = arm64 ? "/system/etc/ld.config.arm64.txt"
++                                 : "/system/etc/ld.config.arm.txt";
++      struct stat target_stat;
++      if (TEMP_FAILURE_RETRY(stat(target, &target_stat)) == -1) {
++        const int fd = TEMP_FAILURE_RETRY(open(target, O_CREAT | O_WRONLY | O_CLOEXEC, 0644));
++        if (fd == -1) {
++          fail_fn(CREATE_ERROR("Failed to create Floral NativeBridge linker config target %s: %s",
++                               target, strerror(errno)));
++          return;
++        }
++        close(fd);
++      }
++      if (TEMP_FAILURE_RETRY(mount(config.c_str(), target, nullptr, MS_BIND, nullptr)) == -1) {
++        fail_fn(CREATE_ERROR("Failed to mount Floral NativeBridge linker config %s to %s: %s",
++                             config.c_str(), target, strerror(errno)));
++        return;
++      }
++    }
 +    return;
 +  }
 +
@@ -163,7 +187,10 @@ index 0803e07dc588..164fe9a31f60 100644
 +    }
 +  }
 +
-+  const std::string cpuinfo = root + "/etc/cpuinfo." + (arm64 ? "arm64" : "arm") + ".txt";
++  // Houdini ships its guest CPU description beside the guest libraries.
++  // The /system/etc/cpuinfo.* files are only pre-created mount targets.
++  const std::string cpuinfo = root + (arm64 ? "/lib64/arm64/cpuinfo"
++                                            : "/lib/arm/cpuinfo");
 +  if (TEMP_FAILURE_RETRY(stat(cpuinfo.c_str(), &source_stat)) == 0 &&
 +      S_ISREG(source_stat.st_mode)) {
 +    const char* target = arm64 ? "/system/etc/cpuinfo.arm64.txt"
@@ -188,7 +215,7 @@ index 0803e07dc588..164fe9a31f60 100644
  static void MountAppDataTmpFs(const std::string& target_dir,
                        fail_fn_t fail_fn) {
    if (TEMP_FAILURE_RETRY(mount("tmpfs", target_dir.c_str(), "tmpfs",
-@@ -1594,6 +1690,11 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+@@ -1594,6 +1717,11 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
      // Make sure app is running in its own mount namespace before isolating its data directories.
      ensureInAppMountNamespace(fail_fn);
  
@@ -201,7 +228,7 @@ index 0803e07dc588..164fe9a31f60 100644
      // mount all related packages separately.
      if (mount_data_dirs) {
 diff --git a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
-index 6958cc2234eb..5f6cb4ea9463 100644
+index 6958cc2234eb..00bc02464ee8 100644
 --- a/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 +++ b/services/core/java/com/android/server/am/FloralNativeBridgeManager.java
 @@ -22,49 +22,39 @@ import static android.app.ActivityTaskManager.INVALID_TASK_ID;
@@ -229,7 +256,7 @@ index 6958cc2234eb..5f6cb4ea9463 100644
 -    private static final String POLICY_PATH =
 -            "/data/system/floral/nativebridge-policy.json";
 +    private static final String FIXED_BACKEND_PROPERTY =
-+            "ro.floral.nativebridge.default_backend";
++            "ro.floral.nb.default_backend";
      private static final long EARLY_CRASH_WINDOW_MS = 60_000L;
      private static final long FAILURE_CACHE_TTL_MS = 5 * 60_000L;
      private static final long SUCCESS_CACHE_TTL_MS = 10 * 60_000L;
@@ -239,8 +266,8 @@ index 6958cc2234eb..5f6cb4ea9463 100644
      private static final String BACKEND_AUTO = "auto";
      private static final String BACKEND_NDK = "ndk";
      private static final String BACKEND_HOUDINI = "houdini";
-     private static final String MODE_HYBRID = "hybrid";
--    private static final String MODE_DIRECT = "direct";
+-    private static final String MODE_HYBRID = "hybrid";
+     private static final String MODE_DIRECT = "direct";
 -    private static final String MODE_COMPAT_LEGACY = "compat";
  
      private final ActivityManagerService mService;
@@ -299,6 +326,9 @@ index 6958cc2234eb..5f6cb4ea9463 100644
          final String instructionSet = app.getInstructionSet();
 -        if ("arm".equals(instructionSet) || "arm64".equals(instructionSet)) {
 -            return true;
+-        }
+-        return rule.allowNativeAbi
+-                && ("x86".equals(instructionSet) || "x86_64".equals(instructionSet));
 +        return "arm".equals(instructionSet) || "arm64".equals(instructionSet);
 +    }
 +
@@ -312,16 +342,14 @@ index 6958cc2234eb..5f6cb4ea9463 100644
 +                || "armeabi".equals(instructionSet)
 +                || "armeabi-v7a".equals(instructionSet);
 +        if (arm32) {
-+            candidates.add(candidateName(BACKEND_HOUDINI, MODE_HYBRID));
++            candidates.add(candidateName(BACKEND_HOUDINI, MODE_DIRECT));
 +            return candidates;
-         }
--        return rule.allowNativeAbi
--                && ("x86".equals(instructionSet) || "x86_64".equals(instructionSet));
++        }
 +
 +        final String preferred = normalizeBackend(mFixedBackend);
-+        candidates.add(candidateName(preferred, MODE_HYBRID));
++        candidates.add(candidateName(preferred, MODE_DIRECT));
 +        final String fallback = BACKEND_NDK.equals(preferred) ? BACKEND_HOUDINI : BACKEND_NDK;
-+        candidates.add(candidateName(fallback, MODE_HYBRID));
++        candidates.add(candidateName(fallback, MODE_DIRECT));
 +        return candidates;
      }
  
