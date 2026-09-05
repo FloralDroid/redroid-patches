@@ -1,0 +1,600 @@
+From 4e84ba0c441a8a177643e90f2e112d86a05347c4 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sat, 5 Sep 2026 17:49:34 +0800
+Subject: [PATCH] bionic: virtualize Floral proc and kernel views
+
+Change-Id: I82b54d65e69c9b85d1b245a063e65bb93901886e
+---
+ libc/Android.bp                 |   2 +
+ libc/SYSCALLS.TXT               |   4 +-
+ libc/bionic/floral_procview.cpp |  29 +++
+ libc/bionic/sysinfo.cpp         | 406 ++++++++++++++++++++++++++++++++
+ libc/bionic/uname.cpp           |  38 +++
+ libc/private/floral_procview.h  |  17 ++
+ 6 files changed, 494 insertions(+), 2 deletions(-)
+ create mode 100644 libc/bionic/floral_procview.cpp
+ create mode 100644 libc/bionic/uname.cpp
+ create mode 100644 libc/private/floral_procview.h
+
+diff --git a/libc/Android.bp b/libc/Android.bp
+index 2c0656f72..556214974 100644
+--- a/libc/Android.bp
++++ b/libc/Android.bp
+@@ -1066,6 +1066,7 @@ cc_library_static {
+         "bionic/ftruncate.cpp",
+         "bionic/ftw.cpp",
+         "bionic/futimens.cpp",
++        "bionic/floral_procview.cpp",
+         "bionic/getcwd.cpp",
+         "bionic/getdomainname.cpp",
+         "bionic/getentropy.cpp",
+@@ -1174,6 +1175,7 @@ cc_library_static {
+         "bionic/timespec_get.cpp",
+         "bionic/tmpfile.cpp",
+         "bionic/umount.cpp",
++        "bionic/uname.cpp",
+         "bionic/unlink.cpp",
+         "bionic/usleep.cpp",
+         "bionic/utmp.cpp",
+diff --git a/libc/SYSCALLS.TXT b/libc/SYSCALLS.TXT
+index 391e7af16..ce2b7796a 100644
+--- a/libc/SYSCALLS.TXT
++++ b/libc/SYSCALLS.TXT
+@@ -296,13 +296,13 @@ int __sched_getaffinity:sched_getaffinity(pid_t pid, size_t setsize, cpu_set_t*
+ int __getcpu:getcpu(unsigned*, unsigned*, void*) all
+ 
+ # other
+-int     uname(struct utsname*)  all
++int     __uname:uname(struct utsname*)  all
+ mode_t  umask(mode_t)  all
+ int     __reboot:reboot(int, int, int, void*)  all
+ int     init_module(void*, unsigned long, const char*)  all
+ int     delete_module(const char*, unsigned int)   all
+ int     klogctl:syslog(int, char*, int)   all
+-int     sysinfo(struct sysinfo*)  all
++int     __sysinfo:sysinfo(struct sysinfo*)  all
+ int     personality(unsigned long)  all
+ 
+ ssize_t tee(int, int, size_t, unsigned int)  all
+diff --git a/libc/bionic/floral_procview.cpp b/libc/bionic/floral_procview.cpp
+new file mode 100644
+index 000000000..191572603
+--- /dev/null
++++ b/libc/bionic/floral_procview.cpp
+@@ -0,0 +1,29 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#include "private/floral_procview.h"
++
++#include <sys/system_properties.h>
++
++#include <string.h>
++
++#include "private/bionic_defs.h"
++
++namespace {
++
++constexpr char kProcViewProperty[] = "ro.floral.libc.procview";
++
++}  // namespace
++
++extern "C" __LIBC_HIDDEN__ bool __floral_procview_enabled() {
++  char value[PROP_VALUE_MAX] = {};
++  const int length = __system_property_get(kProcViewProperty, value);
++  if (length <= 0) return true;
++  return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
++         strcmp(value, "TRUE") == 0 || strcmp(value, "y") == 0 ||
++         strcmp(value, "yes") == 0;
++}
+diff --git a/libc/bionic/sysinfo.cpp b/libc/bionic/sysinfo.cpp
+index 7ab8e9eda..3f386cf8f 100644
+--- a/libc/bionic/sysinfo.cpp
++++ b/libc/bionic/sysinfo.cpp
+@@ -29,12 +29,412 @@
+ #include <sys/sysinfo.h>
+ 
+ #include <dirent.h>
++#include <errno.h>
++#include <inttypes.h>
++#include <limits.h>
++#include <stdint.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ 
+ #include "private/get_cpu_count_from_string.h"
+ #include "private/ScopedReaddir.h"
++#include "private/floral_procview.h"
++
++extern "C" int __sysinfo(struct sysinfo*);
++
++namespace {
++
++struct FloralMeminfo {
++  uint64_t total_kb = 0;
++  uint64_t free_kb = 0;
++  uint64_t buffers_kb = 0;
++  uint64_t shared_kb = 0;
++  uint64_t swap_total_kb = 0;
++  uint64_t swap_free_kb = 0;
++  bool valid = false;
++};
++
++struct FloralCgroupMemory {
++  uint64_t total_bytes = 0;
++  uint64_t current_bytes = 0;
++  uint64_t swap_total_bytes = 0;
++  uint64_t swap_current_bytes = 0;
++  bool valid = false;
++};
++
++// Cgroup paths can approach PATH_MAX; keep their buffers off libc's small stack.
++class FloralPathBuffer {
++ public:
++  FloralPathBuffer() : data_(static_cast<char*>(malloc(PATH_MAX))) {
++    if (data_ != nullptr) data_[0] = '\0';
++  }
++
++  ~FloralPathBuffer() {
++    free(data_);
++  }
++
++  FloralPathBuffer(const FloralPathBuffer&) = delete;
++  FloralPathBuffer& operator=(const FloralPathBuffer&) = delete;
++
++  bool valid() const {
++    return data_ != nullptr;
++  }
++
++  char* get() {
++    return data_;
++  }
++
++ private:
++  char* data_;
++};
++
++unsigned long ToSysinfoUnits(uint64_t kibibytes, unsigned int unit) {
++  if (unit == 0) unit = 1;
++  if (kibibytes > UINT64_MAX / 1024) return ULONG_MAX;
++  const uint64_t value = kibibytes * 1024 / unit;
++  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++unsigned long BytesToSysinfoUnits(uint64_t bytes, unsigned int unit) {
++  if (unit == 0) unit = 1;
++  const uint64_t value = bytes / unit;
++  return value > ULONG_MAX ? ULONG_MAX : static_cast<unsigned long>(value);
++}
++
++bool IsSafeCgroupPath(const char* path) {
++  if (path == nullptr || path[0] != '/') return false;
++
++  const char* component = path + 1;
++  while (*component != '\0') {
++    const char* slash = strchr(component, '/');
++    const size_t length = slash == nullptr ? strlen(component) : slash - component;
++    if ((length == 1 && component[0] == '.') ||
++        (length == 2 && component[0] == '.' && component[1] == '.')) {
++      return false;
++    }
++    if (slash == nullptr) break;
++    component = slash + 1;
++  }
++  return true;
++}
++
++bool ControllerListContains(const char* controllers, const char* expected) {
++  const size_t expected_length = strlen(expected);
++  const char* cursor = controllers;
++  while (*cursor != '\0') {
++    const char* comma = strchr(cursor, ',');
++    const size_t length = comma == nullptr ? strlen(cursor) : comma - cursor;
++    if (length == expected_length && strncmp(cursor, expected, length) == 0) return true;
++    if (comma == nullptr) break;
++    cursor = comma + 1;
++  }
++  return false;
++}
++
++bool ReadSelfCgroupPaths(char* unified, size_t unified_size, char* memory, size_t memory_size) {
++  FILE* file = fopen("/proc/self/cgroup", "re");
++  if (file == nullptr) return false;
++
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    char* first_colon = strchr(line, ':');
++    if (first_colon == nullptr) continue;
++    char* second_colon = strchr(first_colon + 1, ':');
++    if (second_colon == nullptr) continue;
++
++    *first_colon = '\0';
++    *second_colon = '\0';
++    char* path = second_colon + 1;
++    path[strcspn(path, "\r\n")] = '\0';
++    if (!IsSafeCgroupPath(path)) continue;
++
++    if (strcmp(line, "0") == 0 && first_colon[1] == '\0') {
++      if (strlcpy(unified, path, unified_size) >= unified_size) unified[0] = '\0';
++    } else if (ControllerListContains(first_colon + 1, "memory")) {
++      if (strlcpy(memory, path, memory_size) >= memory_size) memory[0] = '\0';
++    }
++  }
++  free(line);
++  fclose(file);
++  return unified[0] != '\0' || memory[0] != '\0';
++}
++
++bool ReadCgroupValue(const char* path, uint64_t* value, bool* unlimited) {
++  FILE* file = fopen(path, "re");
++  if (file == nullptr) return false;
++
++  char text[64];
++  const bool read = fgets(text, sizeof(text), file) != nullptr;
++  fclose(file);
++  if (!read) return false;
++
++  text[strcspn(text, "\r\n")] = '\0';
++  if (strcmp(text, "max") == 0) {
++    *unlimited = true;
++    *value = 0;
++    return true;
++  }
++
++  char* end = nullptr;
++  errno = 0;
++  const uint64_t parsed = strtoull(text, &end, 10);
++  if (errno != 0 || end == text || *end != '\0') return false;
++  *unlimited = false;
++  *value = parsed;
++  return true;
++}
++
++bool BuildCgroupFilePath(char* output, size_t output_size, const char* root, const char* cgroup,
++                         const char* file) {
++  const char* separator = strcmp(cgroup, "/") == 0 ? "" : cgroup;
++  const int length = snprintf(output, output_size, "%s%s/%s", root, separator, file);
++  return length >= 0 && static_cast<size_t>(length) < output_size;
++}
++
++bool ParentCgroupPath(char* path) {
++  if (strcmp(path, "/") == 0) return false;
++  char* slash = strrchr(path, '/');
++  if (slash == path) {
++    path[1] = '\0';
++  } else if (slash != nullptr) {
++    *slash = '\0';
++  }
++  return true;
++}
++
++bool ReadCgroupLimit(const char* root, const char* cgroup, const char* file, uint64_t* limit) {
++  FloralPathBuffer current;
++  FloralPathBuffer path;
++  if (!current.valid() || !path.valid() || strlcpy(current.get(), cgroup, PATH_MAX) >= PATH_MAX) {
++    return false;
++  }
++
++  bool found = false;
++  uint64_t minimum = UINT64_MAX;
++  do {
++    uint64_t value = 0;
++    bool unlimited = false;
++    if (BuildCgroupFilePath(path.get(), PATH_MAX, root, current.get(), file) &&
++        ReadCgroupValue(path.get(), &value, &unlimited) && !unlimited && value != 0) {
++      if (value < minimum) minimum = value;
++      found = true;
++    }
++  } while (ParentCgroupPath(current.get()));
++
++  if (!found) return false;
++  *limit = minimum;
++  return true;
++}
++
++bool ReadCgroupV2Memory(const char* cgroup, FloralCgroupMemory* memory) {
++  FloralPathBuffer path;
++  if (!path.valid()) return false;
++  bool swap_unlimited = false;
++
++  if (!ReadCgroupLimit("/sys/fs/cgroup", cgroup, "memory.max", &memory->total_bytes)) {
++    return false;
++  }
++  bool current_unlimited = false;
++  if (!BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup, "memory.current") ||
++      !ReadCgroupValue(path.get(), &memory->current_bytes, &current_unlimited) ||
++      current_unlimited) {
++    return false;
++  }
++
++  if (BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup, "memory.swap.max") &&
++      ReadCgroupValue(path.get(), &memory->swap_total_bytes, &swap_unlimited) &&
++      !swap_unlimited &&
++      BuildCgroupFilePath(path.get(), PATH_MAX, "/sys/fs/cgroup", cgroup,
++                          "memory.swap.current")) {
++    bool current_unlimited = false;
++    if (!ReadCgroupValue(path.get(), &memory->swap_current_bytes, &current_unlimited) ||
++        current_unlimited) {
++      memory->swap_total_bytes = 0;
++      memory->swap_current_bytes = 0;
++    }
++  } else {
++    memory->swap_total_bytes = 0;
++    memory->swap_current_bytes = 0;
++  }
++  memory->valid = true;
++  return true;
++}
++
++bool ReadCgroupV1Memory(const char* cgroup, FloralCgroupMemory* memory) {
++  constexpr char kRoot[] = "/sys/fs/cgroup/memory";
++  FloralPathBuffer path;
++  if (!path.valid()) return false;
++  bool unlimited = false;
++
++  if (!ReadCgroupLimit(kRoot, cgroup, "memory.limit_in_bytes", &memory->total_bytes)) {
++    return false;
++  }
++  if (!BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup, "memory.usage_in_bytes") ||
++      !ReadCgroupValue(path.get(), &memory->current_bytes, &unlimited) || unlimited) {
++    return false;
++  }
++
++  uint64_t memory_and_swap_limit = 0;
++  uint64_t memory_and_swap_usage = 0;
++  if (BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup, "memory.memsw.limit_in_bytes") &&
++      ReadCgroupValue(path.get(), &memory_and_swap_limit, &unlimited) && !unlimited &&
++      BuildCgroupFilePath(path.get(), PATH_MAX, kRoot, cgroup,
++                          "memory.memsw.usage_in_bytes") &&
++      ReadCgroupValue(path.get(), &memory_and_swap_usage, &unlimited) && !unlimited) {
++    memory->swap_total_bytes = memory_and_swap_limit > memory->total_bytes
++                                   ? memory_and_swap_limit - memory->total_bytes
++                                   : 0;
++    memory->swap_current_bytes = memory_and_swap_usage > memory->current_bytes
++                                     ? memory_and_swap_usage - memory->current_bytes
++                                     : 0;
++  }
++  memory->valid = true;
++  return true;
++}
++
++FloralCgroupMemory ReadFloralCgroupMemory() {
++  FloralCgroupMemory memory;
++  FloralPathBuffer unified_path;
++  FloralPathBuffer memory_path;
++  if (!unified_path.valid() || !memory_path.valid() ||
++      !ReadSelfCgroupPaths(unified_path.get(), PATH_MAX, memory_path.get(), PATH_MAX)) {
++    return memory;
++  }
++
++  if (unified_path.get()[0] != '\0' && ReadCgroupV2Memory(unified_path.get(), &memory)) {
++    return memory;
++  }
++  if (memory_path.get()[0] != '\0') ReadCgroupV1Memory(memory_path.get(), &memory);
++  return memory;
++}
++
++bool ApplyFloralCgroupMemory(struct sysinfo* info) {
++  FloralCgroupMemory memory = ReadFloralCgroupMemory();
++  if (!memory.valid) return false;
++
++  const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++  const uint64_t host_total = static_cast<uint64_t>(info->totalram) * unit;
++  if (host_total != 0 && memory.total_bytes > host_total) memory.total_bytes = host_total;
++  if (memory.current_bytes > memory.total_bytes) memory.current_bytes = memory.total_bytes;
++  if (memory.swap_current_bytes > memory.swap_total_bytes) {
++    memory.swap_current_bytes = memory.swap_total_bytes;
++  }
++
++  info->totalram = BytesToSysinfoUnits(memory.total_bytes, unit);
++  info->freeram = BytesToSysinfoUnits(memory.total_bytes - memory.current_bytes, unit);
++  info->sharedram = 0;
++  info->bufferram = 0;
++  info->totalswap = BytesToSysinfoUnits(memory.swap_total_bytes, unit);
++  info->freeswap = BytesToSysinfoUnits(memory.swap_total_bytes - memory.swap_current_bytes, unit);
++  info->totalhigh = 0;
++  info->freehigh = 0;
++  return true;
++}
++
++FloralMeminfo ReadFloralMeminfo() {
++  FloralMeminfo memory;
++  FILE* file = fopen("/proc/meminfo", "re");
++  if (file == nullptr) return memory;
++
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    uint64_t value = 0;
++    if (sscanf(line, "MemTotal: %" SCNu64 " kB", &value) == 1) {
++      memory.total_kb = value;
++      memory.valid = true;
++    } else if (sscanf(line, "MemFree: %" SCNu64 " kB", &value) == 1) {
++      memory.free_kb = value;
++    } else if (sscanf(line, "Buffers: %" SCNu64 " kB", &value) == 1) {
++      memory.buffers_kb = value;
++    } else if (sscanf(line, "Shmem: %" SCNu64 " kB", &value) == 1) {
++      memory.shared_kb = value;
++    } else if (sscanf(line, "SwapTotal: %" SCNu64 " kB", &value) == 1) {
++      memory.swap_total_kb = value;
++    } else if (sscanf(line, "SwapFree: %" SCNu64 " kB", &value) == 1) {
++      memory.swap_free_kb = value;
++    }
++  }
++  free(line);
++  fclose(file);
++  return memory;
++}
++
++void ApplyFloralProcView(struct sysinfo* info) {
++  if (!ApplyFloralCgroupMemory(info)) {
++    const FloralMeminfo memory = ReadFloralMeminfo();
++    if (memory.valid) {
++      const unsigned int unit = info->mem_unit == 0 ? 1 : info->mem_unit;
++      info->totalram = ToSysinfoUnits(memory.total_kb, unit);
++      info->freeram = ToSysinfoUnits(memory.free_kb, unit);
++      info->bufferram = ToSysinfoUnits(memory.buffers_kb, unit);
++      info->sharedram = ToSysinfoUnits(memory.shared_kb, unit);
++      info->totalswap = ToSysinfoUnits(memory.swap_total_kb, unit);
++      info->freeswap = ToSysinfoUnits(memory.swap_free_kb, unit);
++      info->totalhigh = 0;
++      info->freehigh = 0;
++    }
++  }
++
++  FILE* file = fopen("/proc/uptime", "re");
++  if (file != nullptr) {
++    double uptime = 0;
++    if (fscanf(file, "%lf", &uptime) == 1 && uptime >= 0) {
++      info->uptime = static_cast<long>(uptime);
++    }
++    fclose(file);
++  }
++
++  file = fopen("/proc/loadavg", "re");
++  if (file != nullptr) {
++    double load[3] = {};
++    if (fscanf(file, "%lf %lf %lf", &load[0], &load[1], &load[2]) == 3) {
++      for (size_t i = 0; i < 3; ++i) {
++        info->loads[i] = static_cast<unsigned long>(load[i] * (1 << SI_LOAD_SHIFT));
++      }
++    }
++    fclose(file);
++  }
++}
++
++int ReadFloralCpuCount() {
++  if (!__floral_procview_enabled()) return 0;
++
++  FILE* file = fopen("/proc/cpuinfo", "re");
++  if (file == nullptr) return 0;
++
++  int count = 0;
++  constexpr size_t kProcessorPrefixLength = sizeof("processor") - 1;
++  char* line = nullptr;
++  size_t capacity = 0;
++  while (getline(&line, &capacity, file) != -1) {
++    const size_t line_length = strlen(line);
++    if (line_length > kProcessorPrefixLength &&
++        strncmp(line, "processor", kProcessorPrefixLength) == 0 &&
++        (line[kProcessorPrefixLength] == ':' || line[kProcessorPrefixLength] == ' ' ||
++         line[kProcessorPrefixLength] == '\t')) {
++      ++count;
++    }
++  }
++  free(line);
++  fclose(file);
++  return count;
++}
++
++}  // namespace
++
++extern "C" int sysinfo(struct sysinfo* info) {
++  const int result = __sysinfo(info);
++  if (result == 0 && info != nullptr && __floral_procview_enabled()) {
++    // Prefer the current memory cgroup so direct libc queries stay container-scoped.
++    // Fall back to procfs for kernels without readable cgroup memory limits.
++    ApplyFloralProcView(info);
++  }
++  return result;
++}
+ 
+ static bool __matches_cpuN(const char* s) {
+   // The %c trick is to ensure that we have the anchored match "^cpu[0-9]+$".
+@@ -45,6 +445,9 @@ static bool __matches_cpuN(const char* s) {
+ }
+ 
+ int get_nprocs_conf() {
++  const int floral_cpu_count = ReadFloralCpuCount();
++  if (floral_cpu_count > 0) return floral_cpu_count;
++
+   // On x86 kernels you can use /proc/cpuinfo for this, but on ARM kernels offline CPUs disappear
+   // from there. This method works on both.
+   ScopedReaddir reader("/sys/devices/system/cpu");
+@@ -63,6 +466,9 @@ int get_nprocs_conf() {
+ }
+ 
+ int get_nprocs() {
++  const int floral_cpu_count = ReadFloralCpuCount();
++  if (floral_cpu_count > 0) return floral_cpu_count;
++
+   int cpu_count = 1;
+   FILE* fp = fopen("/sys/devices/system/cpu/online", "re");
+   if (fp != nullptr) {
+diff --git a/libc/bionic/uname.cpp b/libc/bionic/uname.cpp
+new file mode 100644
+index 000000000..031659baa
+--- /dev/null
++++ b/libc/bionic/uname.cpp
+@@ -0,0 +1,38 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#include <sys/utsname.h>
++#include <sys/system_properties.h>
++
++#include <string.h>
++
++extern "C" int __uname(utsname*);
++
++namespace {
++
++constexpr char kDefaultKernelRelease[] = "5.10.66-android12-9";
++constexpr char kDefaultKernelVersion[] = "#1 SMP PREEMPT";
++
++void CopyProperty(const char* name, const char* fallback, char* destination) {
++  char value[PROP_VALUE_MAX] = {};
++  const char* source = __system_property_get(name, value) > 0 ? value : fallback;
++  strlcpy(destination, source, SYS_NMLN);
++}
++
++}  // namespace
++
++extern "C" int uname(utsname* buffer) {
++  const int result = __uname(buffer);
++  if (result != 0 || buffer == nullptr) {
++    return result;
++  }
++
++  // Keep direct libc uname() aligned with the container profile.
++  CopyProperty("ro.boot.floral_kernel_release", kDefaultKernelRelease, buffer->release);
++  CopyProperty("ro.boot.floral_kernel_version", kDefaultKernelVersion, buffer->version);
++  return result;
++}
+diff --git a/libc/private/floral_procview.h b/libc/private/floral_procview.h
+new file mode 100644
+index 000000000..06cebb2da
+--- /dev/null
++++ b/libc/private/floral_procview.h
+@@ -0,0 +1,17 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ */
++
++#pragma once
++
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++// Returns whether libc should expose the container resource views.
++bool __floral_procview_enabled();
++
++__END_DECLS
+-- 
+2.47.3
+
