@@ -1,0 +1,33 @@
+From 519578a4034af51e8d731c8112a6a596f43eeba8 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sun, 6 Sep 2026 02:03:59 +0800
+Subject: [PATCH] bionic: preserve wide stat inode fields in realpath
+
+On 32-bit ABIs, struct stat carries 64-bit device and inode fields while dev_t and ino_t remain 32-bit. Preserve the member types so realpath does not reject valid paths whose inode exceeds UINT32_MAX.
+
+Test: x86 Android 12 probe changes hw_get_module("gralloc") from -ENOENT to success for inode 6442451296.
+
+Change-Id: I38ae22e9fd0cc1354668a4aa10f690849ce117ab
+---
+ libc/bionic/realpath.cpp | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/libc/bionic/realpath.cpp b/libc/bionic/realpath.cpp
+index e43d8e2ff..f2733e86d 100644
+--- a/libc/bionic/realpath.cpp
++++ b/libc/bionic/realpath.cpp
+@@ -57,8 +57,9 @@ char* realpath(const char* path, char* result) {
+   // (...remember the device/inode that we're talking about and...)
+   struct stat sb;
+   if (fstat(fd.get(), &sb) == -1) return nullptr;
+-  dev_t st_dev = sb.st_dev;
+-  ino_t st_ino = sb.st_ino;
++  // The 32-bit stat ABI keeps these fields wider than dev_t and ino_t.
++  const auto st_dev = sb.st_dev;
++  const auto st_ino = sb.st_ino;
+ 
+   // ...ask the kernel to do the hard work for us.
+   FdPath fd_path(fd.get());
+-- 
+2.47.3
+
