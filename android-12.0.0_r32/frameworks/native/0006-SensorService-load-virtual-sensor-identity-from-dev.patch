@@ -1,0 +1,306 @@
+From f4cd87556db92d492a2f043882049645cf16a610 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 10 Sep 2026 22:03:48 +0800
+Subject: [PATCH] SensorService: load virtual sensor identity from device
+ profile
+
+Change-Id: I6be76a1cd287209339c95c561f730d47fc2239ad
+---
+ services/sensorservice/Android.bp             |  2 +
+ .../sensorservice/CorrectedGyroSensor.cpp     |  7 ++-
+ .../sensorservice/FloralSensorIdentity.cpp    | 59 +++++++++++++++++++
+ services/sensorservice/FloralSensorIdentity.h | 32 ++++++++++
+ services/sensorservice/GravitySensor.cpp      |  7 ++-
+ .../LinearAccelerationSensor.cpp              |  7 ++-
+ services/sensorservice/OrientationSensor.cpp  |  7 ++-
+ .../sensorservice/RotationVectorSensor.cpp    | 30 ++++++++--
+ 8 files changed, 139 insertions(+), 12 deletions(-)
+ create mode 100644 services/sensorservice/FloralSensorIdentity.cpp
+ create mode 100644 services/sensorservice/FloralSensorIdentity.h
+
+diff --git a/services/sensorservice/Android.bp b/services/sensorservice/Android.bp
+index 4151b4512f..bd9c95ecaf 100644
+--- a/services/sensorservice/Android.bp
++++ b/services/sensorservice/Android.bp
+@@ -14,6 +14,7 @@ cc_library_shared {
+         "BatteryService.cpp",
+         "CorrectedGyroSensor.cpp",
+         "Fusion.cpp",
++        "FloralSensorIdentity.cpp",
+         "GravitySensor.cpp",
+         "LinearAccelerationSensor.cpp",
+         "OrientationSensor.cpp",
+@@ -67,6 +68,7 @@ cc_library_shared {
+ 
+     static_libs: [
+         "android.hardware.sensors@1.0-convert",
++        "libfloral_device_profile",
+     ],
+ 
+     generated_headers: ["framework-cppstream-protos"],
+diff --git a/services/sensorservice/CorrectedGyroSensor.cpp b/services/sensorservice/CorrectedGyroSensor.cpp
+index 005af18b2c..f190b7aeee 100644
+--- a/services/sensorservice/CorrectedGyroSensor.cpp
++++ b/services/sensorservice/CorrectedGyroSensor.cpp
+@@ -23,6 +23,7 @@
+ #include <hardware/sensors.h>
+ 
+ #include "CorrectedGyroSensor.h"
++#include "FloralSensorIdentity.h"
+ #include "SensorDevice.h"
+ #include "SensorFusion.h"
+ 
+@@ -38,9 +39,11 @@ CorrectedGyroSensor::CorrectedGyroSensor(sensor_t const* list, size_t count)
+         }
+     }
+ 
++    const FloralSensorIdentity identity = GetFloralSensorIdentity(
++            "corrected_gyroscope", "Corrected Gyroscope Sensor", "AOSP");
+     const sensor_t sensor = {
+-            .name       = "Corrected Gyroscope Sensor",
+-            .vendor     = "AOSP",
++            .name       = identity.name.c_str(),
++            .vendor     = identity.vendor.c_str(),
+             .version    = 1,
+             .handle     = '_cgy',
+             .type       = SENSOR_TYPE_GYROSCOPE,
+diff --git a/services/sensorservice/FloralSensorIdentity.cpp b/services/sensorservice/FloralSensorIdentity.cpp
+new file mode 100644
+index 0000000000..98d4699e5c
+--- /dev/null
++++ b/services/sensorservice/FloralSensorIdentity.cpp
+@@ -0,0 +1,59 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "FloralSensorIdentity.h"
++
++#include <floral/device/profile/DeviceProfile.h>
++#include <log/log.h>
++
++namespace android {
++namespace {
++
++struct CachedProfile {
++    CachedProfile() {
++        std::string error;
++        valid = floral::device::profile::ReadDeviceProfile(floral::device::profile::kDefaultPath,
++                                                           &profile, &error);
++        if (!valid) {
++            ALOGW("device profile unavailable; using virtual sensor identities: %s", error.c_str());
++        }
++    }
++
++    floral::device::profile::DeviceProfile profile;
++    bool valid = false;
++};
++
++}  // namespace
++
++FloralSensorIdentity GetFloralSensorIdentity(std::string_view key, const char* default_name,
++                                             const char* default_vendor) {
++    static const CachedProfile cached;
++    FloralSensorIdentity identity{default_name, default_vendor};
++    if (!cached.valid) {
++        return identity;
++    }
++
++    const std::string prefix = "sensor_virtual_" + std::string(key);
++    const std::string* name = cached.profile.Find(prefix + "_name");
++    const std::string* vendor = cached.profile.Find(prefix + "_vendor");
++    if (name != nullptr && vendor != nullptr) {
++        identity.name = *name;
++        identity.vendor = *vendor;
++    }
++    return identity;
++}
++
++}  // namespace android
+diff --git a/services/sensorservice/FloralSensorIdentity.h b/services/sensorservice/FloralSensorIdentity.h
+new file mode 100644
+index 0000000000..9ded97002e
+--- /dev/null
++++ b/services/sensorservice/FloralSensorIdentity.h
+@@ -0,0 +1,32 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <string>
++#include <string_view>
++
++namespace android {
++
++struct FloralSensorIdentity {
++    std::string name;
++    std::string vendor;
++};
++
++FloralSensorIdentity GetFloralSensorIdentity(std::string_view key, const char* default_name,
++                                             const char* default_vendor);
++
++}  // namespace android
+diff --git a/services/sensorservice/GravitySensor.cpp b/services/sensorservice/GravitySensor.cpp
+index 9d8add169f..e86e43bb0b 100644
+--- a/services/sensorservice/GravitySensor.cpp
++++ b/services/sensorservice/GravitySensor.cpp
+@@ -23,6 +23,7 @@
+ #include <hardware/sensors.h>
+ 
+ #include "GravitySensor.h"
++#include "FloralSensorIdentity.h"
+ #include "SensorDevice.h"
+ #include "SensorFusion.h"
+ 
+@@ -37,9 +38,11 @@ GravitySensor::GravitySensor(sensor_t const* list, size_t count) {
+         }
+     }
+ 
++    const FloralSensorIdentity identity =
++            GetFloralSensorIdentity("gravity", "Gravity Sensor", "AOSP");
+     const sensor_t sensor = {
+-        .name       = "Gravity Sensor",
+-        .vendor     = "AOSP",
++        .name       = identity.name.c_str(),
++        .vendor     = identity.vendor.c_str(),
+         .version    = 3,
+         .handle     = '_grv',
+         .type       = SENSOR_TYPE_GRAVITY,
+diff --git a/services/sensorservice/LinearAccelerationSensor.cpp b/services/sensorservice/LinearAccelerationSensor.cpp
+index d1cd732499..d4db8dfd1b 100644
+--- a/services/sensorservice/LinearAccelerationSensor.cpp
++++ b/services/sensorservice/LinearAccelerationSensor.cpp
+@@ -23,6 +23,7 @@
+ #include <hardware/sensors.h>
+ 
+ #include "LinearAccelerationSensor.h"
++#include "FloralSensorIdentity.h"
+ #include "SensorDevice.h"
+ #include "SensorFusion.h"
+ 
+@@ -32,9 +33,11 @@ namespace android {
+ LinearAccelerationSensor::LinearAccelerationSensor(sensor_t const* list, size_t count) :
+         mGravitySensor(list, count) {
+     const Sensor &gsensor = mGravitySensor.getSensor();
++    const FloralSensorIdentity identity = GetFloralSensorIdentity(
++            "linear_acceleration", "Linear Acceleration Sensor", "AOSP");
+     const sensor_t sensor = {
+-        .name       = "Linear Acceleration Sensor",
+-        .vendor     = "AOSP",
++        .name       = identity.name.c_str(),
++        .vendor     = identity.vendor.c_str(),
+         .version    = gsensor.getVersion(),
+         .handle     = '_lin',
+         .type       = SENSOR_TYPE_LINEAR_ACCELERATION,
+diff --git a/services/sensorservice/OrientationSensor.cpp b/services/sensorservice/OrientationSensor.cpp
+index ea5dbc9044..c06edb04f8 100644
+--- a/services/sensorservice/OrientationSensor.cpp
++++ b/services/sensorservice/OrientationSensor.cpp
+@@ -23,6 +23,7 @@
+ #include <hardware/sensors.h>
+ 
+ #include "OrientationSensor.h"
++#include "FloralSensorIdentity.h"
+ #include "SensorDevice.h"
+ #include "SensorFusion.h"
+ 
+@@ -30,9 +31,11 @@ namespace android {
+ // ---------------------------------------------------------------------------
+ 
+ OrientationSensor::OrientationSensor() {
++    const FloralSensorIdentity identity =
++            GetFloralSensorIdentity("orientation", "Orientation Sensor", "AOSP");
+     const sensor_t sensor = {
+-        .name       = "Orientation Sensor",
+-        .vendor     = "AOSP",
++        .name       = identity.name.c_str(),
++        .vendor     = identity.vendor.c_str(),
+         .version    = 1,
+         .handle     = '_ypr',
+         .type       = SENSOR_TYPE_ORIENTATION,
+diff --git a/services/sensorservice/RotationVectorSensor.cpp b/services/sensorservice/RotationVectorSensor.cpp
+index f2ea02eb00..c73dba9b40 100644
+--- a/services/sensorservice/RotationVectorSensor.cpp
++++ b/services/sensorservice/RotationVectorSensor.cpp
+@@ -23,15 +23,35 @@
+ #include <hardware/sensors.h>
+ 
+ #include "RotationVectorSensor.h"
++#include "FloralSensorIdentity.h"
+ 
+ namespace android {
+ // ---------------------------------------------------------------------------
+ 
++namespace {
++
++const char* IdentityKeyForMode(int mode) {
++    switch (mode) {
++        case FUSION_9AXIS:
++            return "rotation_vector";
++        case FUSION_NOMAG:
++            return "game_rotation_vector";
++        case FUSION_NOGYRO:
++            return "geomagnetic_rotation_vector";
++        default:
++            return "rotation_vector";
++    }
++}
++
++}  // namespace
++
+ RotationVectorSensor::RotationVectorSensor(int mode) :
+       mMode(mode) {
++    const FloralSensorIdentity identity =
++            GetFloralSensorIdentity(IdentityKeyForMode(mode), getSensorName(), "AOSP");
+     const sensor_t sensor = {
+-        .name       = getSensorName(),
+-        .vendor     = "AOSP",
++        .name       = identity.name.c_str(),
++        .vendor     = identity.vendor.c_str(),
+         .version    = 3,
+         .handle     = getSensorToken(),
+         .type       = getSensorType(),
+@@ -115,9 +135,11 @@ int RotationVectorSensor::getSensorToken() const {
+ // ---------------------------------------------------------------------------
+ 
+ GyroDriftSensor::GyroDriftSensor() {
++    const FloralSensorIdentity identity = GetFloralSensorIdentity(
++            "gyroscope_bias", "Gyroscope Bias (debug)", "AOSP");
+     const sensor_t sensor = {
+-        .name       = "Gyroscope Bias (debug)",
+-        .vendor     = "AOSP",
++        .name       = identity.name.c_str(),
++        .vendor     = identity.vendor.c_str(),
+         .version    = 1,
+         .handle     = '_gbs',
+         .type       = SENSOR_TYPE_ACCELEROMETER,
+-- 
+2.47.3
+
