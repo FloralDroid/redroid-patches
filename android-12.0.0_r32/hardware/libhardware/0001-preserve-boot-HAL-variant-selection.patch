@@ -1,0 +1,29 @@
+From 3275f89942223f92afcaf0617bc7d9487acddfb5 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 11 Sep 2026 15:02:36 +0800
+Subject: [PATCH] libhardware: preserve boot HAL variant selection
+
+Change-Id: I2f7facc7be03814033852626857a008a30e690a8
+---
+ hardware.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/hardware.c b/hardware.c
+index 6e72ce9f..6f16270b 100644
+--- a/hardware.c
++++ b/hardware.c
+@@ -57,8 +57,9 @@
+  */
+ 
+ static const char *variant_keys[] = {
+-    "ro.hardware",  /* This goes first so that it can pick up a different
+-                       file on the emulator. */
++    "ro.boot.hardware",  /* Keep HAL selection tied to the boot platform when
++                             ro.hardware presents a device profile identity. */
++    "ro.hardware",
+     "ro.product.board",
+     "ro.board.platform",
+     "ro.arch"
+-- 
+2.47.3
+

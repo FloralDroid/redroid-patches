@@ -1,0 +1,84 @@
+From 97f61203e8c364c3fac8d9ce2e987de585818b7a Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 11 Sep 2026 15:09:14 +0800
+Subject: [PATCH] sepolicy: allow Floral framebuffer identity views
+
+Change-Id: Iffd299d6be49554e0569612110263c028f749d99
+---
+ prebuilts/api/31.0/private/floral_lxcfs_bind.te | 6 ++++++
+ private/floral_lxcfs_bind.te                    | 6 ++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/prebuilts/api/31.0/private/floral_lxcfs_bind.te b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
+index e83f95623..b0a91c7f3 100644
+--- a/prebuilts/api/31.0/private/floral_lxcfs_bind.te
++++ b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
+@@ -1,10 +1,12 @@
+ type floral_lxcfs_bind, domain, coredomain;
+ type floral_lxcfs_bind_exec, system_file_type, exec_type, file_type;
++type floral_lxcfs_bind_tmpfs, file_type;
+ type sysfs_floral_dmi, fs_type, sysfs_type;
+ type sysfs_floral_node, fs_type, sysfs_type;
+ 
+ # Run the short-lived mount helper in its own init domain.
+ init_daemon_domain(floral_lxcfs_bind)
++tmpfs_domain(floral_lxcfs_bind)
+ 
+ # Bind mounts require CAP_SYS_ADMIN even though the source FUSE filesystem
+ # already exists in the container mount namespace.
+@@ -18,6 +20,8 @@ allow floral_lxcfs_bind fuse:file r_file_perms;
+ # Keep isolated processes within the platform's existing sysfs restrictions.
+ r_dir_file({ domain -isolated_app }, sysfs_floral_dmi)
+ r_dir_file({ domain -isolated_app }, sysfs_floral_node)
++# Generated framebuffer files retain this source label after their bind mount.
++allow { domain -isolated_app } floral_lxcfs_bind_tmpfs:file r_file_perms;
+ 
+ # Avoid stacking duplicate views when init retries the oneshot service.
+ allow floral_lxcfs_bind proc_mounts:file r_file_perms;
+@@ -47,6 +51,8 @@ allow floral_lxcfs_bind {
+   sysfs_floral_dmi
+   sysfs_floral_node
+ }:dir { getattr mounton search };
++# The class link can resolve to a host-specific PCI path with the generic type.
++allow floral_lxcfs_bind sysfs:file { getattr mounton };
+ 
+ # floral_lxcfs_bind uses android::base::KernelLogger during early boot.
+ allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+diff --git a/private/floral_lxcfs_bind.te b/private/floral_lxcfs_bind.te
+index e83f95623..b0a91c7f3 100644
+--- a/private/floral_lxcfs_bind.te
++++ b/private/floral_lxcfs_bind.te
+@@ -1,10 +1,12 @@
+ type floral_lxcfs_bind, domain, coredomain;
+ type floral_lxcfs_bind_exec, system_file_type, exec_type, file_type;
++type floral_lxcfs_bind_tmpfs, file_type;
+ type sysfs_floral_dmi, fs_type, sysfs_type;
+ type sysfs_floral_node, fs_type, sysfs_type;
+ 
+ # Run the short-lived mount helper in its own init domain.
+ init_daemon_domain(floral_lxcfs_bind)
++tmpfs_domain(floral_lxcfs_bind)
+ 
+ # Bind mounts require CAP_SYS_ADMIN even though the source FUSE filesystem
+ # already exists in the container mount namespace.
+@@ -18,6 +20,8 @@ allow floral_lxcfs_bind fuse:file r_file_perms;
+ # Keep isolated processes within the platform's existing sysfs restrictions.
+ r_dir_file({ domain -isolated_app }, sysfs_floral_dmi)
+ r_dir_file({ domain -isolated_app }, sysfs_floral_node)
++# Generated framebuffer files retain this source label after their bind mount.
++allow { domain -isolated_app } floral_lxcfs_bind_tmpfs:file r_file_perms;
+ 
+ # Avoid stacking duplicate views when init retries the oneshot service.
+ allow floral_lxcfs_bind proc_mounts:file r_file_perms;
+@@ -47,6 +51,8 @@ allow floral_lxcfs_bind {
+   sysfs_floral_dmi
+   sysfs_floral_node
+ }:dir { getattr mounton search };
++# The class link can resolve to a host-specific PCI path with the generic type.
++allow floral_lxcfs_bind sysfs:file { getattr mounton };
+ 
+ # floral_lxcfs_bind uses android::base::KernelLogger during early boot.
+ allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+-- 
+2.47.3
+
