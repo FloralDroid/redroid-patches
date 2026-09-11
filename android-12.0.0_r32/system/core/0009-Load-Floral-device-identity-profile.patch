@@ -1,4 +1,4 @@
-From fa57a92cd1df81ba0c62cf050d8e47a361d3d6a0 Mon Sep 17 00:00:00 2001
+From b406ee9f879310ceece3adce9f0d335ee8dfb6c7 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Sun, 30 Aug 2026 14:36:39 +0800
 Subject: [PATCH] init: load Floral device identity profile
@@ -8,11 +8,11 @@ Change-Id: Id0d4f5e3bcd46feff416288274978da619368eab
  init/Android.bp                     |   3 +
  init/floral_device_profile.cpp      | 183 ++++++++++++++++++++++++++++
  init/floral_device_profile.h        |  37 ++++++
- init/floral_device_profile_test.cpp | 112 +++++++++++++++++
+ init/floral_device_profile_test.cpp | 126 +++++++++++++++++++
  init/property_service.cpp           |  38 +++++-
  init/ueventd.cpp                    |   2 +-
  rootdir/init.rc                     |   4 +-
- 7 files changed, 373 insertions(+), 6 deletions(-)
+ 7 files changed, 387 insertions(+), 6 deletions(-)
  create mode 100644 init/floral_device_profile.cpp
  create mode 100644 init/floral_device_profile.h
  create mode 100644 init/floral_device_profile_test.cpp
@@ -47,7 +47,7 @@ index 7eeafa24b..fd4c75f72 100644
          "oneshot_on_test.cpp",
 diff --git a/init/floral_device_profile.cpp b/init/floral_device_profile.cpp
 new file mode 100644
-index 000000000..4e32b2b5b
+index 000000000..882b9d768
 --- /dev/null
 +++ b/init/floral_device_profile.cpp
 @@ -0,0 +1,183 @@
@@ -162,7 +162,6 @@ index 000000000..4e32b2b5b
 +            {"ro.product.board", Required(profile, "board")},
 +            {"ro.soc.manufacturer", Required(profile, "soc_manufacturer")},
 +            {"ro.soc.model", Required(profile, "soc_model")},
-+            {"ro.hardware", Required(profile, "soc_model")},
 +            {"ro.boot.floral_gpu_vendor", Required(profile, "gpu_vendor")},
 +            {"ro.boot.floral_gpu_model", Required(profile, "gpu_model")},
 +            {"ro.build.id", build_id},
@@ -206,6 +205,7 @@ index 000000000..4e32b2b5b
 +    AddOptionalProperty(profile, "build_host", "ro.build.host", &properties);
 +    AddOptionalProperty(profile, "build_date", "ro.build.date", &properties);
 +    AddOptionalProperty(profile, "build_date_utc", "ro.build.date.utc", &properties);
++    AddOptionalProperty(profile, "hardware", "ro.hardware", &properties);
 +    AddOptionalProperty(profile, "kernel_release", "ro.boot.floral_kernel_release", &properties);
 +    AddOptionalProperty(profile, "kernel_version", "ro.boot.floral_kernel_version", &properties);
 +    AddOptionalProperty(profile, "memory_type", "ro.boot.floral_memory_type", &properties);
@@ -279,10 +279,10 @@ index 000000000..71f200ce1
 +}  // namespace android
 diff --git a/init/floral_device_profile_test.cpp b/init/floral_device_profile_test.cpp
 new file mode 100644
-index 000000000..4af9b7224
+index 000000000..3f4f165c5
 --- /dev/null
 +++ b/init/floral_device_profile_test.cpp
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,126 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -315,6 +315,7 @@ index 000000000..4af9b7224
 +device=OP528BL1
 +product=PGEM10
 +board=taro
++hardware=qcom
 +soc_manufacturer=Qualcomm
 +soc_model=SM8450
 +gpu_vendor=Qualcomm
@@ -362,7 +363,7 @@ index 000000000..4af9b7224
 +            "OPPO/PGEM10/OP528BL1:12/SKQ1.211006.001/164808:user/release-keys";
 +
 +    EXPECT_EQ(properties.at("ro.product.model"), "PGEM10");
-+    EXPECT_EQ(properties.at("ro.hardware"), "SM8450");
++    EXPECT_EQ(properties.at("ro.hardware"), "qcom");
 +    EXPECT_EQ(properties.at("ro.build.fingerprint"), fingerprint);
 +    for (std::string_view partition :
 +         {"odm", "product", "system", "system_ext", "vendor", "vendor_dlkm"}) {
@@ -390,6 +391,19 @@ index 000000000..4af9b7224
 +    EXPECT_EQ(mapped->find("ro.product.cpu.abilist"), mapped->end());
 +    EXPECT_EQ(mapped->find("ro.build.version.sdk"), mapped->end());
 +    EXPECT_EQ(mapped->find("ro.hardware.hwcomposer"), mapped->end());
++}
++
++TEST(floral_device_profile, HardwareIdentityIsOptional) {
++    std::string profile(kValidProfile);
++    const size_t begin = profile.find("hardware=qcom\n");
++    ASSERT_NE(begin, std::string::npos);
++    profile.erase(begin, sizeof("hardware=qcom\n") - 1);
++
++    auto parsed = ParseFloralDeviceProfile(profile);
++    ASSERT_TRUE(parsed.ok()) << parsed.error();
++    auto mapped = FloralDeviceProfileProperties(*parsed);
++    ASSERT_TRUE(mapped.ok()) << mapped.error();
++    EXPECT_EQ(mapped->find("ro.hardware"), mapped->end());
 +}
 +
 +}  // namespace
