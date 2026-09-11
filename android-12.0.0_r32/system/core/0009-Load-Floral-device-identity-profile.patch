@@ -1,4 +1,4 @@
-From bfa79af9ffe47830713b95d0165cd4e01b954b09 Mon Sep 17 00:00:00 2001
+From fa57a92cd1df81ba0c62cf050d8e47a361d3d6a0 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Sun, 30 Aug 2026 14:36:39 +0800
 Subject: [PATCH] init: load Floral device identity profile
@@ -6,11 +6,13 @@ Subject: [PATCH] init: load Floral device identity profile
 Change-Id: Id0d4f5e3bcd46feff416288274978da619368eab
 ---
  init/Android.bp                     |   3 +
- init/floral_device_profile.cpp      | 182 ++++++++++++++++++++++++++++
+ init/floral_device_profile.cpp      | 183 ++++++++++++++++++++++++++++
  init/floral_device_profile.h        |  37 ++++++
  init/floral_device_profile_test.cpp | 112 +++++++++++++++++
  init/property_service.cpp           |  38 +++++-
- 5 files changed, 369 insertions(+), 3 deletions(-)
+ init/ueventd.cpp                    |   2 +-
+ rootdir/init.rc                     |   4 +-
+ 7 files changed, 373 insertions(+), 6 deletions(-)
  create mode 100644 init/floral_device_profile.cpp
  create mode 100644 init/floral_device_profile.h
  create mode 100644 init/floral_device_profile_test.cpp
@@ -45,10 +47,10 @@ index 7eeafa24b..fd4c75f72 100644
          "oneshot_on_test.cpp",
 diff --git a/init/floral_device_profile.cpp b/init/floral_device_profile.cpp
 new file mode 100644
-index 000000000..c67757096
+index 000000000..4e32b2b5b
 --- /dev/null
 +++ b/init/floral_device_profile.cpp
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,183 @@
 +/*
 + * Copyright 2026 FloralDroid
 + *
@@ -160,6 +162,7 @@ index 000000000..c67757096
 +            {"ro.product.board", Required(profile, "board")},
 +            {"ro.soc.manufacturer", Required(profile, "soc_manufacturer")},
 +            {"ro.soc.model", Required(profile, "soc_model")},
++            {"ro.hardware", Required(profile, "soc_model")},
 +            {"ro.boot.floral_gpu_vendor", Required(profile, "gpu_vendor")},
 +            {"ro.boot.floral_gpu_model", Required(profile, "gpu_model")},
 +            {"ro.build.id", build_id},
@@ -276,7 +279,7 @@ index 000000000..71f200ce1
 +}  // namespace android
 diff --git a/init/floral_device_profile_test.cpp b/init/floral_device_profile_test.cpp
 new file mode 100644
-index 000000000..9bae9ef26
+index 000000000..4af9b7224
 --- /dev/null
 +++ b/init/floral_device_profile_test.cpp
 @@ -0,0 +1,112 @@
@@ -359,6 +362,7 @@ index 000000000..9bae9ef26
 +            "OPPO/PGEM10/OP528BL1:12/SKQ1.211006.001/164808:user/release-keys";
 +
 +    EXPECT_EQ(properties.at("ro.product.model"), "PGEM10");
++    EXPECT_EQ(properties.at("ro.hardware"), "SM8450");
 +    EXPECT_EQ(properties.at("ro.build.fingerprint"), fingerprint);
 +    for (std::string_view partition :
 +         {"odm", "product", "system", "system_ext", "vendor", "vendor_dlkm"}) {
@@ -376,7 +380,7 @@ index 000000000..9bae9ef26
 +    EXPECT_EQ(properties.find("ro.odm_dlkm.build.fingerprint"), properties.end());
 +}
 +
-+TEST(floral_device_profile, DoesNotOverrideRuntimeArchitectureOrHalSelection) {
++TEST(floral_device_profile, DoesNotOverrideRuntimeArchitectureOrHalClassSelection) {
 +    auto parsed = ParseFloralDeviceProfile(kValidProfile);
 +    ASSERT_TRUE(parsed.ok()) << parsed.error();
 +    auto mapped = FloralDeviceProfileProperties(*parsed);
@@ -385,7 +389,6 @@ index 000000000..9bae9ef26
 +    EXPECT_EQ(mapped->find("ro.product.cpu.abi"), mapped->end());
 +    EXPECT_EQ(mapped->find("ro.product.cpu.abilist"), mapped->end());
 +    EXPECT_EQ(mapped->find("ro.build.version.sdk"), mapped->end());
-+    EXPECT_EQ(mapped->find("ro.hardware"), mapped->end());
 +    EXPECT_EQ(mapped->find("ro.hardware.hwcomposer"), mapped->end());
 +}
 +
@@ -471,6 +474,34 @@ index 55e89c647..954454e55 100755
              LOG(ERROR) << "Could not set '" << name << "' to '" << value
                         << "' while loading .prop files" << error;
          }
+diff --git a/init/ueventd.cpp b/init/ueventd.cpp
+index 331255b1e..62078a26e 100644
+--- a/init/ueventd.cpp
++++ b/init/ueventd.cpp
+@@ -270,7 +270,7 @@ void ColdBoot::Run() {
+ static UeventdConfiguration GetConfiguration() {
+     // TODO: Remove these legacy paths once Android S is no longer supported.
+     if (android::base::GetIntProperty("ro.product.first_api_level", 10000) <= __ANDROID_API_S__) {
+-        auto hardware = android::base::GetProperty("ro.hardware", "");
++        auto hardware = android::base::GetProperty("ro.boot.hardware", "");
+         return ParseConfig({"/system/etc/ueventd.rc", "/vendor/ueventd.rc", "/odm/ueventd.rc",
+                             "/ueventd." + hardware + ".rc"});
+     }
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 981ab45e3..5dbc6c01a 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -6,8 +6,8 @@
+ 
+ import /init.environ.rc
+ import /system/etc/init/hw/init.usb.rc
+-import /init.${ro.hardware}.rc
+-import /vendor/etc/init/hw/init.${ro.hardware}.rc
++import /init.${ro.boot.hardware}.rc
++import /vendor/etc/init/hw/init.${ro.boot.hardware}.rc
+ import /system/etc/init/hw/init.usb.configfs.rc
+ import /system/etc/init/hw/init.${ro.zygote}.rc
+ 
 -- 
 2.47.3
 
