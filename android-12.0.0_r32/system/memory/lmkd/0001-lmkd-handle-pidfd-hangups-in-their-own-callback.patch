@@ -1,0 +1,57 @@
+From 3794b7a5de69103cb3fe3b9826778052d44f2791 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 30 Sep 2026 14:45:35 +0800
+Subject: [PATCH] lmkd: handle pidfd hangups in their own callback
+
+A reaped pidfd can report EPOLLIN together with EPOLLHUP. Treating
+all hangups as control connection closures closes data_sock[0]
+and skips kill_done_handler. Repeated notifications then decrement
+maxevents until epoll_wait fails with EINVAL in a busy loop; the
+kill timeout cleanup can further reduce the count to -1.
+
+Only close control data connections in the first pass, and only skip
+those hangups in the second pass. Dispatch pidfd hangups to their
+own handler so process death is acknowledged and cleaned up once.
+---
+ lmkd.cpp | 15 +++++++++------
+ 1 file changed, 9 insertions(+), 6 deletions(-)
+
+diff --git a/lmkd.cpp b/lmkd.cpp
+index faa55b2..1ebcc8d 100644
+--- a/lmkd.cpp
++++ b/lmkd.cpp
+@@ -3369,9 +3369,11 @@ static void mainloop(void) {
+          */
+         for (i = 0, evt = &events[0]; i < nevents; ++i, evt++) {
+             if ((evt->events & EPOLLHUP) && evt->data.ptr) {
+-                ALOGI("lmkd data connection dropped");
+                 handler_info = (struct event_handler_info*)evt->data.ptr;
+-                ctrl_data_close(handler_info->data);
++                if (handler_info->handler == ctrl_data_handler) {
++                    ALOGI("lmkd data connection dropped");
++                    ctrl_data_close(handler_info->data);
++                }
+             }
+         }
+ 
+@@ -3380,12 +3382,13 @@ static void mainloop(void) {
+             if (evt->events & EPOLLERR) {
+                 ALOGD("EPOLLERR on event #%d", i);
+             }
+-            if (evt->events & EPOLLHUP) {
+-                /* This case was handled in the first pass */
+-                continue;
+-            }
+             if (evt->data.ptr) {
+                 handler_info = (struct event_handler_info*)evt->data.ptr;
++                if ((evt->events & EPOLLHUP) && handler_info->handler == ctrl_data_handler) {
++                    /* Data connection hangups were handled in the first pass. */
++                    continue;
++                }
++                /* A reaped pidfd can report EPOLLHUP together with EPOLLIN. */
+                 call_handler(handler_info, &poll_params, evt->events);
+             }
+         }
+-- 
+2.47.3
+
