@@ -1,0 +1,114 @@
+From 1eab1c5d57744cc83a8aea5086eae977d3c898a8 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 15 Oct 2026 13:53:19 +0800
+Subject: [PATCH] sepolicy: confine container Ethernet initialization
+
+Give the system ipconfigstore helper a dedicated init domain and Ethernet data type. Keep legacy Minigbm selectors in the existing exported_default_prop class so only init/vendor_init configure them. Mirror the private policy in the Android 12 API snapshot.
+
+Change-Id: I0d3adbdcc9a44c4757e4cfc017d0dee30b515393
+---
+ prebuilts/api/31.0/private/file_contexts       |  4 ++++
+ prebuilts/api/31.0/private/property_contexts   |  4 ++++
+ prebuilts/api/31.0/private/redroid_ipconfig.te | 16 ++++++++++++++++
+ private/file_contexts                          |  4 ++++
+ private/property_contexts                      |  4 ++++
+ private/redroid_ipconfig.te                    | 16 ++++++++++++++++
+ 6 files changed, 48 insertions(+)
+ create mode 100644 prebuilts/api/31.0/private/redroid_ipconfig.te
+ create mode 100644 private/redroid_ipconfig.te
+
+diff --git a/prebuilts/api/31.0/private/file_contexts b/prebuilts/api/31.0/private/file_contexts
+index 00ac720..b85917f 100644
+--- a/prebuilts/api/31.0/private/file_contexts
++++ b/prebuilts/api/31.0/private/file_contexts
+@@ -810,3 +810,7 @@
+ /(system|product)/bin/check_dynamic_partitions  u:object_r:postinstall_exec:s0
+ /(system|product)/bin/otapreopt_script          u:object_r:postinstall_exec:s0
+ /(system|product)/bin/otapreopt                 u:object_r:postinstall_dexopt_exec:s0
++
++# Container Ethernet configuration is platform data, not vendor data.
++/system/bin/ipconfigstore    u:object_r:redroid_ipconfig_exec:s0
++/data/misc/ethernet(/.*)?    u:object_r:redroid_ethernet_data_file:s0
+diff --git a/prebuilts/api/31.0/private/property_contexts b/prebuilts/api/31.0/private/property_contexts
+index da02897..e4c45d1 100644
+--- a/prebuilts/api/31.0/private/property_contexts
++++ b/prebuilts/api/31.0/private/property_contexts
+@@ -1224,3 +1224,7 @@ ro.bootanim.quiescent.enabled u:object_r:bootanim_config_prop:s0 exact bool
+ 
+ # dck properties
+ ro.gms.dck.eligible_wcc u:object_r:dck_prop:s0 exact int
++
++# Legacy Minigbm selectors are set only by init/vendor_init.
++gralloc.gbm.backend    u:object_r:exported_default_prop:s0 exact string
++gralloc.gbm.device     u:object_r:exported_default_prop:s0 exact string
+diff --git a/prebuilts/api/31.0/private/redroid_ipconfig.te b/prebuilts/api/31.0/private/redroid_ipconfig.te
+new file mode 100644
+index 0000000..9373458
+--- /dev/null
++++ b/prebuilts/api/31.0/private/redroid_ipconfig.te
+@@ -0,0 +1,16 @@
++# Initialize Android's Ethernet configuration from the container network.
++type redroid_ipconfig, domain, coredomain;
++type redroid_ipconfig_exec, exec_type, system_file_type, file_type;
++type redroid_ethernet_data_file, file_type, data_file_type, core_data_file_type;
++init_daemon_domain(redroid_ipconfig)
++
++allow redroid_ipconfig system_data_file:dir search;
++allow redroid_ipconfig redroid_ethernet_data_file:dir rw_dir_perms;
++allow redroid_ipconfig redroid_ethernet_data_file:file create_file_perms;
++allow redroid_ipconfig self:netlink_route_socket { create bind read write getattr nlmsg_read };
++allow redroid_ipconfig proc_net_type:dir search;
++allow redroid_ipconfig proc_net_type:file r_file_perms;
++
++# EthernetConfigStore reads, replaces and migrates this platform-owned file.
++allow system_server redroid_ethernet_data_file:dir create_dir_perms;
++allow system_server redroid_ethernet_data_file:file create_file_perms;
+diff --git a/private/file_contexts b/private/file_contexts
+index 00ac720..b85917f 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -810,3 +810,7 @@
+ /(system|product)/bin/check_dynamic_partitions  u:object_r:postinstall_exec:s0
+ /(system|product)/bin/otapreopt_script          u:object_r:postinstall_exec:s0
+ /(system|product)/bin/otapreopt                 u:object_r:postinstall_dexopt_exec:s0
++
++# Container Ethernet configuration is platform data, not vendor data.
++/system/bin/ipconfigstore    u:object_r:redroid_ipconfig_exec:s0
++/data/misc/ethernet(/.*)?    u:object_r:redroid_ethernet_data_file:s0
+diff --git a/private/property_contexts b/private/property_contexts
+index da02897..e4c45d1 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -1224,3 +1224,7 @@ ro.bootanim.quiescent.enabled u:object_r:bootanim_config_prop:s0 exact bool
+ 
+ # dck properties
+ ro.gms.dck.eligible_wcc u:object_r:dck_prop:s0 exact int
++
++# Legacy Minigbm selectors are set only by init/vendor_init.
++gralloc.gbm.backend    u:object_r:exported_default_prop:s0 exact string
++gralloc.gbm.device     u:object_r:exported_default_prop:s0 exact string
+diff --git a/private/redroid_ipconfig.te b/private/redroid_ipconfig.te
+new file mode 100644
+index 0000000..9373458
+--- /dev/null
++++ b/private/redroid_ipconfig.te
+@@ -0,0 +1,16 @@
++# Initialize Android's Ethernet configuration from the container network.
++type redroid_ipconfig, domain, coredomain;
++type redroid_ipconfig_exec, exec_type, system_file_type, file_type;
++type redroid_ethernet_data_file, file_type, data_file_type, core_data_file_type;
++init_daemon_domain(redroid_ipconfig)
++
++allow redroid_ipconfig system_data_file:dir search;
++allow redroid_ipconfig redroid_ethernet_data_file:dir rw_dir_perms;
++allow redroid_ipconfig redroid_ethernet_data_file:file create_file_perms;
++allow redroid_ipconfig self:netlink_route_socket { create bind read write getattr nlmsg_read };
++allow redroid_ipconfig proc_net_type:dir search;
++allow redroid_ipconfig proc_net_type:file r_file_perms;
++
++# EthernetConfigStore reads, replaces and migrates this platform-owned file.
++allow system_server redroid_ethernet_data_file:dir create_dir_perms;
++allow system_server redroid_ethernet_data_file:file create_file_perms;
+-- 
+2.47.3
+
