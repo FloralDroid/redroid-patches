@@ -1,10 +1,10 @@
-From bd8cdcd6b3179baaf76b873577a7028de843df9c Mon Sep 17 00:00:00 2001
+From 16543bc868e927ff2c5c38a75276163a7ecbeb50 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Thu, 15 Oct 2026 14:07:03 +0800
 Subject: [PATCH] sepolicy: label Floral HALs and permit native graphics and
  codec clients
 
-Restore vendor probe and HAL domain transitions, label DRI and same-process driver dependencies, and separate public identity properties from boot configuration. Grant concrete app domains the allocator and Codec2 roles while preserving isolated app neverallows. Give Codec2 FMQ memfd objects a shared type and permit SwiftShader JIT in SurfaceFlinger.
+Restore vendor probe and HAL domain transitions, label DRI and same-process driver dependencies, and separate public identity properties from boot configuration. Grant concrete app domains the allocator and Codec2 roles while preserving isolated app neverallows. Give Codec2 FMQ memfd objects a shared type. Keep the SwiftShader execmem grant out of the production SurfaceFlinger policy.
 ---
  redroid_arm64/BoardConfig.mk                  |  1 +
  redroid_arm64_only/BoardConfig.mk             |  1 +
@@ -23,8 +23,8 @@ Restore vendor probe and HAL domain transitions, label DRI and same-process driv
  sepolicy/vendor/property_contexts             |  8 +++++++
  sepolicy/vendor/redroid_init.te               | 17 +++++++++++++++
  sepolicy/vendor/rild.te                       |  2 ++
- sepolicy/vendor/surfaceflinger.te             |  5 +++++
- 18 files changed, 97 insertions(+)
+ sepolicy/vendor/surfaceflinger.te             |  2 ++
+ 18 files changed, 94 insertions(+)
  create mode 100644 sepolicy/vendor/app.te
  create mode 100644 sepolicy/vendor/domain.te
  create mode 100644 sepolicy/vendor/file.te
@@ -256,15 +256,12 @@ index 0000000..d74de77
 +binder_use(rild)
 diff --git a/sepolicy/vendor/surfaceflinger.te b/sepolicy/vendor/surfaceflinger.te
 new file mode 100644
-index 0000000..6e4d9bd
+index 0000000..4488b5e
 --- /dev/null
 +++ b/sepolicy/vendor/surfaceflinger.te
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,2 @@
 +# Read the explicit secure-capture setting used by the Floral compositor.
 +get_prop(surfaceflinger, vendor_floral_config_prop)
-+
-+# SwiftShader compiles rendering routines in the compositor process.
-+allow surfaceflinger self:process execmem;
 -- 
 2.47.3
 
