@@ -1,4 +1,4 @@
-From ac082798e54ba5e57844b66404ed0e96a874d6d0 Mon Sep 17 00:00:00 2001
+From d34272949381bab0face81b01558a193ccb63a13 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Fri, 16 Oct 2026 12:00:00 +0800
 Subject: [PATCH] Launcher3: keep hotseat labels reserved after boot
@@ -24,11 +24,65 @@ not computed yet, make sure the hotseat is at least as tall as its own cell
 height (hotseatBarSizeExtraSpacePx can be negative), and re-apply the hotseat
 padding and height from the current DeviceProfile on every measure pass so the
 label area is always reserved.
----
- src/com/android/launcher3/DeviceProfile.java | 30 ++++++++++++++-----
- src/com/android/launcher3/Hotseat.java       | 31 ++++++++++++++++++++
- 2 files changed, 53 insertions(+), 8 deletions(-)
 
+Keep the label visibility policy consistent with that reserved space, too.
+BubbleTextView.shouldTextBeVisible() still treats every hotseat container as
+icon-only, so the popup close animation and closeComplete() hide an app label
+again after a drag into the bottom hotseat. Restore labels for the horizontal
+hotseat using the current DeviceProfile, while retaining icon-only vertical
+hotseats and DISPLAY_TASKBAR views. Let PredictedAppIcon.finishBinding() use
+the same policy instead of unconditionally hiding its label.
+
+Temporary popup/drag fades are unchanged; the restored resting state now agrees
+with CellLayout's bottom-hotseat label visibility. Keep the original boot-time
+height and padding fixes unchanged. Host method-level regressions cover popup
+cleanup/fade completion after moving into both hotseat containers, prediction
+binding, current-profile changes, and vertical/taskbar behavior. No Android
+build, device deployment or instrumented UI regression was performed.
+---
+ .../uioverrides/PredictedAppIcon.java         |  2 +-
+ src/com/android/launcher3/BubbleTextView.java | 11 +++++--
+ src/com/android/launcher3/DeviceProfile.java  | 30 +++++++++++++-----
+ src/com/android/launcher3/Hotseat.java        | 31 +++++++++++++++++++
+ 4 files changed, 62 insertions(+), 12 deletions(-)
+
+diff --git a/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java b/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java
+index d839a36..b925ec4 100644
+--- a/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java
++++ b/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java
+@@ -139,7 +139,7 @@ public class PredictedAppIcon extends DoubleShadowBubbleTextView {
+     public void finishBinding(OnLongClickListener longClickListener) {
+         setOnLongClickListener(longClickListener);
+         ((CellLayout.LayoutParams) getLayoutParams()).canReorder = false;
+-        setTextVisibility(false);
++        setTextVisibility(shouldTextBeVisible());
+         verifyHighRes();
+     }
+ 
+diff --git a/src/com/android/launcher3/BubbleTextView.java b/src/com/android/launcher3/BubbleTextView.java
+index ddbd425..55989e7 100644
+--- a/src/com/android/launcher3/BubbleTextView.java
++++ b/src/com/android/launcher3/BubbleTextView.java
+@@ -521,11 +521,16 @@ public class BubbleTextView extends TextView implements ItemInfoUpdateReceiver,
+     }
+ 
+     public boolean shouldTextBeVisible() {
+-        // Text should be visible everywhere but the hotseat.
+         Object tag = getParent() instanceof FolderIcon ? ((View) getParent()).getTag() : getTag();
+         ItemInfo info = tag instanceof ItemInfo ? (ItemInfo) tag : null;
+-        return info == null || (info.container != LauncherSettings.Favorites.CONTAINER_HOTSEAT
+-                && info.container != LauncherSettings.Favorites.CONTAINER_HOTSEAT_PREDICTION);
++        if (info != null && (info.container == LauncherSettings.Favorites.CONTAINER_HOTSEAT
++                || info.container == LauncherSettings.Favorites.CONTAINER_HOTSEAT_PREDICTION)) {
++            // Popup/drag cleanup must restore bottom hotseat labels just like CellLayout does.
++            // Keep the compact vertical hotseat and taskbar icon-only.
++            return mDisplay != DISPLAY_TASKBAR
++                    && !mActivity.getDeviceProfile().isVerticalBarLayout();
++        }
++        return true;
+     }
+ 
+     public void setTextVisibility(boolean visible) {
 diff --git a/src/com/android/launcher3/DeviceProfile.java b/src/com/android/launcher3/DeviceProfile.java
 index df3705d..15be498 100644
 --- a/src/com/android/launcher3/DeviceProfile.java
