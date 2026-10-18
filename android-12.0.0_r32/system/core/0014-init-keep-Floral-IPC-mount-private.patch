@@ -1,0 +1,304 @@
+From eea89554f20fd732dc75001174eec97b6876c120 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sat, 17 Oct 2026 20:06:07 +0800
+Subject: [PATCH] init: keep Floral IPC private before cloning mount namespaces
+
+SetupMountNamespaces recursively makes the root shared. Restore the
+per-generation Floral IPC leaf to private before bootstrap/default
+namespaces diverge, rather than relying on a later early-init action.
+
+Require a single existing safe mount, pin its no-follow directory FD,
+check mount identity before and after the propagation change, and reject
+unexpected flags, propagation, submounts, owners and modes. Do not create
+a fallback transport when the optional container mount is absent.
+
+Keep Android root propagation unchanged and cover the mountinfo checks
+with init unit tests. Host validation also exercises the actual helper
+in disposable mount/PID namespaces; Android product/board acceptance is
+still required.
+---
+ init/Android.bp                |   1 +
+ init/floral_ipc_mount.h        | 165 +++++++++++++++++++++++++++++++++
+ init/floral_ipc_mount_test.cpp |  58 ++++++++++++
+ init/mount_namespace.cpp       |   9 ++
+ 4 files changed, 233 insertions(+)
+ create mode 100644 init/floral_ipc_mount.h
+ create mode 100644 init/floral_ipc_mount_test.cpp
+
+diff --git a/init/Android.bp b/init/Android.bp
+index fd4c75f..d940021 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -392,6 +392,7 @@ cc_test {
+         "epoll_test.cpp",
+         "firmware_handler_test.cpp",
+         "floral_device_profile_test.cpp",
++        "floral_ipc_mount_test.cpp",
+         "init_test.cpp",
+         "keychords_test.cpp",
+         "oneshot_on_test.cpp",
+diff --git a/init/floral_ipc_mount.h b/init/floral_ipc_mount.h
+new file mode 100644
+index 0000000..9009dd0
+--- /dev/null
++++ b/init/floral_ipc_mount.h
+@@ -0,0 +1,165 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <fcntl.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstring>
++#include <fstream>
++#include <sstream>
++#include <string>
++
++namespace android::init::floral {
++
++constexpr const char* kIpcMount = "/ipc/floral_stream";
++
++inline bool IpcError(std::string* error, const std::string& message) {
++    *error = message;
++    return false;
++}
++
++inline bool HasMountOption(const std::string& options, const std::string& expected) {
++    std::istringstream input(options);
++    std::string option;
++    while (std::getline(input, option, ',')) {
++        if (option == expected) return true;
++    }
++    return false;
++}
++
++// Check the actual single leaf mount, not merely a directory or a parent bind.
++// Mountinfo paths are escaped by the kernel; this fixed path needs no decoding.
++inline bool CheckIpcMount(std::istream& input, bool require_private, unsigned int* mount_id,
++                          std::string* error) {
++    bool found = false;
++    std::string line;
++    while (std::getline(input, line)) {
++        std::istringstream fields(line);
++        unsigned int id, parent;
++        std::string device, root, path, options, field;
++        if (!(fields >> id >> parent >> device >> root >> path >> options) || id == 0) {
++            return IpcError(error, "invalid mountinfo record");
++        }
++        std::string propagation;
++        bool separator = false;
++        while (fields >> field) {
++            if (field == "-") {
++                separator = true;
++                break;
++            }
++            if (!propagation.empty()) propagation += ' ';
++            propagation += field;
++        }
++        std::string fs, source, super_options;
++        if (!separator || !(fields >> fs >> source >> super_options)) {
++            return IpcError(error, "incomplete mountinfo record");
++        }
++        if (path.compare(0, std::strlen(kIpcMount) + 1, std::string(kIpcMount) + "/") == 0) {
++            return IpcError(error, "unexpected mount below Floral IPC");
++        }
++        if (path != kIpcMount) continue;
++        if (found) return IpcError(error, "stacked Floral IPC mounts");
++        found = true;
++        *mount_id = id;
++        for (const char* option : {"rw", "nosuid", "nodev", "noexec"}) {
++            if (!HasMountOption(options, option)) {
++                return IpcError(error, "unsafe Floral IPC mount flags");
++            }
++        }
++        if (HasMountOption(options, "ro")) return IpcError(error, "read-only Floral IPC mount");
++        if (!propagation.empty()) {
++            // Only the shared group created by SetupMountNamespaces is expected.
++            if (require_private || propagation.compare(0, 7, "shared:") != 0) {
++                return IpcError(error, "unexpected Floral IPC propagation");
++            }
++            const auto group = propagation.substr(7);
++            if (group.empty() ||
++                group.find_first_not_of("0123456789") != std::string::npos ||
++                group.find_first_not_of('0') == std::string::npos) {
++                return IpcError(error, "unexpected Floral IPC propagation");
++            }
++        }
++    }
++    if (input.bad()) return IpcError(error, "cannot read mountinfo");
++    return found || IpcError(error, "Floral IPC directory is not a separate mount");
++}
++
++inline bool CheckIpcMountFile(bool require_private, unsigned int* mount_id, std::string* error) {
++    std::ifstream input("/proc/self/mountinfo");
++    if (!input.is_open()) return IpcError(error, "cannot open mountinfo");
++    return CheckIpcMount(input, require_private, mount_id, error);
++}
++
++inline bool KeepIpcMountPrivate(std::string* error) {
++    // No IPC directory is the native/non-container case. Never create a fallback.
++    const int parent = open("/ipc", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    if (parent < 0) {
++        if (errno == ENOENT) return true;
++        return IpcError(error, "cannot open /ipc without following symlinks");
++    }
++    const int leaf = openat(parent, "floral_stream", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    const int open_error = errno;
++    close(parent);
++    if (leaf < 0) {
++        if (open_error == ENOENT) return true;
++        return IpcError(error, "cannot open Floral IPC without following symlinks");
++    }
++    // Own the FD across all validation and mount calls, including error exits.
++    struct CloseFd {
++        int fd;
++        ~CloseFd() { close(fd); }
++    } close_leaf{leaf};
++    struct stat before {};
++    if (fstat(leaf, &before) != 0 || !S_ISDIR(before.st_mode) || before.st_uid != 0 ||
++        before.st_gid != 0 || (before.st_mode & 07777) != 0773) {
++        return IpcError(error, "unsafe Floral IPC directory owner/mode");
++    }
++    unsigned int before_id = 0;
++    if (!CheckIpcMountFile(false, &before_id, error)) return false;
++    std::ifstream fdinfo("/proc/self/fdinfo/" + std::to_string(leaf));
++    std::string line;
++    unsigned int fd_mount_id = 0;
++    while (std::getline(fdinfo, line)) {
++        std::istringstream fields(line);
++        std::string key;
++        if ((fields >> key) && key == "mnt_id:") {
++            if (!(fields >> fd_mount_id)) return IpcError(error, "invalid Floral IPC fdinfo");
++            break;
++        }
++    }
++    if (fd_mount_id != before_id) return IpcError(error, "Floral IPC mount identity changed");
++    // Address the pinned directory, not a pathname which could be substituted.
++    const auto pinned = "/proc/self/fd/" + std::to_string(leaf);
++    if (mount(nullptr, pinned.c_str(), nullptr, MS_PRIVATE, nullptr) != 0) {
++        return IpcError(error, "cannot make Floral IPC private: " + std::string(strerror(errno)));
++    }
++    unsigned int after_id = 0;
++    if (!CheckIpcMountFile(true, &after_id, error) || before_id != after_id) {
++        return IpcError(error, "Floral IPC mount changed during initialization: " + *error);
++    }
++    struct stat after {};
++    if (lstat(kIpcMount, &after) != 0 || before.st_dev != after.st_dev || before.st_ino != after.st_ino) {
++        return IpcError(error, "Floral IPC source changed during initialization");
++    }
++    return true;
++}
++
++}  // namespace android::init::floral
+diff --git a/init/floral_ipc_mount_test.cpp b/init/floral_ipc_mount_test.cpp
+new file mode 100644
+index 0000000..ace4708
+--- /dev/null
++++ b/init/floral_ipc_mount_test.cpp
+@@ -0,0 +1,58 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_ipc_mount.h"
++
++#include <gtest/gtest.h>
++
++namespace android::init::floral {
++
++static bool Check(const std::string& records, bool require_private = false) {
++    std::istringstream input(records);
++    unsigned int id = 0;
++    std::string error;
++    return CheckIpcMount(input, require_private, &id, &error);
++}
++
++static std::string Record(const std::string& options = "rw,nosuid,nodev,noexec",
++                          const std::string& optional = "shared:123 ",
++                          const std::string& path = kIpcMount) {
++    return "42 1 0:23 / " + path + " " + options + " " + optional + "- tmpfs tmpfs rw\n";
++}
++
++TEST(FloralIpcMount, AcceptsOnlyPrivateOrLocalSharedBeforeInitialization) {
++    EXPECT_TRUE(Check(Record()));
++    EXPECT_TRUE(Check(Record("rw,nosuid,nodev,noexec", ""), true));
++    for (const auto* optional : {"shared:1 ", "master:1 ", "shared:1 master:2 ",
++                                 "shared:0 ", "shared: ", "shared:abc ", "unbindable "}) {
++        EXPECT_FALSE(Check(Record("rw,nosuid,nodev,noexec", optional), true));
++    }
++    EXPECT_FALSE(Check(Record("rw,nosuid,nodev,noexec", "master:1 ")));
++}
++
++TEST(FloralIpcMount, RejectsUnsafeOrMissingMounts) {
++    EXPECT_FALSE(Check(""));
++    EXPECT_FALSE(Check(Record() + Record()));
++    EXPECT_FALSE(Check(Record() + Record("rw,nosuid,nodev,noexec", "", "/ipc/floral_stream/child")));
++    for (const auto* flags : {"rw,nodev,noexec", "rw,nosuid,noexec", "rw,nosuid,nodev",
++                              "ro,nosuid,nodev,noexec", "rw,ro,nosuid,nodev,noexec"}) {
++        EXPECT_FALSE(Check(Record(flags)));
++    }
++    EXPECT_FALSE(Check("not a mountinfo record\n"));
++    EXPECT_FALSE(Check("42 1 0:23 / /ipc/floral_stream rw,nosuid,nodev,noexec shared:1\n"));
++}
++
++}  // namespace android::init::floral
+diff --git a/init/mount_namespace.cpp b/init/mount_namespace.cpp
+index 2a57808..785001d 100644
+--- a/init/mount_namespace.cpp
++++ b/init/mount_namespace.cpp
+@@ -28,6 +28,7 @@
+ #include <android-base/result.h>
+ #include <android-base/unique_fd.h>
+ 
++#include "floral_ipc_mount.h"
+ #include "util.h"
+ 
+ #ifndef RECOVERY
+@@ -202,6 +203,14 @@ bool SetupMountNamespaces() {
+     // point to private.
+     if (!ChangeMount("/", MS_SHARED | MS_REC)) return false;
+ 
++    // Lupine supplies one private per-generation IPC bind. Restore its propagation
++    // before cloning bootstrap/default namespaces; early-init would be too late.
++    std::string ipc_error;
++    if (!floral::KeepIpcMountPrivate(&ipc_error)) {
++        LOG(ERROR) << "Floral IPC initialization failed: " << ipc_error;
++        return false;
++    }
++
+     // /apex is a private mountpoint to give different sets of APEXes for
+     // the bootstrap and default mount namespaces. The processes running with
+     // the bootstrap namespace get APEXes from the read-only partition.
+-- 
+2.47.3
+
