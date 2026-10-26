@@ -1,0 +1,111 @@
+From 76512d6571799251660a8be217d1c9e557cf7425 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Tue, 18 Aug 2026 00:00:00 +0800
+Subject: [PATCH] redroid: hide ethernet and stabilize wifi status icon
+
+The container network is exposed to Android as Ethernet while Wi-Fi state is
+provided through the synthetic WifiInfo implementation. Keep Ethernet out of
+the status bar and consume the Wi-Fi network-state broadcasts so the synthetic
+connection does not fall back to the empty signal icon.
+---
+ .../settingslib/wifi/WifiStatusTracker.java   | 31 ++++++++++---------
+ .../connectivity/NetworkControllerImpl.java   |  1 +
+ .../phone/StatusBarSignalPolicy.java          |  4 +--
+ 3 files changed, 19 insertions(+), 17 deletions(-)
+
+diff --git a/packages/SettingsLib/src/com/android/settingslib/wifi/WifiStatusTracker.java b/packages/SettingsLib/src/com/android/settingslib/wifi/WifiStatusTracker.java
+index 1343895..5690f94 100644
+--- a/packages/SettingsLib/src/com/android/settingslib/wifi/WifiStatusTracker.java
++++ b/packages/SettingsLib/src/com/android/settingslib/wifi/WifiStatusTracker.java
+@@ -26,6 +26,7 @@ import android.net.NetworkKey;
+ import android.net.NetworkRequest;
+ import android.net.NetworkScoreManager;
+ import android.net.ScoredNetwork;
++import android.net.wifi.SupplicantState;
+ import android.net.wifi.WifiInfo;
+ import android.net.wifi.WifiManager;
+ import android.net.wifi.WifiNetworkScoreCache;
+@@ -210,23 +211,13 @@ public class WifiStatusTracker {
+         updateWifiState();
+         final NetworkInfo networkInfo =
+                 mConnectivityManager.getNetworkInfo(ConnectivityManager.TYPE_WIFI);
++        WifiInfo wifiInfo = mWifiManager.getConnectionInfo();
+         connected = networkInfo != null && networkInfo.isConnected();
+-        mWifiInfo = null;
+-        ssid = null;
+-        if (connected) {
+-            mWifiInfo = mWifiManager.getConnectionInfo();
+-            if (mWifiInfo != null) {
+-                if (mWifiInfo.isPasspointAp() || mWifiInfo.isOsuAp()) {
+-                    ssid = mWifiInfo.getPasspointProviderFriendlyName();
+-                } else {
+-                    ssid = getValidSsid(mWifiInfo);
+-                }
+-                isCarrierMerged = mWifiInfo.isCarrierMerged();
+-                subId = mWifiInfo.getSubscriptionId();
+-                updateRssi(mWifiInfo.getRssi());
+-                maybeRequestNetworkScore();
+-            }
++        // Some containerized Wi-Fi providers expose connection info without a WIFI transport.
++        if (!connected && isCompletedConnection(wifiInfo)) {
++            connected = true;
+         }
++        updateWifiInfo(connected ? wifiInfo : null);
+         updateStatusLabel();
+     }
+ 
+@@ -237,9 +228,19 @@ public class WifiStatusTracker {
+         String action = intent.getAction();
+         if (action.equals(WifiManager.WIFI_STATE_CHANGED_ACTION)) {
+             updateWifiState();
++        } else if (action.equals(WifiManager.NETWORK_STATE_CHANGED_ACTION)) {
++            NetworkInfo networkInfo = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
++            WifiInfo wifiInfo = networkInfo != null && networkInfo.isConnected()
++                    ? mWifiManager.getConnectionInfo() : null;
++            updateWifiInfo(wifiInfo);
++            updateStatusLabel();
+         }
+     }
+ 
++    private boolean isCompletedConnection(WifiInfo wifiInfo) {
++        return wifiInfo != null && wifiInfo.getSupplicantState() == SupplicantState.COMPLETED;
++    }
++
+     private void updateWifiInfo(WifiInfo wifiInfo) {
+         updateWifiState();
+         connected = wifiInfo != null;
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/connectivity/NetworkControllerImpl.java b/packages/SystemUI/src/com/android/systemui/statusbar/connectivity/NetworkControllerImpl.java
+index 631a1ca..dd8d4f5 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/connectivity/NetworkControllerImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/connectivity/NetworkControllerImpl.java
+@@ -486,6 +486,7 @@ public class NetworkControllerImpl extends BroadcastReceiver
+         // broadcasts
+         IntentFilter filter = new IntentFilter();
+         filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
++        filter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
+         filter.addAction(Intent.ACTION_SIM_STATE_CHANGED);
+         filter.addAction(TelephonyManager.ACTION_DEFAULT_DATA_SUBSCRIPTION_CHANGED);
+         filter.addAction(TelephonyManager.ACTION_DEFAULT_VOICE_SUBSCRIPTION_CHANGED);
+diff --git a/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarSignalPolicy.java b/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarSignalPolicy.java
+index 360cb57..3ef4f8a 100644
+--- a/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarSignalPolicy.java
++++ b/packages/SystemUI/src/com/android/systemui/statusbar/phone/StatusBarSignalPolicy.java
+@@ -412,13 +412,13 @@ public class StatusBarSignalPolicy implements SignalCallback,
+ 
+     @Override
+     public void setEthernetIndicators(IconState state) {
+-        boolean visible = state.visible && !mHideEthernet;
+         int resId = state.icon;
+         String description = state.contentDescription;
+ 
+         if (resId > 0) {
+             mIconController.setIcon(mSlotEthernet, resId, description);
+-            mIconController.setIconVisibility(mSlotEthernet, true);
++            // Container networking is represented by the Wi-Fi indicator instead.
++            mIconController.setIconVisibility(mSlotEthernet, false);
+         } else {
+             mIconController.setIconVisibility(mSlotEthernet, false);
+         }
+-- 
+2.47.3
+

@@ -1,0 +1,24 @@
+From 9374a8a908bc1906a9490ab85abb74937460b08d Mon Sep 17 00:00:00 2001
+From: Ziyang Zhou <ziyang.zhou@outlook.com>
+Date: Wed, 4 May 2022 22:19:51 +0800
+Subject: [PATCH] ignore powerctl message
+
+---
+ init/init.cpp | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/init/init.cpp b/init/init.cpp
+index 942feb9..b82c589 100755
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -908,7 +908,6 @@ int SecondStageMain(int argc, char** argv) {
+         if (shutdown_command) {
+             LOG(INFO) << "Got shutdown_command '" << *shutdown_command
+                       << "' Calling HandlePowerctlMessage()";
+-            HandlePowerctlMessage(*shutdown_command);
+             shutdown_state.set_do_shutdown(false);
+         }
+ 
+-- 
+2.47.3
+

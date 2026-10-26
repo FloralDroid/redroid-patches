@@ -1,0 +1,181 @@
+From 978ba167b4d4a9e92397d7a1ccc9a3abe1b1d574 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 16 Oct 2026 12:00:00 +0800
+Subject: [PATCH] Launcher3: keep hotseat labels reserved after boot
+
+The horizontal bottom hotseat only shows the label of an icon when its cell
+height accounts for the label area. That area is derived twice from values
+which are not always available yet:
+
+  * DeviceProfile.updateHotseatIconSize() adds iconDrawablePaddingPx and the
+    icon text height to hotseatCellHeightPx, but updateFromConfig() calls it
+    before updateIconSize() has computed those fields, so a profile produced
+    while the container display is still settling reserves an icon-only cell.
+  * The reserved area is only handed to the hotseat by Hotseat.setInsets(),
+    and window insets are re-dispatched only when they change, so a DeviceProfile
+    selected afterwards (display density / supported bounds settle during a cold
+    boot) leaves the hotseat with the padding of the older profile.
+
+Both leave the hotseat without room for the label, and the bottom text of the
+hotseat icons is then clipped away until the Launcher process is restarted.
+
+Derive the label allowance from the invariant profile when the icon* fields are
+not computed yet, make sure the hotseat is at least as tall as its own cell
+height (hotseatBarSizeExtraSpacePx can be negative), and re-apply the hotseat
+padding and height from the current DeviceProfile on every measure pass so the
+label area is always reserved.
+
+Keep the label visibility policy consistent with that reserved space, too.
+BubbleTextView.shouldTextBeVisible() still treats every hotseat container as
+icon-only, so the popup close animation and closeComplete() hide an app label
+again after a drag into the bottom hotseat. Restore labels for the horizontal
+hotseat using the current DeviceProfile, while retaining icon-only vertical
+hotseats and DISPLAY_TASKBAR views. Let PredictedAppIcon.finishBinding() use
+the same policy instead of unconditionally hiding its label.
+
+Temporary popup/drag fades are unchanged; the restored resting state now agrees
+with CellLayout's bottom-hotseat label visibility. Keep the original boot-time
+height and padding fixes unchanged. Host method-level regressions cover popup
+cleanup/fade completion after moving into both hotseat containers, prediction
+binding, current-profile changes, and vertical/taskbar behavior. No Android
+build, device deployment or instrumented UI regression was performed.
+---
+ .../uioverrides/PredictedAppIcon.java         |  2 +-
+ src/com/android/launcher3/BubbleTextView.java | 11 +++++--
+ src/com/android/launcher3/DeviceProfile.java  | 29 ++++++++++++-----
+ src/com/android/launcher3/Hotseat.java        | 31 +++++++++++++++++++
+ 4 files changed, 61 insertions(+), 12 deletions(-)
+
+diff --git a/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java b/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java
+index ee6e8ce..bca0628 100644
+--- a/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java
++++ b/quickstep/src/com/android/launcher3/uioverrides/PredictedAppIcon.java
+@@ -280,7 +280,7 @@ public class PredictedAppIcon extends DoubleShadowBubbleTextView {
+     public void finishBinding(OnLongClickListener longClickListener) {
+         setOnLongClickListener(longClickListener);
+         ((CellLayout.LayoutParams) getLayoutParams()).canReorder = false;
+-        setTextVisibility(false);
++        setTextVisibility(shouldTextBeVisible());
+         verifyHighRes();
+     }
+ 
+diff --git a/src/com/android/launcher3/BubbleTextView.java b/src/com/android/launcher3/BubbleTextView.java
+index 1f1d57a..35e6baf 100644
+--- a/src/com/android/launcher3/BubbleTextView.java
++++ b/src/com/android/launcher3/BubbleTextView.java
+@@ -644,11 +644,16 @@ public class BubbleTextView extends TextView implements ItemInfoUpdateReceiver,
+     }
+ 
+     public boolean shouldTextBeVisible() {
+-        // Text should be visible everywhere but the hotseat.
+         Object tag = getParent() instanceof FolderIcon ? ((View) getParent()).getTag() : getTag();
+         ItemInfo info = tag instanceof ItemInfo ? (ItemInfo) tag : null;
+-        return info == null || (info.container != LauncherSettings.Favorites.CONTAINER_HOTSEAT
+-                && info.container != LauncherSettings.Favorites.CONTAINER_HOTSEAT_PREDICTION);
++        if (info != null && (info.container == LauncherSettings.Favorites.CONTAINER_HOTSEAT
++                || info.container == LauncherSettings.Favorites.CONTAINER_HOTSEAT_PREDICTION)) {
++            // Popup/drag cleanup must restore bottom hotseat labels just like CellLayout does.
++            // Keep the compact vertical hotseat and taskbar icon-only.
++            return mDisplay != DISPLAY_TASKBAR
++                    && !mActivity.getDeviceProfile().isVerticalBarLayout();
++        }
++        return true;
+     }
+ 
+     public void setTextVisibility(boolean visible) {
+diff --git a/src/com/android/launcher3/DeviceProfile.java b/src/com/android/launcher3/DeviceProfile.java
+index ffcb97a..b2a6672 100644
+--- a/src/com/android/launcher3/DeviceProfile.java
++++ b/src/com/android/launcher3/DeviceProfile.java
+@@ -482,18 +482,31 @@ public class DeviceProfile {
+     private void updateHotseatIconSize(int hotseatIconSizePx) {
+         // Ensure there is enough space for folder icons, which have a slightly larger radius.
+         hotseatCellHeightPx = (int) Math.ceil(hotseatIconSizePx * ICON_OVERLAP_FACTOR);
+-        if (!isVerticalBarLayout()) {
+-            hotseatCellHeightPx += iconDrawablePaddingPx
+-                    + Utilities.calculateTextHeight(iconTextSizePx);
+-        }
+         if (isVerticalBarLayout()) {
+             hotseatBarSizePx = hotseatIconSizePx + hotseatBarSidePaddingStartPx
+                     + hotseatBarSidePaddingEndPx;
+-        } else {
+-            hotseatBarSizePx = hotseatIconSizePx + hotseatBarTopPaddingPx
+-                    + hotseatBarBottomPaddingPx + (isScalableGrid ? 0 : hotseatExtraVerticalSize)
+-                    + hotseatBarSizeExtraSpacePx;
++            return;
+         }
++        // Keep labels visible in the horizontal bottom hotseat. updateFromConfig() runs this
++        // method before updateIconSize() has computed iconDrawablePaddingPx / iconTextSizePx,
++        // so fall back to the invariant profile whenever those are not available yet. Without
++        // the fallback the cell height reserves an icon only cell, the label area is never
++        // reserved in getHotseatLayoutPadding() and the bottom text of every hotseat icon is
++        // clipped away.
++        int labelDrawablePaddingPx = iconDrawablePaddingPx > 0
++                ? iconDrawablePaddingPx : iconDrawablePaddingOriginalPx;
++        int labelTextSizePx = iconTextSizePx > 0
++                ? iconTextSizePx : pxFromSp(inv.iconTextSize[mTypeIndex], mMetrics);
++        hotseatCellHeightPx += labelDrawablePaddingPx
++                + Utilities.calculateTextHeight(labelTextSizePx);
++        hotseatBarSizePx = hotseatIconSizePx + hotseatBarTopPaddingPx + hotseatBarBottomPaddingPx
++                + (isScalableGrid ? 0 : hotseatExtraVerticalSize) + hotseatBarSizeExtraSpacePx;
++        // The hotseat has to be able to hold its own cell height. hotseatBarSizeExtraSpacePx can
++        // go negative (the page indicator and the workspace paddings take most of the extra
++        // space) and then the label below the icons is laid out outside of the hotseat, where it
++        // is clipped away by the parent.
++        hotseatBarSizePx = Math.max(hotseatBarSizePx,
++                hotseatCellHeightPx - cellLayoutBottomPaddingPx);
+     }
+ 
+     private Point getCellLayoutBorderSpace(InvariantDeviceProfile idp) {
+diff --git a/src/com/android/launcher3/Hotseat.java b/src/com/android/launcher3/Hotseat.java
+index ffe3816..f5cb2ad 100644
+--- a/src/com/android/launcher3/Hotseat.java
++++ b/src/com/android/launcher3/Hotseat.java
+@@ -171,6 +171,7 @@ public class Hotseat extends CellLayout implements Insettable {
+ 
+     @Override
+     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
++        syncLayoutWithDeviceProfile();
+         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+ 
+         int width = getShortcutsAndWidgets().getMeasuredWidth();
+@@ -178,6 +179,36 @@ public class Hotseat extends CellLayout implements Insettable {
+                 MeasureSpec.makeMeasureSpec(mQsbHeight, MeasureSpec.EXACTLY));
+     }
+ 
++    /**
++     * Applies the hotseat padding and height to the device profile which is currently in use.
++     * <p>
++     * {@link #setInsets(Rect)} normally owns those values, but window insets are only
++     * re-dispatched when they actually change, while the Launcher can be handed a different
++     * {@link DeviceProfile} at any time. On a container the display density and the supported
++     * window bounds are still settling while the Launcher boots, so the profile the hotseat was
++     * laid out with can be replaced afterwards (DeviceProfile.updateInsets() is called on every
++     * inset pass, but the children are only notified when the insets changed). Left alone the
++     * hotseat keeps the padding of the older profile, the space reserved for the labels below the
++     * icons is lost and the bottom text stays missing until the process is restarted.
++     */
++    private void syncLayoutWithDeviceProfile() {
++        DeviceProfile grid = mActivity.getDeviceProfile();
++        Rect padding = grid.getHotseatLayoutPadding(getContext());
++        ViewGroup.LayoutParams vlp = getLayoutParams();
++        int height = grid.isVerticalBarLayout()
++                ? ViewGroup.LayoutParams.MATCH_PARENT
++                : (grid.isTaskbarPresent ? grid.workspacePadding.bottom : grid.hotseatBarSizePx)
++                        + (grid.isTaskbarPresent ? grid.taskbarSize : grid.getInsets().bottom);
++
++        boolean upToDate = getPaddingLeft() == padding.left && getPaddingTop() == padding.top
++                && getPaddingRight() == padding.right && getPaddingBottom() == padding.bottom
++                && (!(vlp instanceof FrameLayout.LayoutParams)
++                        || ((FrameLayout.LayoutParams) vlp).height == height);
++        if (!upToDate) {
++            setInsets(grid.getInsets());
++        }
++    }
++
+     @Override
+     protected void onLayout(boolean changed, int l, int t, int r, int b) {
+         super.onLayout(changed, l, t, r, b);
+-- 
+2.47.3
+

@@ -1,0 +1,26 @@
+From 13654af3f312dabd7d7a213829e614d40995e4ab Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sun, 30 Aug 2026 14:39:50 +0800
+Subject: [PATCH] sepolicy: label Floral WebView size properties
+
+Change-Id: I99ae6002a589e351b230eb87036d0fe9a84ef1ea
+---
+ private/property_contexts | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/private/property_contexts b/private/property_contexts
+index f235b35..68011fb 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -726,6 +726,8 @@ ro.product.cpu.abi       u:object_r:build_prop:s0 exact string
+ ro.product.cpu.abilist   u:object_r:build_prop:s0 exact string
+ ro.product.cpu.abilist32 u:object_r:build_prop:s0 exact string
+ ro.product.cpu.abilist64 u:object_r:build_prop:s0 exact string
++ro.floral.webview.vmsize32 u:object_r:system_prop:s0 exact int
++ro.floral.webview.vmsize64 u:object_r:system_prop:s0 exact int
+ 
+ ro.product.system.brand        u:object_r:build_prop:s0 exact string
+ ro.product.system.device       u:object_r:build_prop:s0 exact string
+-- 
+2.47.3
+
