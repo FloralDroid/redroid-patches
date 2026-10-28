@@ -1,0 +1,126 @@
+From decac90eef66a9802c19a19548b1ec5cb87c812d Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 29 Oct 2026 01:02:52 +0800
+Subject: [PATCH] Settings: add gesture navigation bar visibility setting
+
+---
+ res/values-zh-rCN/strings.xml                 |  2 +
+ res/values-zh-rTW/strings.xml                 |  2 +
+ res/values/strings.xml                        |  2 +
+ res/xml/gesture_navigation_settings.xml       |  6 +++
+ ...tureNavigationBarPreferenceController.java | 53 +++++++++++++++++++
+ 5 files changed, 65 insertions(+)
+ create mode 100644 src/com/android/settings/gestures/GestureNavigationBarPreferenceController.java
+
+diff --git a/res/values-zh-rCN/strings.xml b/res/values-zh-rCN/strings.xml
+index 3a2aa12..e6c9251 100644
+--- a/res/values-zh-rCN/strings.xml
++++ b/res/values-zh-rCN/strings.xml
+@@ -5580,4 +5580,6 @@
+     <string name="bluetooth_connect_access_dialog_content" msgid="4336436466468405850">"“<xliff:g id="DEVICE_NAME_0">%1$s</xliff:g>”想连接到此手机。\n\n您之前没有连接过“<xliff:g id="DEVICE_NAME_1">%2$s</xliff:g>”。"</string>
+     <string name="bluetooth_connect_access_dialog_negative" msgid="4944672755226375059">"不连接"</string>
+     <string name="bluetooth_connect_access_dialog_positive" msgid="3630561675207269710">"连接"</string>
++    <string name="hide_gesture_navigation_bar_title">隐藏手势导航条</string>
++    <string name="hide_gesture_navigation_bar_summary">移除导航条及底部占位，让应用使用完整屏幕，手势仍然可用。</string>
+ </resources>
+diff --git a/res/values-zh-rTW/strings.xml b/res/values-zh-rTW/strings.xml
+index 57c09d1..4033388 100644
+--- a/res/values-zh-rTW/strings.xml
++++ b/res/values-zh-rTW/strings.xml
+@@ -5582,4 +5582,6 @@
+     <string name="bluetooth_connect_access_dialog_content" msgid="4336436466468405850">"「<xliff:g id="DEVICE_NAME_0">%1$s</xliff:g>」想要連線到這支手機。\n\n請注意，你從未與「<xliff:g id="DEVICE_NAME_1">%2$s</xliff:g>」連線。"</string>
+     <string name="bluetooth_connect_access_dialog_negative" msgid="4944672755226375059">"不要連線"</string>
+     <string name="bluetooth_connect_access_dialog_positive" msgid="3630561675207269710">"連線"</string>
++    <string name="hide_gesture_navigation_bar_title">隱藏手勢導覽列</string>
++    <string name="hide_gesture_navigation_bar_summary">移除導覽列和底部預留空間，讓應用程式使用完整螢幕，手勢仍可使用。</string>
+ </resources>
+diff --git a/res/values/strings.xml b/res/values/strings.xml
+index 300b3a4..850f91b 100644
+--- a/res/values/strings.xml
++++ b/res/values/strings.xml
+@@ -13636,4 +13636,6 @@
+     <string name="bluetooth_connect_access_dialog_negative">Don\u2019t connect</string>
+     <!-- Strings for Dialog connect button -->
+     <string name="bluetooth_connect_access_dialog_positive">Connect</string>
++    <string name="hide_gesture_navigation_bar_title">Hide gesture navigation bar</string>
++    <string name="hide_gesture_navigation_bar_summary">Use the full screen without a navigation bar. Gestures remain available.</string>
+ </resources>
+diff --git a/res/xml/gesture_navigation_settings.xml b/res/xml/gesture_navigation_settings.xml
+index 09bb870..16db504 100644
+--- a/res/xml/gesture_navigation_settings.xml
++++ b/res/xml/gesture_navigation_settings.xml
+@@ -23,6 +23,12 @@
+     android:title="@string/gesture_settings_activity_title"
+     settings:keywords="@string/keywords_gesture_navigation_settings">
+ 
++    <SwitchPreference
++        android:key="hide_gesture_navigation_bar"
++        android:title="@string/hide_gesture_navigation_bar_title"
++        android:summary="@string/hide_gesture_navigation_bar_summary"
++        settings:controller="com.android.settings.gestures.GestureNavigationBarPreferenceController"/>
++
+     <PreferenceCategory
+         android:key="assistant_gesture_category"
+         android:persistent="false"
+diff --git a/src/com/android/settings/gestures/GestureNavigationBarPreferenceController.java b/src/com/android/settings/gestures/GestureNavigationBarPreferenceController.java
+new file mode 100644
+index 0000000..3b7eb15
+--- /dev/null
++++ b/src/com/android/settings/gestures/GestureNavigationBarPreferenceController.java
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.settings.gestures;
++
++import android.content.Context;
++import android.provider.Settings;
++
++import com.android.settings.R;
++import com.android.settings.core.TogglePreferenceController;
++
++public class GestureNavigationBarPreferenceController extends TogglePreferenceController {
++
++    public GestureNavigationBarPreferenceController(Context context, String key) {
++        super(context, key);
++    }
++
++    @Override
++    public boolean isChecked() {
++        return Settings.Secure.getInt(mContext.getContentResolver(),
++                Settings.Secure.HIDE_GESTURE_NAVIGATION_BAR, 0) != 0;
++    }
++
++    @Override
++    public boolean setChecked(boolean isChecked) {
++        return Settings.Secure.putInt(mContext.getContentResolver(),
++                Settings.Secure.HIDE_GESTURE_NAVIGATION_BAR, isChecked ? 1 : 0);
++    }
++
++    @Override
++    public int getAvailabilityStatus() {
++        return SystemNavigationPreferenceController.isGestureAvailable(mContext) ? AVAILABLE
++                : UNSUPPORTED_ON_DEVICE;
++    }
++
++    @Override
++    public int getSliceHighlightMenuRes() {
++        return R.string.menu_key_system;
++    }
++}
+-- 
+2.47.3
+
