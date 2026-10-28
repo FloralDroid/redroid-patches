@@ -1,0 +1,314 @@
+From 18485f62eecb0dc54b18ee4ae9b2afd4fb1fc436 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 29 Oct 2026 01:02:52 +0800
+Subject: [PATCH] SystemUI: hide gesture navigation bar
+
+---
+ core/java/android/provider/Settings.java      |  7 +++
+ .../GestureNavigationSettingsObserver.java    | 10 +++++
+ .../systemui/navigationbar/NavigationBar.java | 24 +++++++++-
+ .../navigationbar/NavigationBarView.java      | 27 +++++++++++
+ .../com/android/server/wm/DisplayPolicy.java  | 45 ++++++++++++++-----
+ 5 files changed, 101 insertions(+), 12 deletions(-)
+
+diff --git a/core/java/android/provider/Settings.java b/core/java/android/provider/Settings.java
+index 54952fc..9d1bea7 100644
+--- a/core/java/android/provider/Settings.java
++++ b/core/java/android/provider/Settings.java
+@@ -9914,6 +9914,13 @@ public final class Settings {
+         public static final String NAVIGATION_MODE =
+                 "navigation_mode";
+ 
++        /**
++         * Whether to hide the gesture navigation bar and its app content inset.
++         * @hide
++         */
++        @Readable
++        public static final String HIDE_GESTURE_NAVIGATION_BAR = "hide_gesture_navigation_bar";
++
+         /**
+          * Scale factor for the back gesture inset size on the left side of the screen.
+          * @hide
+diff --git a/core/java/com/android/internal/policy/GestureNavigationSettingsObserver.java b/core/java/com/android/internal/policy/GestureNavigationSettingsObserver.java
+index 205c5fd..07ab084 100644
+--- a/core/java/com/android/internal/policy/GestureNavigationSettingsObserver.java
++++ b/core/java/com/android/internal/policy/GestureNavigationSettingsObserver.java
+@@ -67,6 +67,9 @@ public class GestureNavigationSettingsObserver extends ContentObserver {
+         r.registerContentObserver(
+                 Settings.Secure.getUriFor(Settings.Secure.USER_SETUP_COMPLETE),
+                 false, this, UserHandle.USER_ALL);
++        r.registerContentObserver(
++                Settings.Secure.getUriFor(Settings.Secure.HIDE_GESTURE_NAVIGATION_BAR),
++                false, this, UserHandle.USER_ALL);
+         DeviceConfig.addOnPropertiesChangedListener(
+                 DeviceConfig.NAMESPACE_SYSTEMUI,
+                 runnable -> mMainHandler.post(runnable),
+@@ -99,6 +102,13 @@ public class GestureNavigationSettingsObserver extends ContentObserver {
+                 Settings.Secure.USER_SETUP_COMPLETE, 0, UserHandle.USER_CURRENT) == 0;
+     }
+ 
++    public boolean shouldHideGestureNavigationBar() {
++        return !areNavigationButtonForcedVisible()
++                && Settings.Secure.getIntForUser(mContext.getContentResolver(),
++                        Settings.Secure.HIDE_GESTURE_NAVIGATION_BAR, 0,
++                        UserHandle.USER_CURRENT) != 0;
++    }
++
+     private int getSensitivity(Resources userRes, String side) {
+         final DisplayMetrics dm = userRes.getDisplayMetrics();
+         final float defaultInset = userRes.getDimension(
+diff --git a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBar.java b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBar.java
+index d4acdd0..b69bc10 100644
+--- a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBar.java
++++ b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBar.java
+@@ -107,6 +107,7 @@ import com.android.internal.logging.MetricsLogger;
+ import com.android.internal.logging.UiEvent;
+ import com.android.internal.logging.UiEventLogger;
+ import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
++import com.android.internal.policy.GestureNavigationSettingsObserver;
+ import com.android.internal.util.LatencyTracker;
+ import com.android.internal.view.AppearanceRegion;
+ import com.android.systemui.R;
+@@ -447,6 +448,8 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+                 }
+             };
+ 
++    private final GestureNavigationSettingsObserver mGestureNavigationSettingsObserver;
++
+     private final DeviceProvisionedController.DeviceProvisionedListener mUserSetupListener =
+             new DeviceProvisionedController.DeviceProvisionedListener() {
+                 @Override
+@@ -527,6 +530,8 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+         mRecentsOptional = recentsOptional;
+         mSystemActions = systemActions;
+         mHandler = mainHandler;
++        mGestureNavigationSettingsObserver = new GestureNavigationSettingsObserver(
++                mHandler, mContext, this::updateGestureNavigationBarVisibility);
+         mNavbarOverlayController = navbarOverlayController;
+         mUiEventLogger = uiEventLogger;
+         mNavBarHelper = navBarHelper;
+@@ -661,6 +666,8 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+         setDisabled2Flags(mDisabledFlags2);
+ 
+         initSecondaryHomeHandleForRotation();
++        mGestureNavigationSettingsObserver.register();
++        updateGestureNavigationBarVisibility();
+ 
+         // Unfortunately, we still need it because status bar needs LightBarController
+         // before notifications creation. We cannot directly use getLightBarController()
+@@ -682,6 +689,7 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+ 
+     @Override
+     public void onViewDetachedFromWindow(View v) {
++        mGestureNavigationSettingsObserver.unregister();
+         final RotationButtonController rotationButtonController =
+                 mNavigationBarView.getRotationButtonController();
+         rotationButtonController.setRotationCallback(null);
+@@ -735,6 +743,7 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+         }
+ 
+         repositionNavigationBar(rotation);
++        updateGestureNavigationBarVisibility();
+         if (canShowSecondaryHandle()) {
+             if (rotation != mCurrentRotation) {
+                 mCurrentRotation = rotation;
+@@ -1496,6 +1505,7 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+     @Override
+     public void onNavigationModeChanged(int mode) {
+         mNavBarMode = mode;
++        updateGestureNavigationBarVisibility();
+ 
+         if (!QuickStepContract.isGesturalMode(mode)) {
+             // Reset the override alpha
+@@ -1614,8 +1624,19 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+         return lp;
+     }
+ 
++    private void updateGestureNavigationBarVisibility() {
++        if (mNavigationBarView == null) return;
++        final boolean hidden = mNavBarMode == NAV_BAR_MODE_GESTURAL
++                && mGestureNavigationSettingsObserver.shouldHideGestureNavigationBar();
++        mNavigationBarView.setGestureNavigationBarHidden(hidden);
++        if (hidden) {
++            resetSecondaryHandle();
++        }
++    }
++
+     private boolean canShowSecondaryHandle() {
+-        return mNavBarMode == NAV_BAR_MODE_GESTURAL && mOrientationHandle != null;
++        return mNavBarMode == NAV_BAR_MODE_GESTURAL && mOrientationHandle != null
++                && !mNavigationBarView.isGestureNavigationBarHidden();
+     }
+ 
+     private final Consumer<Integer> mRotationWatcher = rotation -> {
+@@ -1642,6 +1663,7 @@ public class NavigationBar implements View.OnAttachStateChangeListener,
+             if (Intent.ACTION_USER_SWITCHED.equals(action)) {
+                 // The accessibility settings may be different for the new user
+                 updateAcessibilityStateFlags();
++                updateGestureNavigationBarVisibility();
+             }
+         }
+     };
+diff --git a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarView.java b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarView.java
+index 5fbdd88..e266c14 100644
+--- a/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarView.java
++++ b/packages/SystemUI/src/com/android/systemui/navigationbar/NavigationBarView.java
+@@ -113,6 +113,7 @@ public class NavigationBarView extends FrameLayout implements
+     // The current view is one of mHorizontal or mVertical depending on the current configuration
+     View mCurrentView = null;
+     private View mVertical;
++    private boolean mGestureNavigationBarHidden;
+     private View mHorizontal;
+ 
+     /** Indicates that navigation bar is vertical. */
+@@ -260,6 +261,11 @@ public class NavigationBarView extends FrameLayout implements
+             };
+ 
+     private final OnComputeInternalInsetsListener mOnComputeInternalInsetsListener = info -> {
++        if (mGestureNavigationBarHidden) {
++            info.setTouchableInsets(InternalInsetsInfo.TOUCHABLE_INSETS_REGION);
++            info.touchableRegion.setEmpty();
++            return;
++        }
+         // When the nav bar is in 2-button or 3-button mode, or when IME is visible in fully
+         // gestural mode, the entire nav bar should be touchable.
+         if (!mEdgeBackGestureHandler.isHandlingGestures()) {
+@@ -973,6 +979,27 @@ public class NavigationBarView extends FrameLayout implements
+         reloadNavIcons();
+     }
+ 
++    public void setGestureNavigationBarHidden(boolean hidden) {
++        if (mGestureNavigationBarHidden == hidden) return;
++        mGestureNavigationBarHidden = hidden;
++        setImportantForAccessibility(hidden ? IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
++                : IMPORTANT_FOR_ACCESSIBILITY_AUTO);
++        invalidate();
++        requestLayout();
++    }
++
++    public boolean isGestureNavigationBarHidden() {
++        return mGestureNavigationBarHidden;
++    }
++
++    @Override
++    public void draw(Canvas canvas) {
++        // Keep the window and gesture input providers, but draw neither bar nor background.
++        if (!mGestureNavigationBarHidden) {
++            super.draw(canvas);
++        }
++    }
++
+     @Override
+     protected void onDraw(Canvas canvas) {
+         mDeadZone.onDraw(canvas);
+diff --git a/services/core/java/com/android/server/wm/DisplayPolicy.java b/services/core/java/com/android/server/wm/DisplayPolicy.java
+index 1ff2ebe..f2d210f 100644
+--- a/services/core/java/com/android/server/wm/DisplayPolicy.java
++++ b/services/core/java/com/android/server/wm/DisplayPolicy.java
+@@ -87,6 +87,7 @@ import static android.view.WindowManagerPolicyConstants.ALT_BAR_TOP;
+ import static android.view.WindowManagerPolicyConstants.ALT_BAR_UNKNOWN;
+ import static android.view.WindowManagerPolicyConstants.EXTRA_HDMI_PLUGGED_STATE;
+ import static android.view.WindowManagerPolicyConstants.NAV_BAR_BOTTOM;
++import static android.view.WindowManagerPolicyConstants.NAV_BAR_MODE_GESTURAL;
+ import static android.view.WindowManagerPolicyConstants.NAV_BAR_INVALID;
+ import static android.view.WindowManagerPolicyConstants.NAV_BAR_LEFT;
+ import static android.view.WindowManagerPolicyConstants.NAV_BAR_RIGHT;
+@@ -231,6 +232,7 @@ public class DisplayPolicy {
+ 
+     @Px
+     private int mBottomGestureAdditionalInset;
++    private boolean mHideGestureNavigationBar;
+     @Px
+     private int mLeftGestureInset;
+     @Px
+@@ -686,16 +688,24 @@ public class DisplayPolicy {
+                 mService.mHighRefreshRateDenylist);
+ 
+         mGestureNavigationSettingsObserver = new GestureNavigationSettingsObserver(mHandler,
+-                mContext, () -> {
+-            synchronized (mLock) {
+-                onConfigurationChanged();
+-                mSystemGestures.onConfigurationChanged();
+-                mDisplayContent.updateSystemGestureExclusion();
+-            }
+-        });
++                mContext, this::updateGestureNavigationSettings);
+         mHandler.post(mGestureNavigationSettingsObserver::register);
+     }
+ 
++    private void updateGestureNavigationSettings() {
++        synchronized (mLock) {
++            final boolean wasHidden = mHideGestureNavigationBar;
++            onConfigurationChanged();
++            mSystemGestures.onConfigurationChanged();
++            mDisplayContent.updateSystemGestureExclusion();
++            if (wasHidden != mHideGestureNavigationBar) {
++                mDisplayContent.reconfigureDisplayLocked();
++                mDisplayContent.setLayoutNeeded();
++                mService.mWindowPlacerLocked.requestTraversal();
++            }
++        }
++    }
++
+     /**
+      * Returns the first non-null alt bar window matching the given position.
+      */
+@@ -1170,7 +1180,9 @@ public class DisplayPolicy {
+                 mNavigationBar = win;
+                 mDisplayContent.setInsetProvider(ITYPE_NAVIGATION_BAR, win,
+                         (displayFrames, windowState, inOutFrame) -> {
+-                            if (INSETS_LAYOUT_GENERALIZATION) {
++                            if (mHideGestureNavigationBar) {
++                                inOutFrame.top = inOutFrame.bottom;
++                            } else if (INSETS_LAYOUT_GENERALIZATION) {
+                                 inOutFrame.inset(windowState.getLayoutingAttrs(
+                                         displayFrames.mRotation).providedInternalInsets);
+                             } else {
+@@ -1189,9 +1201,13 @@ public class DisplayPolicy {
+                             }
+                         },
+ 
+-                        // For IME we use regular frame.
+-                        (displayFrames, windowState, inOutFrame) ->
+-                                inOutFrame.set(windowState.getFrame()));
++                        // The IME must not reserve a hidden navigation bar either.
++                        (displayFrames, windowState, inOutFrame) -> {
++                            inOutFrame.set(windowState.getFrame());
++                            if (mHideGestureNavigationBar) {
++                                inOutFrame.top = inOutFrame.bottom;
++                            }
++                        });
+ 
+                 mDisplayContent.setInsetProvider(ITYPE_BOTTOM_MANDATORY_GESTURES, win,
+                         (displayFrames, windowState, inOutFrame) -> {
+@@ -2140,6 +2156,7 @@ public class DisplayPolicy {
+      */
+     public void switchUser() {
+         updateCurrentUserResources();
++        updateGestureNavigationSettings();
+     }
+ 
+     /**
+@@ -2227,6 +2244,9 @@ public class DisplayPolicy {
+         mRightGestureInset = mGestureNavigationSettingsObserver.getRightSensitivity(res);
+         mNavButtonForcedVisible =
+                 mGestureNavigationSettingsObserver.areNavigationButtonForcedVisible();
++        mHideGestureNavigationBar = res.getInteger(R.integer.config_navBarInteractionMode)
++                == NAV_BAR_MODE_GESTURAL
++                && mGestureNavigationSettingsObserver.shouldHideGestureNavigationBar();
+         mNavigationBarLetsThroughTaps = res.getBoolean(R.bool.config_navBarTapThrough);
+         mNavigationBarAlwaysShowOnSideGesture =
+                 res.getBoolean(R.bool.config_navBarAlwaysShowOnSideEdgeGesture);
+@@ -2371,6 +2391,9 @@ public class DisplayPolicy {
+     }
+ 
+     private int getNavigationBarHeight(int rotation, int uiMode) {
++        if (mHideGestureNavigationBar) {
++            return 0;
++        }
+         if (INSETS_LAYOUT_GENERALIZATION) {
+             if (mNavigationBar == null) {
+                 return 0;
+-- 
+2.47.3
+
