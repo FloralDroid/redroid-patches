@@ -1,0 +1,316 @@
+From b90b19328a09bfc4c89d3e1f1a5a4609b05cddf5 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 28 Oct 2026 15:01:46 +0800
+Subject: [PATCH] MediaCodec: report video battery resources asynchronously
+
+Change-Id: I72d48358ee32a40a83c4b73f1bac425591cf46ef
+---
+ media/libstagefright/MediaCodec.cpp           | 36 +++++++-
+ media/libstagefright/VideoBatteryReporter.h   | 80 ++++++++++++++++++
+ media/libstagefright/tests/Android.bp         | 17 ++++
+ .../tests/VideoBatteryReporter_test.cpp       | 83 +++++++++++++++++++
+ 4 files changed, 212 insertions(+), 4 deletions(-)
+ create mode 100644 media/libstagefright/VideoBatteryReporter.h
+ create mode 100644 media/libstagefright/tests/VideoBatteryReporter_test.cpp
+
+diff --git a/media/libstagefright/MediaCodec.cpp b/media/libstagefright/MediaCodec.cpp
+index da581fb..b91baee 100644
+--- a/media/libstagefright/MediaCodec.cpp
++++ b/media/libstagefright/MediaCodec.cpp
+@@ -30,6 +30,7 @@
+ 
+ #include "include/SoftwareRenderer.h"
+ #include "PlaybackDurationAccumulator.h"
++#include "VideoBatteryReporter.h"
+ 
+ #include <android/binder_manager.h>
+ #include <android/content/pm/IPackageManagerNative.h>
+@@ -259,6 +260,7 @@ struct MediaCodec::ResourceManagerServiceProxy : public RefBase {
+ 
+     void addResource(const MediaResourceParcel &resource);
+     void removeResource(const MediaResourceParcel &resource);
++    void reportVideoBatteryResource(bool active);
+     void removeClient();
+     void markClientForPendingRemoval();
+     bool reclaimResource(const std::vector<MediaResourceParcel> &resources);
+@@ -270,6 +272,7 @@ private:
+     std::shared_ptr<IResourceManagerService> mService;
+     std::shared_ptr<IResourceManagerClient> mClient;
+     ::ndk::ScopedAIBinder_DeathRecipient mDeathRecipient;
++    bool mVideoBatteryPosted = false;
+ };
+ 
+ MediaCodec::ResourceManagerServiceProxy::ResourceManagerServiceProxy(
+@@ -367,8 +370,31 @@ void MediaCodec::ResourceManagerServiceProxy::removeResource(
+     mService->removeResource(mPid, getId(mClient), resources);
+ }
+ 
++void MediaCodec::ResourceManagerServiceProxy::reportVideoBatteryResource(bool active) {
++    Mutex::Autolock _l(mLock);
++    if (mService == nullptr) {
++        return;
++    }
++    // Keep the service/client alive without holding mLock during the RPC.
++    // A queued call to an old, dead service must not reach a replacement.
++    VideoBatteryReporter::getInstance()->post(
++            [service = mService, client = mClient, pid = mPid, uid = mUid, active] {
++        std::vector<MediaResourceParcel> resources{MediaResource::VideoBatteryResource()};
++        Status status = active
++                ? service->addResource(pid, uid, getId(client), client, resources)
++                : service->removeResource(pid, getId(client), resources);
++        if (!status.isOk()) {
++            ALOGW("Video battery resource update failed: %s", status.getDescription().c_str());
++        }
++    });
++    mVideoBatteryPosted = true;
++}
++
+ void MediaCodec::ResourceManagerServiceProxy::removeClient() {
+     Mutex::Autolock _l(mLock);
++    if (mVideoBatteryPosted) {
++        VideoBatteryReporter::getInstance()->flush();
++    }
+     if (mService == nullptr) {
+         return;
+     }
+@@ -377,6 +403,9 @@ void MediaCodec::ResourceManagerServiceProxy::removeClient() {
+ 
+ void MediaCodec::ResourceManagerServiceProxy::markClientForPendingRemoval() {
+     Mutex::Autolock _l(mLock);
++    if (mVideoBatteryPosted) {
++        VideoBatteryReporter::getInstance()->flush();
++    }
+     if (mService == nullptr) {
+         return;
+     }
+@@ -1151,7 +1180,7 @@ void MediaCodec::statsBufferSent(int64_t presentationUs, const sp<MediaCodecBuff
+ 
+     if (mBatteryChecker != nullptr) {
+         mBatteryChecker->onCodecActivity([this] () {
+-            mResourceManagerProxy->addResource(MediaResource::VideoBatteryResource());
++            mResourceManagerProxy->reportVideoBatteryResource(true);
+         });
+     }
+ 
+@@ -1225,7 +1254,7 @@ void MediaCodec::statsBufferReceived(int64_t presentationUs, const sp<MediaCodec
+ 
+     if (mBatteryChecker != nullptr) {
+         mBatteryChecker->onCodecActivity([this] () {
+-            mResourceManagerProxy->addResource(MediaResource::VideoBatteryResource());
++            mResourceManagerProxy->reportVideoBatteryResource(true);
+         });
+     }
+ 
+@@ -4441,8 +4470,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
+         {
+             if (mBatteryChecker != nullptr) {
+                 mBatteryChecker->onCheckBatteryTimer(msg, [this] () {
+-                    mResourceManagerProxy->removeResource(
+-                            MediaResource::VideoBatteryResource());
++                    mResourceManagerProxy->reportVideoBatteryResource(false);
+                 });
+             }
+             break;
+diff --git a/media/libstagefright/VideoBatteryReporter.h b/media/libstagefright/VideoBatteryReporter.h
+new file mode 100644
+index 0000000..34700ae
+--- /dev/null
++++ b/media/libstagefright/VideoBatteryReporter.h
+@@ -0,0 +1,80 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <media/stagefright/foundation/ADebug.h>
++#include <media/stagefright/foundation/AHandler.h>
++#include <media/stagefright/foundation/AMessage.h>
++
++#include <functional>
++#include <utility>
++
++namespace android {
++
++// Battery statistics must not hold up codec input/output. Share one FIFO
++// between codecs, and drain it before removing their ResourceManager clients.
++class VideoBatteryReporter : public AHandler {
++public:
++    static sp<VideoBatteryReporter> getInstance() {
++        static sp<VideoBatteryReporter> instance = [] {
++            sp<VideoBatteryReporter> reporter = new VideoBatteryReporter;
++            reporter->mLooper = new ALooper;
++            reporter->mLooper->setName("VideoBattery");
++            reporter->mLooper->registerHandler(reporter);
++            CHECK_EQ(reporter->mLooper->start(), OK);
++            return reporter;
++        }();
++        return instance;
++    }
++
++    void post(std::function<void()> action) {
++        sp<AMessage> message = new AMessage(0, this);
++        message->setObject("task", new Task(std::move(action)));
++        CHECK_EQ(message->post(), OK);
++    }
++
++    void flush() {
++        sp<AMessage> response;
++        CHECK_EQ((new AMessage(0, this))->postAndAwaitResponse(&response), OK);
++    }
++
++private:
++    struct Task : public RefBase {
++        explicit Task(std::function<void()> callback) : action(std::move(callback)) {}
++        const std::function<void()> action;
++    };
++
++    VideoBatteryReporter() = default;
++    ~VideoBatteryReporter() override {
++        mLooper->stop();
++    }
++
++    void onMessageReceived(const sp<AMessage>& message) override {
++        sp<RefBase> object;
++        if (message->findObject("task", &object)) {
++            static_cast<Task*>(object.get())->action();
++        }
++        sp<AReplyToken> reply;
++        if (message->senderAwaitsResponse(&reply)) {
++            (new AMessage)->postReply(reply);
++        }
++    }
++
++    sp<ALooper> mLooper;
++};
++
++}  // namespace android
+diff --git a/media/libstagefright/tests/Android.bp b/media/libstagefright/tests/Android.bp
+index a799a13..3395f8b 100644
+--- a/media/libstagefright/tests/Android.bp
++++ b/media/libstagefright/tests/Android.bp
+@@ -60,3 +60,20 @@ cc_test {
+         "-Wall",
+     ],
+ }
++
++cc_test {
++    name: "VideoBatteryReporter_test",
++    srcs: ["VideoBatteryReporter_test.cpp"],
++    test_suites: ["device-tests"],
++
++    shared_libs: [
++        "libstagefright_foundation",
++        "libutils",
++        "liblog",
++    ],
++
++    cflags: [
++        "-Werror",
++        "-Wall",
++    ],
++}
+diff --git a/media/libstagefright/tests/VideoBatteryReporter_test.cpp b/media/libstagefright/tests/VideoBatteryReporter_test.cpp
+new file mode 100644
+index 0000000..e0969aa
+--- /dev/null
++++ b/media/libstagefright/tests/VideoBatteryReporter_test.cpp
+@@ -0,0 +1,83 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "../VideoBatteryReporter.h"
++
++#include <gtest/gtest.h>
++
++#include <chrono>
++#include <future>
++#include <thread>
++#include <vector>
++
++using namespace android;
++using namespace std::chrono_literals;
++
++TEST(VideoBatteryReporterTest, QueuingDoesNotWaitForBlockedReport) {
++    sp<VideoBatteryReporter> reporter = VideoBatteryReporter::getInstance();
++    std::promise<void> entered, release, queued;
++    std::shared_future<void> released = release.get_future().share();
++    std::thread::id worker;
++    reporter->post([&] {
++        worker = std::this_thread::get_id();
++        entered.set_value();
++        released.wait();
++    });
++    EXPECT_EQ(entered.get_future().wait_for(2s), std::future_status::ready);
++    auto posting = std::async(std::launch::async, [&] {
++        reporter->post([&] { queued.set_value(); });
++    });
++    EXPECT_EQ(posting.wait_for(2s), std::future_status::ready);
++    EXPECT_EQ(queued.get_future().wait_for(0s), std::future_status::timeout);
++    release.set_value();
++    posting.get();
++    reporter->flush();
++    EXPECT_NE(worker, std::this_thread::get_id());
++}
++
++TEST(VideoBatteryReporterTest, FlushOrdersClientRemovalAfterReports) {
++    sp<VideoBatteryReporter> reporter = VideoBatteryReporter::getInstance();
++    std::vector<int> events;
++    std::thread::id worker;
++    reporter->post([&] {
++        worker = std::this_thread::get_id();
++        events.push_back(1);  // add
++    });
++    reporter->post([&] {
++        EXPECT_EQ(worker, std::this_thread::get_id());
++        events.push_back(2);  // remove
++    });
++    reporter->post([&] { events.push_back(3); });  // restart
++    reporter->flush();
++    events.push_back(4);  // removeClient, after the barrier
++    EXPECT_EQ(events, (std::vector<int>{1, 2, 3, 4}));
++    EXPECT_EQ(reporter, VideoBatteryReporter::getInstance());
++}
++
++TEST(VideoBatteryReporterTest, PendingReportRetainsItsService) {
++    auto service = std::make_shared<int>(0);
++    std::weak_ptr<int> weak = service;
++    std::promise<void> release;
++    std::shared_future<void> released = release.get_future().share();
++    auto reporter = VideoBatteryReporter::getInstance();
++    reporter->post([released] { released.wait(); });
++    reporter->post([service] { ++*service; });
++    service.reset();
++    EXPECT_FALSE(weak.expired());
++    release.set_value();
++    reporter->flush();
++    EXPECT_TRUE(weak.expired());
++}
+-- 
+2.47.3
+
