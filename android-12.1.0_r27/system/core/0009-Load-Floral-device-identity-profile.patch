@@ -1,0 +1,521 @@
+From b64fec60175bc5d3c896a4a1831ea68711ff79e5 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Sun, 30 Aug 2026 14:36:39 +0800
+Subject: [PATCH] init: load Floral device identity profile
+
+Change-Id: Id0d4f5e3bcd46feff416288274978da619368eab
+---
+ init/Android.bp                     |   3 +
+ init/floral_device_profile.cpp      | 183 ++++++++++++++++++++++++++++
+ init/floral_device_profile.h        |  37 ++++++
+ init/floral_device_profile_test.cpp | 126 +++++++++++++++++++
+ init/property_service.cpp           |  38 +++++-
+ init/ueventd.cpp                    |   2 +-
+ rootdir/init.rc                     |   4 +-
+ 7 files changed, 387 insertions(+), 6 deletions(-)
+ create mode 100644 init/floral_device_profile.cpp
+ create mode 100644 init/floral_device_profile.h
+ create mode 100644 init/floral_device_profile_test.cpp
+
+diff --git a/init/Android.bp b/init/Android.bp
+index a57f3a4..ed42bec 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -61,6 +61,7 @@ init_device_sources = [
+     "first_stage_console.cpp",
+     "first_stage_init.cpp",
+     "first_stage_mount.cpp",
++    "floral_device_profile.cpp",
+     "fscrypt_init_extensions.cpp",
+     "init.cpp",
+     "lmkd_service.cpp",
+@@ -162,6 +163,7 @@ libinit_cc_defaults {
+         "libavb",
+         "libc++fs",
+         "libcgrouprc_format",
++        "libfloral_device_profile",
+         "liblmkd_utils",
+         "libmodprobe",
+         "libprocinfo",
+@@ -410,6 +412,7 @@ cc_test {
+         "devices_test.cpp",
+         "epoll_test.cpp",
+         "firmware_handler_test.cpp",
++        "floral_device_profile_test.cpp",
+         "init_test.cpp",
+         "keychords_test.cpp",
+         "oneshot_on_test.cpp",
+diff --git a/init/floral_device_profile.cpp b/init/floral_device_profile.cpp
+new file mode 100644
+index 0000000..882b9d7
+--- /dev/null
++++ b/init/floral_device_profile.cpp
+@@ -0,0 +1,183 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_device_profile.h"
++
++#include <array>
++#include <map>
++#include <string>
++#include <utility>
++
++#include <android-base/result.h>
++
++#include "util.h"
++
++namespace android {
++namespace init {
++namespace {
++
++const std::string& Required(const FloralDeviceProfile& profile, std::string_view key) {
++    return *profile.Find(key);
++}
++
++std::string Optional(const FloralDeviceProfile& profile, std::string_view key,
++                     std::string fallback = {}) {
++    const std::string* value = profile.Find(key);
++    return value == nullptr ? std::move(fallback) : *value;
++}
++
++std::string BuildFingerprint(const FloralDeviceProfile& profile) {
++    const std::string& brand = Required(profile, "brand");
++    const std::string& product = Required(profile, "product");
++    const std::string& device = Required(profile, "device");
++    const std::string& release = Required(profile, "version_release");
++    const std::string& build_id = Required(profile, "build_id");
++    const std::string incremental = Optional(profile, "build_incremental", build_id);
++    const std::string build_type = Optional(profile, "build_type", "user");
++    const std::string build_tags = Optional(profile, "build_tags", "release-keys");
++    return brand + "/" + product + "/" + device + ":" + release + "/" + build_id + "/" +
++           incremental + ":" + build_type + "/" + build_tags;
++}
++
++void AddOptionalProperty(const FloralDeviceProfile& profile, std::string_view field,
++                         const char* property, std::map<std::string, std::string>* properties) {
++    const std::string* value = profile.Find(field);
++    if (value != nullptr) {
++        properties->emplace(property, *value);
++    }
++}
++
++}  // namespace
++
++android::base::Result<FloralDeviceProfile> ParseFloralDeviceProfile(std::string_view content) {
++    FloralDeviceProfile profile;
++    std::string error;
++    if (!floral::device::profile::ParseDeviceProfile(content, &profile, &error)) {
++        return android::base::Error() << error;
++    }
++    return profile;
++}
++
++android::base::Result<FloralDeviceProfile> ReadFloralDeviceProfile(const std::string& path) {
++    FloralDeviceProfile profile;
++    std::string error;
++    if (!floral::device::profile::ReadDeviceProfile(path, &profile, &error)) {
++        return android::base::Error() << error;
++    }
++    return profile;
++}
++
++android::base::Result<std::map<std::string, std::string>> FloralDeviceProfileProperties(
++        const FloralDeviceProfile& profile) {
++    const std::string& brand = Required(profile, "brand");
++    const std::string& manufacturer = Required(profile, "manufacturer");
++    const std::string& model = Required(profile, "model");
++    const std::string& device = Required(profile, "device");
++    const std::string& product = Required(profile, "product");
++    const std::string& build_id = Required(profile, "build_id");
++    const std::string& release = Required(profile, "version_release");
++    const std::string incremental = Optional(profile, "build_incremental", build_id);
++    const std::string build_type = Optional(profile, "build_type", "user");
++    const std::string build_tags = Optional(profile, "build_tags", "release-keys");
++    const std::string build_date = Optional(profile, "build_date");
++    const std::string build_date_utc = Optional(profile, "build_date_utc");
++    const std::string fingerprint = BuildFingerprint(profile);
++    const std::string description =
++            Optional(profile, "build_description",
++                     product + "-" + build_type + " " + release + " " + build_id + " " +
++                             incremental + " " + build_tags);
++
++    std::map<std::string, std::string> properties = {
++            {"ro.product.brand", brand},
++            {"ro.product.manufacturer", manufacturer},
++            {"ro.product.model", model},
++            {"ro.product.device", device},
++            {"ro.product.name", product},
++            {"ro.product.board", Required(profile, "board")},
++            {"ro.soc.manufacturer", Required(profile, "soc_manufacturer")},
++            {"ro.soc.model", Required(profile, "soc_model")},
++            {"ro.boot.floral_gpu_vendor", Required(profile, "gpu_vendor")},
++            {"ro.boot.floral_gpu_model", Required(profile, "gpu_model")},
++            {"ro.build.id", build_id},
++            {"ro.build.display.id", Required(profile, "build_display")},
++            {"ro.build.description", description},
++            {"ro.build.flavor", Optional(profile, "build_flavor", product + "-" + build_type)},
++            {"ro.build.product", product},
++            {"ro.build.version.release", release},
++            {"ro.build.version.release_or_codename", release},
++            {"ro.build.version.security_patch", Required(profile, "security_patch")},
++            {"ro.build.version.incremental", incremental},
++            {"ro.build.type", build_type},
++            {"ro.build.tags", build_tags},
++            {"ro.build.fingerprint", fingerprint},
++    };
++
++    constexpr std::array<std::string_view, 6> partitions = {"odm",        "product", "system",
++                                                            "system_ext", "vendor",  "vendor_dlkm"};
++    for (const std::string_view partition : partitions) {
++        const std::string prefix = "ro.product." + std::string(partition) + ".";
++        properties.emplace(prefix + "brand", brand);
++        properties.emplace(prefix + "manufacturer", manufacturer);
++        properties.emplace(prefix + "model", model);
++        properties.emplace(prefix + "device", device);
++        properties.emplace(prefix + "name", product);
++        const std::string build_prefix = "ro." + std::string(partition) + ".build.";
++        properties.emplace(build_prefix + "fingerprint", fingerprint);
++        properties.emplace(build_prefix + "id", build_id);
++        properties.emplace(build_prefix + "version.incremental", incremental);
++        properties.emplace(build_prefix + "type", build_type);
++        properties.emplace(build_prefix + "tags", build_tags);
++        properties.emplace(build_prefix + "version.release", release);
++        properties.emplace(build_prefix + "version.release_or_codename", release);
++        if (!build_date.empty()) {
++            properties.emplace(build_prefix + "date", build_date);
++            properties.emplace(build_prefix + "date.utc", build_date_utc);
++        }
++    }
++
++    AddOptionalProperty(profile, "build_user", "ro.build.user", &properties);
++    AddOptionalProperty(profile, "build_host", "ro.build.host", &properties);
++    AddOptionalProperty(profile, "build_date", "ro.build.date", &properties);
++    AddOptionalProperty(profile, "build_date_utc", "ro.build.date.utc", &properties);
++    AddOptionalProperty(profile, "hardware", "ro.hardware", &properties);
++    AddOptionalProperty(profile, "kernel_release", "ro.boot.floral_kernel_release", &properties);
++    AddOptionalProperty(profile, "kernel_version", "ro.boot.floral_kernel_version", &properties);
++    AddOptionalProperty(profile, "memory_type", "ro.boot.floral_memory_type", &properties);
++    AddOptionalProperty(profile, "memory_frequency", "ro.boot.floral_memory_frequency",
++                        &properties);
++    AddOptionalProperty(profile, "memory_channel", "ro.boot.floral_memory_channel", &properties);
++    const std::string* serial = profile.Find("serial");
++    if (serial != nullptr) {
++        properties.emplace("ro.serialno", *serial);
++        properties.emplace("ro.boot.serialno", *serial);
++    }
++    const std::string* revision = profile.Find("hardware_revision");
++    if (revision != nullptr) {
++        properties.emplace("ro.hardware.revision", *revision);
++        properties.emplace("ro.boot.hardware.revision", *revision);
++    }
++
++    for (const auto& [name, value] : properties) {
++        if (value.empty() || !IsLegalPropertyValue(name, value).ok()) {
++            return android::base::Error()
++                   << "profile value is invalid for property '" << name << "'";
++        }
++    }
++    return properties;
++}
++
++}  // namespace init
++}  // namespace android
+diff --git a/init/floral_device_profile.h b/init/floral_device_profile.h
+new file mode 100644
+index 0000000..71f200c
+--- /dev/null
++++ b/init/floral_device_profile.h
+@@ -0,0 +1,37 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <map>
++#include <string>
++#include <string_view>
++
++#include <android-base/result.h>
++#include <floral/device/profile/DeviceProfile.h>
++
++namespace android {
++namespace init {
++
++using FloralDeviceProfile = floral::device::profile::DeviceProfile;
++
++android::base::Result<FloralDeviceProfile> ParseFloralDeviceProfile(std::string_view content);
++android::base::Result<FloralDeviceProfile> ReadFloralDeviceProfile(const std::string& path);
++android::base::Result<std::map<std::string, std::string>> FloralDeviceProfileProperties(
++        const FloralDeviceProfile& profile);
++
++}  // namespace init
++}  // namespace android
+diff --git a/init/floral_device_profile_test.cpp b/init/floral_device_profile_test.cpp
+new file mode 100644
+index 0000000..3f4f165
+--- /dev/null
++++ b/init/floral_device_profile_test.cpp
+@@ -0,0 +1,126 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_device_profile.h"
++
++#include <gtest/gtest.h>
++
++namespace android {
++namespace init {
++namespace {
++
++constexpr std::string_view kValidProfile = R"(
++version=1
++brand=OPPO
++manufacturer=OPPO
++model=PGEM10
++device=OP528BL1
++product=PGEM10
++board=taro
++hardware=qcom
++soc_manufacturer=Qualcomm
++soc_model=SM8450
++gpu_vendor=Qualcomm
++gpu_model=Adreno 730
++build_id=SKQ1.211006.001
++build_display=PGEM10_11_A.12
++build_description=PGEM10-user 12 SKQ1.211006.001 164808 release-keys
++build_flavor=PGEM10-user
++build_incremental=164808
++build_type=user
++build_tags=release-keys
++build_user=build
++build_host=buildhost
++build_date=Fri Sep  4 08:08:35 UTC 2026
++build_date_utc=1788509315
++version_release=12
++security_patch=2022-01-05
++kernel_release=5.10.66-android12-9-g123456789abc
++kernel_version=#1 SMP PREEMPT Mon Feb 7 12:00:00 UTC 2022
++memory_type=LPDDR5X
++memory_frequency=3200MHz
++memory_channel=4 x 16-bit
++serial=PGEM10FLORAL0001
++hardware_revision=11
++)";
++
++TEST(floral_device_profile, UsesSharedStrictParser) {
++    auto parsed = ParseFloralDeviceProfile(kValidProfile);
++    ASSERT_TRUE(parsed.ok()) << parsed.error();
++    ASSERT_NE(parsed->Find("model"), nullptr);
++    EXPECT_EQ(*parsed->Find("model"), "PGEM10");
++
++    std::string duplicate(kValidProfile);
++    duplicate.append("unknown_key=first\nunknown_key=second\n");
++    EXPECT_FALSE(ParseFloralDeviceProfile(duplicate).ok());
++}
++
++TEST(floral_device_profile, MapsEveryPartitionIdentityAndFingerprint) {
++    auto parsed = ParseFloralDeviceProfile(kValidProfile);
++    ASSERT_TRUE(parsed.ok()) << parsed.error();
++    auto mapped = FloralDeviceProfileProperties(*parsed);
++    ASSERT_TRUE(mapped.ok()) << mapped.error();
++    const auto& properties = *mapped;
++    const std::string fingerprint =
++            "OPPO/PGEM10/OP528BL1:12/SKQ1.211006.001/164808:user/release-keys";
++
++    EXPECT_EQ(properties.at("ro.product.model"), "PGEM10");
++    EXPECT_EQ(properties.at("ro.hardware"), "qcom");
++    EXPECT_EQ(properties.at("ro.build.fingerprint"), fingerprint);
++    for (std::string_view partition :
++         {"odm", "product", "system", "system_ext", "vendor", "vendor_dlkm"}) {
++        const std::string product_prefix = "ro.product." + std::string(partition) + ".";
++        EXPECT_EQ(properties.at(product_prefix + "brand"), "OPPO");
++        EXPECT_EQ(properties.at(product_prefix + "model"), "PGEM10");
++        EXPECT_EQ(properties.at("ro." + std::string(partition) + ".build.fingerprint"),
++                  fingerprint);
++        const std::string build_prefix = "ro." + std::string(partition) + ".build.";
++        EXPECT_EQ(properties.at(build_prefix + "id"), "SKQ1.211006.001");
++        EXPECT_EQ(properties.at(build_prefix + "version.incremental"), "164808");
++        EXPECT_EQ(properties.at(build_prefix + "date.utc"), "1788509315");
++    }
++    EXPECT_EQ(properties.find("ro.bootimage.build.fingerprint"), properties.end());
++    EXPECT_EQ(properties.find("ro.odm_dlkm.build.fingerprint"), properties.end());
++}
++
++TEST(floral_device_profile, DoesNotOverrideRuntimeArchitectureOrHalClassSelection) {
++    auto parsed = ParseFloralDeviceProfile(kValidProfile);
++    ASSERT_TRUE(parsed.ok()) << parsed.error();
++    auto mapped = FloralDeviceProfileProperties(*parsed);
++    ASSERT_TRUE(mapped.ok()) << mapped.error();
++
++    EXPECT_EQ(mapped->find("ro.product.cpu.abi"), mapped->end());
++    EXPECT_EQ(mapped->find("ro.product.cpu.abilist"), mapped->end());
++    EXPECT_EQ(mapped->find("ro.build.version.sdk"), mapped->end());
++    EXPECT_EQ(mapped->find("ro.hardware.hwcomposer"), mapped->end());
++}
++
++TEST(floral_device_profile, HardwareIdentityIsOptional) {
++    std::string profile(kValidProfile);
++    const size_t begin = profile.find("hardware=qcom\n");
++    ASSERT_NE(begin, std::string::npos);
++    profile.erase(begin, sizeof("hardware=qcom\n") - 1);
++
++    auto parsed = ParseFloralDeviceProfile(profile);
++    ASSERT_TRUE(parsed.ok()) << parsed.error();
++    auto mapped = FloralDeviceProfileProperties(*parsed);
++    ASSERT_TRUE(mapped.ok()) << mapped.error();
++    EXPECT_EQ(mapped->find("ro.hardware"), mapped->end());
++}
++
++}  // namespace
++}  // namespace init
++}  // namespace android
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index 55e89c6..954454e 100755
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -64,6 +64,7 @@
+ 
+ #include "debug_ramdisk.h"
+ #include "epoll.h"
++#include "floral_device_profile.h"
+ #include "init.h"
+ #include "persistent_properties.h"
+ #include "property_type.h"
+@@ -101,6 +102,7 @@ constexpr auto LEGACY_ID_PROP = "ro.build.legacy.id";
+ constexpr auto VBMETA_DIGEST_PROP = "ro.boot.vbmeta.digest";
+ constexpr auto DIGEST_SIZE_USED = 8;
+ 
++
+ static bool persistent_properties_loaded = false;
+ 
+ static int property_set_fd = -1;
+@@ -172,7 +174,8 @@ static bool CheckMacPerms(const std::string& name, const char* target_context,
+     return has_access;
+ }
+ 
+-static uint32_t PropertySet(const std::string& name, const std::string& value, std::string* error) {
++static uint32_t PropertySet(const std::string& name, const std::string& value, std::string* error,
++                            bool allow_read_only_override = false) {
+     size_t valuelen = value.size();
+ 
+     if (!IsLegalPropertyName(name)) {
+@@ -188,7 +191,7 @@ static uint32_t PropertySet(const std::string& name, const std::string& value, s
+     prop_info* pi = (prop_info*) __system_property_find(name.c_str());
+     if (pi != nullptr) {
+         // ro.* properties are actually "write-once".
+-        if (StartsWith(name, "ro.")) {
++        if (StartsWith(name, "ro.") && !allow_read_only_override) {
+             *error = "Read-only property was already set";
+             return PROP_ERROR_READ_ONLY_PROPERTY;
+         }
+@@ -1089,9 +1092,38 @@ void PropertyLoadBootDefaults() {
+         load_properties_from_file(kDebugRamdiskProp, nullptr, &properties);
+     }
+ 
++    std::map<std::string, std::string> floral_properties;
++    if (access(floral::device::profile::kDefaultPath, F_OK) == 0) {
++        auto mounted_profile = ReadFloralDeviceProfile(floral::device::profile::kDefaultPath);
++        if (mounted_profile.ok()) {
++            auto mapped_properties = FloralDeviceProfileProperties(*mounted_profile);
++            if (mapped_properties.ok()) {
++                floral_properties = std::move(*mapped_properties);
++                LOG(INFO) << "Using mounted Floral device profile '"
++                          << *mounted_profile->Find("model") << "'";
++            } else {
++                LOG(WARNING) << "Ignoring invalid Floral property mapping: "
++                             << mapped_properties.error();
++            }
++        } else {
++            LOG(WARNING) << "Ignoring invalid Floral device profile: "
++                         << mounted_profile.error();
++        }
++    } else if (errno == ENOENT) {
++        LOG(INFO) << "Floral device profile is not mounted";
++    } else {
++        PLOG(WARNING) << "Cannot inspect Floral device profile";
++    }
++    for (const auto& [name, value] : floral_properties) {
++        properties.insert_or_assign(name, value);
++    }
++
+     for (const auto& [name, value] : properties) {
+         std::string error;
+-        if (PropertySet(name, value, &error) != PROP_SUCCESS) {
++        // The trusted, validated profile must supersede inherited kernel identity.
++        const bool allow_read_only_override =
++                floral_properties.find(name) != floral_properties.end();
++        if (PropertySet(name, value, &error, allow_read_only_override) != PROP_SUCCESS) {
+             LOG(ERROR) << "Could not set '" << name << "' to '" << value
+                        << "' while loading .prop files" << error;
+         }
+diff --git a/init/ueventd.cpp b/init/ueventd.cpp
+index 331255b..62078a2 100644
+--- a/init/ueventd.cpp
++++ b/init/ueventd.cpp
+@@ -270,7 +270,7 @@ void ColdBoot::Run() {
+ static UeventdConfiguration GetConfiguration() {
+     // TODO: Remove these legacy paths once Android S is no longer supported.
+     if (android::base::GetIntProperty("ro.product.first_api_level", 10000) <= __ANDROID_API_S__) {
+-        auto hardware = android::base::GetProperty("ro.hardware", "");
++        auto hardware = android::base::GetProperty("ro.boot.hardware", "");
+         return ParseConfig({"/system/etc/ueventd.rc", "/vendor/ueventd.rc", "/odm/ueventd.rc",
+                             "/ueventd." + hardware + ".rc"});
+     }
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 95de62b..5de21f2 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -6,8 +6,8 @@
+ 
+ import /init.environ.rc
+ import /system/etc/init/hw/init.usb.rc
+-import /init.${ro.hardware}.rc
+-import /vendor/etc/init/hw/init.${ro.hardware}.rc
++import /init.${ro.boot.hardware}.rc
++import /vendor/etc/init/hw/init.${ro.boot.hardware}.rc
+ import /system/etc/init/hw/init.usb.configfs.rc
+ import /system/etc/init/hw/init.${ro.zygote}.rc
+ 
+-- 
+2.47.3
+

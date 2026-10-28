@@ -1,0 +1,249 @@
+From 16bc9a21bcac21387f6d679078fbb705c33a71aa Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 15 Oct 2026 13:38:09 +0800
+Subject: [PATCH] init: separate vendor probes from platform configuration
+
+Run GPU and ashmem probes in a dedicated vendor domain before zygote startup. Let vendor_init set protected graphics selectors and platform init own sys.use_memfd. Move the Ethernet configuration helper to system so it can create platform data without violating Treble isolation. Detect DRM drivers through sysfs instead of debugfs.
+---
+ gpu_config.sh            | 52 +++++++++++++++-------------------------
+ ipconfigstore/Android.bp |  1 -
+ post-fs-data.redroid.sh  | 11 +++++----
+ redroid.common.rc        | 27 ++++++++++-----------
+ redroid.platform.rc      | 11 +++++++++
+ vendor.mk                |  1 +
+ 6 files changed, 50 insertions(+), 53 deletions(-)
+ create mode 100644 redroid.platform.rc
+
+diff --git a/gpu_config.sh b/gpu_config.sh
+index ff3775f..1c5335f 100755
+--- a/gpu_config.sh
++++ b/gpu_config.sh
+@@ -1,26 +1,26 @@
+-#!/system/bin/sh
++#!/vendor/bin/sh
+ 
+ # args: driver
+ setup_vulkan() {
+     echo "setup vulkan for driver: $1"
+     case "$1" in
+         i915)
+-            setprop ro.hardware.vulkan intel
++            setprop vendor.floral.gpu.vulkan intel
+             ;;
+         amdgpu)
+-            setprop ro.hardware.vulkan radeon
++            setprop vendor.floral.gpu.vulkan radeon
+             ;;
+         virtio_gpu)
+-            setprop ro.hardware.vulkan virtio
++            setprop vendor.floral.gpu.vulkan virtio
+             ;;
+         v3d|vc4)
+-            setprop ro.hardware.vulkan broadcom
++            setprop vendor.floral.gpu.vulkan broadcom
+             ;;
+         msm|msm_drm|msm_dpu)
+-            setprop ro.hardware.vulkan freedreno
++            setprop vendor.floral.gpu.vulkan freedreno
+             ;;
+         panfrost)
+-            setprop ro.hardware.vulkan panfrost
++            setprop vendor.floral.gpu.vulkan panfrost
+             ;;
+         *)
+             echo "not supported driver: $1"
+@@ -30,20 +30,11 @@ setup_vulkan() {
+ 
+ setup_vulkan_for_render_node() {
+     minor="${1##*renderD}"
+-    debugfs_name="/sys/kernel/debug/dri/$minor/name"
+-    if [ -r "$debugfs_name" ]; then
+-        driver="`cut -d' ' -f1 "$debugfs_name"`"
+-        setup_vulkan "$driver"
+-        return
+-    fi
+-
+-    # Qualcomm containers may not expose debugfs; identify msm_dpu via sysfs.
++    # Driver identity is available through sysfs without debugfs access.
+     uevent="/sys/class/drm/renderD$minor/device/uevent"
+     if [ -r "$uevent" ]; then
+         driver="`sed -n 's/^DRIVER=//p' "$uevent"`"
+-        if [ "$driver" = "msm_dpu" ]; then
+-            setup_vulkan "$driver"
+-        fi
++        setup_vulkan "$driver"
+     fi
+ }
+ 
+@@ -57,27 +48,22 @@ setup_render_node() {
+             return 1
+         fi
+ 
+-        setprop gralloc.gbm.device "$node"
++        setprop vendor.floral.gpu.device "$node"
+         chmod 666 "$node"
+         setup_vulkan_for_render_node "$node"
+         return 0
+     fi
+ 
+-    # A render node is sufficient for GBM; debugfs is optional in containers.
++    # A render node is sufficient for GBM; driver probing uses sysfs.
+     for node in /dev/dri/renderD* ; do
+         if [ ! -e "$node" ]; then
+             continue
+         fi
+ 
+-        minor="${node##*renderD}"
+-        if [ -r "/sys/kernel/debug/dri/$minor/name" ]; then
+-            driver="`cut -d' ' -f1 /sys/kernel/debug/dri/$minor/name`"
+-            echo "DRI node exists, driver: $driver"
+-        fi
+         setup_vulkan_for_render_node "$node"
+ 
+         echo "use render node: $node"
+-        setprop gralloc.gbm.device "$node"
++        setprop vendor.floral.gpu.device "$node"
+         chmod 666 "$node"
+         return 0
+     done
+@@ -89,9 +75,9 @@ setup_render_node() {
+ gpu_setup_host() {
+     echo "use GPU host mode"
+ 
+-    setprop gralloc.gbm.backend drm
+-    setprop ro.hardware.egl mesa
+-    setprop ro.hardware.gralloc gbm
++    setprop vendor.floral.gpu.backend drm
++    setprop vendor.floral.gpu.egl mesa
++    setprop vendor.floral.gpu.gralloc gbm
+ }
+ 
+ gpu_setup_guest() {
+@@ -109,10 +95,10 @@ gpu_setup_guest() {
+         return 1
+     fi
+ 
+-    setprop gralloc.gbm.backend software
+-    setprop ro.hardware.egl $egl
+-    setprop ro.hardware.gralloc gbm
+-    setprop ro.hardware.vulkan pastel
++    setprop vendor.floral.gpu.backend software
++    setprop vendor.floral.gpu.egl $egl
++    setprop vendor.floral.gpu.gralloc gbm
++    setprop vendor.floral.gpu.vulkan pastel
+ }
+ 
+ gpu_setup() {
+diff --git a/ipconfigstore/Android.bp b/ipconfigstore/Android.bp
+index 34ed932..a1e08dc 100644
+--- a/ipconfigstore/Android.bp
++++ b/ipconfigstore/Android.bp
+@@ -3,6 +3,5 @@ cc_binary {
+     srcs: ["*.cc"],
+     cflags: ["-Wall", "-Werror"],
+     shared_libs: ["libbase"],
+-    vendor: true,
+ }
+ 
+diff --git a/post-fs-data.redroid.sh b/post-fs-data.redroid.sh
+index 67cd1b4..8366cd4 100755
+--- a/post-fs-data.redroid.sh
++++ b/post-fs-data.redroid.sh
+@@ -1,5 +1,8 @@
+-#!/system/bin/sh
++#!/vendor/bin/sh
+ 
+-## enable `memfd` if `ashmem` missing
+-## memfd is disabled in post-fs-data (init.rc)
+-[ -c /dev/ashmem ] || setprop sys.use_memfd 1
++# Platform init owns sys.use_memfd; publish only the device probe result.
++if [ -c /dev/ashmem ]; then
++    setprop vendor.floral.init.memfd 0
++else
++    setprop vendor.floral.init.memfd 1
++fi
+diff --git a/redroid.common.rc b/redroid.common.rc
+index bf6d5a8..f0e92c7 100644
+--- a/redroid.common.rc
++++ b/redroid.common.rc
+@@ -1,6 +1,4 @@
+ on early-init
+-    mount debugfs debugfs /sys/kernel/debug mode=755
+-
+     # ueventd fix
+     chmod 0666 /dev/null
+     chmod 0666 /dev/zero
+@@ -56,11 +54,6 @@ on property:ro.zygote=zygote64_32
+     write /proc/sys/kernel/pid_max 65535
+ 
+ 
+-# use memfd (ashmem removed in 5.18), memfd is disabled in post-fs-data (init.rc)
+-on post-fs-data && property:ro.boot.use_memfd=*
+-    setprop sys.use_memfd ${ro.boot.use_memfd}
+-
+-
+ on init
+     # lxcfs better
+     write /data/.empty 0
+@@ -76,18 +69,22 @@ on init
+ 
+ 
+ on post-fs-data
+-    # fix for static IP, must after post-fs-data and before netd
+-    # rm apex config (use legacy path)
+-    rm /data/misc/apexdata/com.android.tethering/misc/ethernet/ipconfig.txt
+-    exec - system system -- /vendor/bin/ipconfigstore
+-
+     # no need to mount, and encryption not supported yet
+     trigger nonencrypted
+ 
+     exec -- /vendor/bin/post-fs-data.redroid.sh
++    exec -- /vendor/bin/gpu_config.sh
+ 
+ 
+-on early-boot
++# Probe first, then let vendor_init set the protected graphics properties.
++# These actions run after the probes and before zygote-start and boot.
++on load_persist_props_action
++    setprop ro.hardware.egl ${vendor.floral.gpu.egl}
++    setprop ro.hardware.gralloc ${vendor.floral.gpu.gralloc}
++    setprop gralloc.gbm.backend ${vendor.floral.gpu.backend}
+ 
+-    # before HAL / SurfaceFlinger
+-    exec -- /vendor/bin/gpu_config.sh
++on load_persist_props_action && property:vendor.floral.gpu.device=*
++    setprop gralloc.gbm.device ${vendor.floral.gpu.device}
++
++on load_persist_props_action && property:vendor.floral.gpu.vulkan=*
++    setprop ro.hardware.vulkan ${vendor.floral.gpu.vulkan}
+diff --git a/redroid.platform.rc b/redroid.platform.rc
+new file mode 100644
+index 0000000..7563768
+--- /dev/null
++++ b/redroid.platform.rc
+@@ -0,0 +1,11 @@
++# These operations own platform data and properties and must run as init.
++on post-fs-data
++    rm /data/misc/apexdata/com.android.tethering/misc/ethernet/ipconfig.txt
++    exec - system system -- /system/bin/ipconfigstore
++
++# The probe runs during post-fs-data, after init.rc resets this property.
++on load_persist_props_action
++    setprop sys.use_memfd ${vendor.floral.init.memfd}
++
++on load_persist_props_action && property:ro.boot.use_memfd=*
++    setprop sys.use_memfd ${ro.boot.use_memfd}
+diff --git a/vendor.mk b/vendor.mk
+index 907657b..3d24ab3 100644
+--- a/vendor.mk
++++ b/vendor.mk
+@@ -7,5 +7,6 @@ PRODUCT_PACKAGES += \
+ PRODUCT_COPY_FILES += \
+     vendor/redroid/gpu_config.sh:$(TARGET_COPY_OUT_VENDOR)/bin/gpu_config.sh \
+     vendor/redroid/post-fs-data.redroid.sh:$(TARGET_COPY_OUT_VENDOR)/bin/post-fs-data.redroid.sh \
++    vendor/redroid/redroid.platform.rc:$(TARGET_COPY_OUT_SYSTEM)/etc/init/redroid.platform.rc \
+     vendor/redroid/redroid.common.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/redroid.common.rc \
+     vendor/redroid/redroid.legacy.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/redroid.legacy.rc \
+-- 
+2.47.3
+

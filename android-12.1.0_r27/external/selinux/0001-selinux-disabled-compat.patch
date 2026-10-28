@@ -1,0 +1,253 @@
+From 03568dde644bbd31718e21585262efd6ee49089c Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Mon, 12 Oct 2026 13:01:58 +0800
+Subject: [PATCH] libselinux: no-op SELinux controls when a space runs disabled
+
+A space that boots without a private SELinux namespace has no selinuxfs
+mounted, so is_selinux_enabled() reports the true state: disabled. In
+that state the control entry points, setcon, setcontext, restorecon,
+load policy and the process attribute writers, would all fail against a
+missing filesystem instead of reporting the state the space is in.
+
+Guard them to succeed as no-ops so callers follow the disabled state
+rather than aborting. Queries that must yield a context return an empty
+one, which reports that no context exists on this space, instead of
+failing with ENOSYS: init, servicemanager and hwservicemanager treat a
+failed lookup as fatal and would never reach the point of booting.
+Status queries keep their native behaviour and honestly report
+disabled, so the fake contexts the previous patch returned stay gone.
+selinux_status_open hands back a harmless descriptor for the same
+reason, since every caller checks it for failure.
+
+Change-Id: Icbd9dba77845e6780cf8402f36c48ee6aafb97d7
+---
+ libselinux/src/android/android_platform.c | 20 ++++++++++++++++++++
+ libselinux/src/getfilecon.c               | 11 +++++++++++
+ libselinux/src/getpeercon.c               | 12 ++++++++++++
+ libselinux/src/label.c                    | 11 +++++++++++
+ libselinux/src/lgetfilecon.c              | 11 +++++++++++
+ libselinux/src/lsetfilecon.c              |  4 ++++
+ libselinux/src/procattr.c                 | 21 +++++++++++++++++++++
+ libselinux/src/sestatus.c                 | 11 +++++++++++
+ 8 files changed, 101 insertions(+)
+
+diff --git a/libselinux/src/android/android_platform.c b/libselinux/src/android/android_platform.c
+index 2e52c15..48eaa63 100644
+--- a/libselinux/src/android/android_platform.c
++++ b/libselinux/src/android/android_platform.c
+@@ -1013,6 +1013,14 @@ out:
+ 
+ int selinux_android_setcon(const char *con)
+ {
++	/*
++	 * A space running with SELinux disabled has no mounted selinuxfs, and
++	 * is_selinux_enabled() reports exactly that. Setting a context would
++	 * fail against a missing filesystem, so succeed as a no-op instead.
++	 */
++	if (!is_selinux_enabled())
++		return 0;
++
+ 	int ret = setcon(con);
+ 	if (ret)
+ 		return ret;
+@@ -1029,6 +1037,10 @@ int selinux_android_setcontext(uid_t uid,
+ 			       const char *seinfo,
+ 			       const char *pkgname)
+ {
++	/* App and daemon context selection needs a loaded policy to work with. */
++	if (!is_selinux_enabled())
++		return 0;
++
+ 	char *orig_ctx_str = NULL, *ctx_str;
+ 	context_t ctx = NULL;
+ 	int rc = -1;
+@@ -1420,6 +1432,10 @@ static int selinux_android_restorecon_common(const char* pathname_orig,
+                                              uid_t uid,
+                                              unsigned int flags)
+ {
++    /* Nothing is labeled on a space that runs SELinux disabled. */
++    if (!is_selinux_enabled())
++        return 0;
++
+     bool nochange = (flags & SELINUX_ANDROID_RESTORECON_NOCHANGE) ? true : false;
+     bool verbose = (flags & SELINUX_ANDROID_RESTORECON_VERBOSE) ? true : false;
+     bool recurse = (flags & SELINUX_ANDROID_RESTORECON_RECURSE) ? true : false;
+@@ -1667,6 +1683,10 @@ void selinux_android_set_sehandle(const struct selabel_handle *hndl)
+ 
+ int selinux_android_load_policy()
+ {
++	/* A space without selinuxfs has no filesystem to load a policy into. */
++	if (!is_selinux_enabled())
++		return 0;
++
+ 	int fd = -1;
+ 
+ 	fd = open(sepolicy_file, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+diff --git a/libselinux/src/getfilecon.c b/libselinux/src/getfilecon.c
+index 20bee8a..947231f 100644
+--- a/libselinux/src/getfilecon.c
++++ b/libselinux/src/getfilecon.c
+@@ -54,6 +54,17 @@ hidden_def(getfilecon_raw)
+ int getfilecon(const char *path, char ** context)
+ {
+ 	int ret;
++	/*
++	 * A space running with SELinux disabled has no file contexts to
++	 * read: xattr lookups fail against the label-less filesystem. Return
++	 * an empty context instead of failing; consumers treat a failed lookup
++	 * as fatal.
++	 */
++	if (!is_selinux_enabled()) {
++		*context = strdup("");
++		return *context ? 0 : -1;
++	}
++
+ 	char * rcontext = NULL;
+ 
+ 	*context = NULL;
+diff --git a/libselinux/src/getpeercon.c b/libselinux/src/getpeercon.c
+index 3a77a2d..e26a3d1 100644
+--- a/libselinux/src/getpeercon.c
++++ b/libselinux/src/getpeercon.c
+@@ -48,6 +48,18 @@ hidden_def(getpeercon_raw)
+ int getpeercon(int fd, char ** context)
+ {
+ 	int ret;
++	/*
++	 * getpeercon does not go through getprocattrcon: it asks the kernel
++	 * for the peer label over SO_PEERSEC, which fails with ENOPROTOOPT
++	 * when no SELinux is active. There is no label to report, so return
++	 * an empty one instead of failing; consumers treat a failed lookup as
++	 * fatal.
++	 */
++	if (!is_selinux_enabled()) {
++		*context = strdup("");
++		return *context ? 0 : -1;
++	}
++
+ 	char * rcontext;
+ 
+ 	ret = getpeercon_raw(fd, &rcontext);
+diff --git a/libselinux/src/label.c b/libselinux/src/label.c
+index e0ed68d..f72c9f4 100644
+--- a/libselinux/src/label.c
++++ b/libselinux/src/label.c
+@@ -310,6 +310,17 @@ bool selabel_hash_all_partial_matches(struct selabel_handle *rec,
+ int selabel_lookup_best_match(struct selabel_handle *rec, char **con,
+ 			      const char *key, const char **aliases, int type)
+ {
++	/*
++	 * A space running with SELinux disabled has no policy to find a best
++	 * match in, and the label files are not honored. Return an empty
++	 * context instead of failing; consumers treat a failed lookup as
++	 * fatal.
++	 */
++	if (!is_selinux_enabled()) {
++		*con = strdup("");
++		return *con ? 0 : -1;
++	}
++
+ 	struct selabel_lookup_rec *lr;
+ 
+ 	if (!rec->func_lookup_best_match) {
+diff --git a/libselinux/src/lgetfilecon.c b/libselinux/src/lgetfilecon.c
+index db67bc6..6658462 100644
+--- a/libselinux/src/lgetfilecon.c
++++ b/libselinux/src/lgetfilecon.c
+@@ -54,6 +54,17 @@ hidden_def(lgetfilecon_raw)
+ int lgetfilecon(const char *path, char ** context)
+ {
+ 	int ret;
++	/*
++	 * A space running with SELinux disabled has no file contexts to
++	 * read: xattr lookups fail against the label-less filesystem. Return
++	 * an empty context instead of failing; consumers treat a failed lookup
++	 * as fatal.
++	 */
++	if (!is_selinux_enabled()) {
++		*context = strdup("");
++		return *context ? 0 : -1;
++	}
++
+ 	char * rcontext = NULL;
+ 
+ 	*context = NULL;
+diff --git a/libselinux/src/lsetfilecon.c b/libselinux/src/lsetfilecon.c
+index 1d3b28a..1ee3824 100644
+--- a/libselinux/src/lsetfilecon.c
++++ b/libselinux/src/lsetfilecon.c
+@@ -29,6 +29,10 @@ hidden_def(lsetfilecon_raw)
+ 
+ int lsetfilecon(const char *path, const char *context)
+ {
++	/* No label is stored on a space that runs SELinux disabled. */
++	if (!is_selinux_enabled())
++		return 0;
++
+ 	int ret;
+ 	char * rcontext;
+ 
+diff --git a/libselinux/src/procattr.c b/libselinux/src/procattr.c
+index c6799ef..7067ffe 100644
+--- a/libselinux/src/procattr.c
++++ b/libselinux/src/procattr.c
+@@ -195,6 +195,17 @@ static int getprocattrcon_raw(char ** context,
+ static int getprocattrcon(char ** context,
+ 			  pid_t pid, const char *attr)
+ {
++	/*
++	 * A space running with SELinux disabled has no selinuxfs, so process
++	 * attribute reads fail with ENOSYS. There is no context to report, so
++	 * return an empty one instead of failing: AOSP consumers treat a
++	 * failed context lookup as fatal.
++	 */
++	if (!is_selinux_enabled()) {
++		*context = strdup("");
++		return *context ? 0 : -1;
++	}
++
+ 	int ret;
+ 	char * rcontext;
+ 
+@@ -280,6 +291,16 @@ out:
+ static int setprocattrcon(const char * context,
+ 			  pid_t pid, const char *attr)
+ {
++	/*
++	 * Setting a process attribute talks to a selinuxfs backed file, which a
++	 * space running with SELinux disabled does not have. This covers
++	 * setcon(), setexeccon(), setfscreatecon(), setsockcreatecon() and
++	 * setkeycreatecon(); succeed as a no-op so callers follow the disabled
++	 * state instead of aborting on a missing filesystem.
++	 */
++	if (!is_selinux_enabled())
++		return 0;
++
+ 	int ret;
+ 	char * rcontext;
+ 
+diff --git a/libselinux/src/sestatus.c b/libselinux/src/sestatus.c
+index ede5a28..e40c152 100644
+--- a/libselinux/src/sestatus.c
++++ b/libselinux/src/sestatus.c
+@@ -255,6 +255,17 @@ static int fallback_cb_policyload(int policyload)
+ int selinux_status_open(int fallback)
+ {
+ 	int	fd;
++
++	/*
++	 * No selinuxfs means there is no kernel status page to map. Callers
++	 * keep the handle to watch for policy reloads, so hand back a
++	 * harmless descriptor instead of failing them.
++	 */
++	if (!is_selinux_enabled()) {
++		fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
++		return fd;
++	}
++
+ 	char	path[PATH_MAX];
+ 	long	pagesize;
+ 
+-- 
+2.47.3
+

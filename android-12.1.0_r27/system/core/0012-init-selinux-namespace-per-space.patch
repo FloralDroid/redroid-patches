@@ -1,0 +1,157 @@
+From 452f24ab6194f7eb5b63bf90358780c432bdda1a Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 15 Oct 2026 01:03:11 +0800
+Subject: [PATCH] init: boot native SELinux in a private per-space namespace
+
+Use the host SELinux namespace extension with the correctly sized lsm_ctx
+and lsm_set_self_attr argument order. Create the namespace before mounting
+selinuxfs so policy loading cannot target the host namespace.
+
+Requested SELinux must fail closed if namespace creation or selinuxfs
+setup fails. Exec the existing selinux_setup stage to refresh libselinux's
+mount discovery and retain native policy loading, enforcement and init
+labeling. Preserve container boot arguments when entering second stage.
+
+Disabled spaces skip selinuxfs and retain their existing second-stage path.
+
+Change-Id: I807e49e0fa84e0b5660bed5467a9f0b33b8f5b96
+---
+ init/first_stage_init.cpp | 53 +++++++++++++++++++++++++++++++++++++--
+ init/selinux.cpp          | 15 +++++++++--
+ 2 files changed, 64 insertions(+), 4 deletions(-)
+
+diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
+index 3cf080f..c1b2422 100644
+--- a/init/first_stage_init.cpp
++++ b/init/first_stage_init.cpp
+@@ -19,6 +19,7 @@
+ #include <dirent.h>
+ #include <fcntl.h>
+ #include <paths.h>
++#include <stdint.h>
+ #include <stdlib.h>
+ #include <sys/mount.h>
+ #include <sys/stat.h>
+@@ -108,6 +109,50 @@ bool ForceNormalBoot(const std::string& cmdline, const std::string& bootconfig)
+            cmdline.find("androidboot.force_normal_boot=1") != std::string::npos;
+ }
+ 
++bool HasBootArg(int argc, char** argv, const std::string& arg) {
++    for (int i = 1; i < argc; ++i) {
++        if (arg == argv[i]) {
++            return true;
++        }
++    }
++    return false;
++}
++
++bool SetupSelinuxNamespace(int argc, char** argv) {
++    if (!HasBootArg(argc, argv, "androidboot.selinux=enforcing") &&
++        !HasBootArg(argc, argv, "androidboot.selinux=permissive")) {
++        return false;
++    }
++    if (!HasBootArg(argc, argv, "androidboot.lupine.selinuxns=1")) {
++        LOG(FATAL) << "SELinux requested without host namespace support";
++    }
++
++    // Android 12's kernel headers predate lsm_set_self_attr(). These constants
++    // and the fixed-size lsm_ctx header match the host's SELinux namespace ABI
++    // on arm64 and x86_64. LSM_ATTR_UNSHARE is a namespace patch extension.
++    constexpr long kLsmSetSelfAttr = 460;
++    constexpr unsigned int kLsmAttrUnshare = 106;
++    constexpr uint64_t kLsmIdSelinux = 101;
++    struct LsmContext {
++        uint64_t id;
++        uint64_t flags;
++        uint64_t len;
++        uint64_t ctx_len;
++    };
++    static_assert(sizeof(LsmContext) == 32);
++    LsmContext ctx = {kLsmIdSelinux, 0, sizeof(LsmContext), 0};
++    if (syscall(kLsmSetSelfAttr, kLsmAttrUnshare, &ctx, sizeof(ctx), 0) != 0) {
++        PLOG(FATAL) << "Could not unshare a private SELinux namespace";
++    }
++
++    // Mount only after unsharing so the guest cannot load policy into the host.
++    // Exec selinux_setup afterwards to refresh libselinux's filesystem cache.
++    if (mount("selinuxfs", "/sys/fs/selinux", "selinuxfs", 0, nullptr) != 0) {
++        PLOG(FATAL) << "Could not mount private selinuxfs";
++    }
++    return true;
++}
++
+ }  // namespace
+ 
+ std::string GetModuleLoadList(bool recovery, const std::string& dir_path) {
+@@ -219,7 +264,6 @@ int FirstStageMain(int argc, char** argv) {
+     gid_t groups[] = {AID_READPROC};
+     CHECKCALL(setgroups(arraysize(groups), groups));
+     CHECKCALL(mount("sysfs", "/sys", "sysfs", 0, NULL));
+-    CHECKCALL(mount("selinuxfs", "/sys/fs/selinux", "selinuxfs", 0, NULL));
+ 
+     CHECKCALL(mknod("/dev/kmsg", S_IFCHR | 0600, makedev(1, 11)));
+ 
+@@ -263,6 +307,10 @@ int FirstStageMain(int argc, char** argv) {
+     // talk to the outside world...
+     InitKernelLogging(argv);
+ 
++    // Disabled spaces never expose the host selinuxfs. Requested SELinux must
++    // obtain a private namespace successfully; it cannot fall back to disabled.
++    bool selinuxns_ready = SetupSelinuxNamespace(argc, argv);
++
+     if (!errors.empty()) {
+         for (const auto& [error_string, error_errno] : errors) {
+             LOG(ERROR) << error_string << " " << strerror(error_errno);
+@@ -378,7 +426,8 @@ int FirstStageMain(int argc, char** argv) {
+            1);
+ 
+     const char* path = "/system/bin/init";
+-    std::vector<const char *> args = {path, "second_stage"};
++    const char* stage = selinuxns_ready ? "selinux_setup" : "second_stage";
++    std::vector<const char *> args = {path, stage};
+     std::string init_cmdline;
+     android::base::ReadFileToString("/proc/self/cmdline", &init_cmdline);
+     std::replace(init_cmdline.begin(), init_cmdline.end(), '\0', ' ');
+diff --git a/init/selinux.cpp b/init/selinux.cpp
+index 29c0ff3..e80d4c0 100644
+--- a/init/selinux.cpp
++++ b/init/selinux.cpp
+@@ -59,6 +59,8 @@
+ #include <sys/wait.h>
+ #include <unistd.h>
+ 
++#include <vector>
++
+ #include <android-base/chrono_utils.h>
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
+@@ -741,6 +743,10 @@ int SetupSelinux(char** argv) {
+ 
+     SelinuxSetupKernelLogging();
+ 
++    if (is_selinux_enabled() <= 0) {
++        LOG(FATAL) << "Private selinuxfs is unavailable during SELinux setup";
++    }
++
+     LOG(INFO) << "Opening SELinux policy";
+ 
+     // Read the policy before potentially killing snapuserd.
+@@ -776,8 +782,13 @@ int SetupSelinux(char** argv) {
+     setenv(kEnvSelinuxStartedAt, std::to_string(start_time.time_since_epoch().count()).c_str(), 1);
+ 
+     const char* path = "/system/bin/init";
+-    const char* args[] = {path, "second_stage", nullptr};
+-    execv(path, const_cast<char**>(args));
++    // Preserve the container's androidboot arguments through the SELinux stage.
++    std::vector<const char*> args = {path, "second_stage"};
++    for (int i = 2; argv[i] != nullptr; ++i) {
++        args.push_back(argv[i]);
++    }
++    args.push_back(nullptr);
++    execv(path, const_cast<char**>(args.data()));
+ 
+     // execv() only returns if an error happened, in which case we
+     // panic and never return from this function.
+-- 
+2.47.3
+

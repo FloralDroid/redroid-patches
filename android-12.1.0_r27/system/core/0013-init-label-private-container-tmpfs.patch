@@ -1,0 +1,115 @@
+From d5a401138c5a325515459ce39e4a8a98856f7913 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 15 Oct 2026 10:30:39 +0800
+Subject: [PATCH] init: label private container tmpfs before SELinux
+ enforcement
+
+Android's fs_use_trans tmpfs policy does not initialize inode SIDs from
+copied security.selinux xattrs. Lupine constructs its root and device
+filesystems before init enters its SELinux namespace, so their initial
+labels prevent native services from following root partition symlinks
+or using devices once enforcement starts.
+
+Restore contexts from the image's native file_contexts after policy load
+and before enforcing. Walk only the private root and device filesystems,
+without following symlinks or relabeling other mounted filesystems.
+Terminate startup if the walk or a context restoration fails.
+
+Restrict the additional initialization to Lupine namespace boots. Native
+Android boot and the SELinux-disabled container path are unchanged.
+
+Change-Id: Ibbac08b0be2532a42d3c73e4f5d6b1cdd8d2cd5f
+---
+ init/selinux.cpp | 55 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 55 insertions(+)
+
+diff --git a/init/selinux.cpp b/init/selinux.cpp
+index e80d4c0..bbac63b 100644
+--- a/init/selinux.cpp
++++ b/init/selinux.cpp
+@@ -52,13 +52,17 @@
+ #include "selinux.h"
+ 
+ #include <android/api-level.h>
++#include <errno.h>
+ #include <fcntl.h>
++#include <fts.h>
+ #include <linux/audit.h>
+ #include <linux/netlink.h>
+ #include <stdlib.h>
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ 
++#include <string_view>
+ #include <vector>
+ 
+ #include <android-base/chrono_utils.h>
+@@ -95,6 +99,50 @@ namespace {
+ 
+ enum EnforcingStatus { SELINUX_PERMISSIVE, SELINUX_ENFORCING };
+ 
++void RestoreContainerContexts() {
++    // Lupine builds / and /dev on private tmpfs mounts before entering the
++    // SELinux namespace. Unlike ext4, tmpfs does not initialize inode SIDs
++    // from copied xattrs. Apply the image's file_contexts before enforcing.
++    char root[] = "/";
++    char dev[] = "/dev";
++    char* paths[] = {root, dev, nullptr};
++    auto tree = std::unique_ptr<FTS, decltype(&fts_close)>(
++            fts_open(paths, FTS_NOCHDIR | FTS_PHYSICAL | FTS_XDEV, nullptr), fts_close);
++    if (!tree) {
++        PLOG(FATAL) << "Could not walk container filesystems for SELinux labeling";
++    }
++
++    dev_t device = 0;
++    for (;;) {
++        errno = 0;
++        auto entry = fts_read(tree.get());
++        if (!entry) {
++            if (errno != 0) {
++                PLOG(FATAL) << "Could not finish container SELinux labeling";
++            }
++            break;
++        }
++        if (entry->fts_info == FTS_DP) {
++            continue;
++        }
++        if (entry->fts_info == FTS_ERR || entry->fts_info == FTS_DNR ||
++            entry->fts_info == FTS_NS || entry->fts_info == FTS_DC) {
++            LOG(FATAL) << "Could not inspect " << entry->fts_path << " for SELinux labeling";
++        }
++        if (entry->fts_level == 0) {
++            device = entry->fts_statp->st_dev;
++        }
++        // FTS_XDEV stops descent, but still visits mounted filesystem roots.
++        // Skip those roots too: do not relabel system images or host mounts.
++        if (entry->fts_statp->st_dev != device) {
++            continue;
++        }
++        if (selinux_android_restorecon(entry->fts_path, 0) != 0) {
++            PLOG(FATAL) << "Could not restore container context for " << entry->fts_path;
++        }
++    }
++}
++
+ EnforcingStatus StatusFromProperty() {
+     EnforcingStatus status = SELINUX_ENFORCING;
+ 
+@@ -769,6 +817,13 @@ int SetupSelinux(char** argv) {
+         snapuserd_helper = nullptr;
+     }
+ 
++    for (int i = 2; argv[i] != nullptr; ++i) {
++        if (std::string_view(argv[i]) == "androidboot.lupine.selinuxns=1") {
++            RestoreContainerContexts();
++            break;
++        }
++    }
++
+     SelinuxSetEnforcement();
+ 
+     // We're in the kernel domain and want to transition to the init domain.  File systems that
+-- 
+2.47.3
+
