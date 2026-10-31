@@ -1,19 +1,32 @@
-From 1f244a86266a1cef76b79c527a5c2be4d773f890 Mon Sep 17 00:00:00 2001
+From dad776bf766e636b42ca7b07a0445e4b9d646feb Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Mon, 17 Aug 2026 11:11:29 +0800
-Subject: [PATCH] sepolicy: allow Floral LXCFS sysfs identity views
+Subject: [PATCH] sepolicy: allow Floral sysfs identity and hardware discovery
+ views
 
-Label the synthetic NUMA and DMI targets with private sysfs types, grant read access outside isolated domains, and permit the mount helper to bind CPU, NUMA, block, and DMI directories.
-
-Change-Id: I7fc9354b56ef375f6f681cc64218b2e73d415923
 ---
- prebuilts/api/31.0/private/floral_lxcfs_bind.te | 14 +++++++++++++-
- prebuilts/api/31.0/private/genfs_contexts       |  3 +++
- prebuilts/api/32.0/private/floral_lxcfs_bind.te | 14 +++++++++++++-
- prebuilts/api/32.0/private/genfs_contexts       |  3 +++
- private/floral_lxcfs_bind.te                    | 14 +++++++++++++-
- private/genfs_contexts                          |  3 +++
- 6 files changed, 48 insertions(+), 3 deletions(-)
+ .../api/31.0/private/floral_lxcfs_bind.te     | 14 +++++++-
+ .../31.0/private/floral_native_hardware.te    | 34 +++++++++++++++++++
+ prebuilts/api/31.0/private/genfs_contexts     | 16 +++++++++
+ prebuilts/api/31.0/private/property_contexts  |  3 ++
+ .../api/31.0/public/floral_native_hardware.te |  4 +++
+ .../api/32.0/private/floral_lxcfs_bind.te     | 14 +++++++-
+ .../32.0/private/floral_native_hardware.te    | 34 +++++++++++++++++++
+ prebuilts/api/32.0/private/genfs_contexts     | 16 +++++++++
+ prebuilts/api/32.0/private/property_contexts  |  3 ++
+ .../api/32.0/public/floral_native_hardware.te |  4 +++
+ private/floral_lxcfs_bind.te                  | 14 +++++++-
+ private/floral_native_hardware.te             | 34 +++++++++++++++++++
+ private/genfs_contexts                        | 16 +++++++++
+ private/property_contexts                     |  3 ++
+ public/floral_native_hardware.te              |  4 +++
+ 15 files changed, 210 insertions(+), 3 deletions(-)
+ create mode 100644 prebuilts/api/31.0/private/floral_native_hardware.te
+ create mode 100644 prebuilts/api/31.0/public/floral_native_hardware.te
+ create mode 100644 prebuilts/api/32.0/private/floral_native_hardware.te
+ create mode 100644 prebuilts/api/32.0/public/floral_native_hardware.te
+ create mode 100644 private/floral_native_hardware.te
+ create mode 100644 public/floral_native_hardware.te
 
 diff --git a/prebuilts/api/31.0/private/floral_lxcfs_bind.te b/prebuilts/api/31.0/private/floral_lxcfs_bind.te
 index 3291635..0c61b30 100644
@@ -53,14 +66,67 @@ index 3291635..0c61b30 100644
  
  # floral_lxcfs_bind uses android::base::KernelLogger during early boot.
  allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+diff --git a/prebuilts/api/31.0/private/floral_native_hardware.te b/prebuilts/api/31.0/private/floral_native_hardware.te
+new file mode 100644
+index 0000000..d46a446
+--- /dev/null
++++ b/prebuilts/api/31.0/private/floral_native_hardware.te
+@@ -0,0 +1,34 @@
++# Hardware discovery metadata, not hardware control. Native sysfs exports only
++# selected real objects; these rules do not authorize new device nodes or ioctls.
++type sysfs_floral_graphics, fs_type, sysfs_type;
++type sysfs_floral_codec, fs_type, sysfs_type;
++type sysfs_floral_input, fs_type, sysfs_type;
++type sysfs_floral_device_links, fs_type, sysfs_type;
++
++r_dir_file(floral_graphics_probe, sysfs_floral_graphics)
++r_dir_file(floral_graphics_probe, sysfs_floral_device_links)
++
++r_dir_file({ surfaceflinger hal_graphics_allocator hal_graphics_composer hal_codec2_server }, sysfs_floral_graphics)
++# Mesa also performs discovery in application processes. Keep the platform's
++# isolated-process restrictions; this grants metadata reads, not device access.
++r_dir_file({ appdomain -isolated_app -app_zygote }, sysfs_floral_graphics)
++r_dir_file({ appdomain -isolated_app -app_zygote }, sysfs_floral_device_links)
++r_dir_file({ hal_codec2_server hal_camera_server }, sysfs_floral_codec)
++r_dir_file({ system_server inputflinger }, sysfs_floral_input)
++r_dir_file({ surfaceflinger hal_graphics_allocator hal_graphics_composer hal_codec2_server hal_camera_server }, sysfs_floral_device_links)
++
++# init/ueventd must enumerate and label delivered nodes. Only endpoint uevent
++# files are writable in the kernel; hardware parent metadata is read-only.
++r_dir_file({ init ueventd }, sysfs_floral_graphics)
++r_dir_file({ init ueventd }, sysfs_floral_codec)
++r_dir_file({ init ueventd }, sysfs_floral_input)
++r_dir_file({ init ueventd }, sysfs_floral_device_links)
++
++# A private devpts mount has its multiplexor at /dev/pts/ptmx, labelled devpts
++# rather than ptmx_device. Permit only PTY allocation, not arbitrary tty ioctls.
++allow { init adbd } devpts:chr_file ioctl;
++allowxperm { init adbd } devpts:chr_file ioctl { TIOCGPTN TIOCSPTLCK };
++
++# libfuse opens a second FD before FUSE_DEV_IOC_CLONE. Existing platform policy
++# already permits MediaProvider read/write/ioctl on the vold-supplied FUSE FD.
++allow mediaprovider_app fuse_device:chr_file open;
 diff --git a/prebuilts/api/31.0/private/genfs_contexts b/prebuilts/api/31.0/private/genfs_contexts
-index 13bfb46..322bd43 100644
+index 13bfb46..2845f26 100644
 --- a/prebuilts/api/31.0/private/genfs_contexts
 +++ b/prebuilts/api/31.0/private/genfs_contexts
-@@ -113,8 +113,10 @@ genfscon cgroup / u:object_r:cgroup:s0
+@@ -113,8 +113,23 @@ genfscon cgroup / u:object_r:cgroup:s0
  genfscon cgroup2 / u:object_r:cgroup_v2:s0
  # sysfs labels can be set by userspace.
  genfscon sysfs / u:object_r:sysfs:s0
++# Real SDM845 hardware identity. Do not label the entire SoC as graphics/codec.
++genfscon sysfs /devices/platform/soc@0/ae00000.display-subsystem/ae01000.display-controller u:object_r:sysfs_floral_graphics:s0
++genfscon sysfs /devices/platform/soc@0/aa00000.video-codec u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /devices/platform/soc@0/acb3000.camss u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /class/drm u:object_r:sysfs_floral_graphics:s0
++genfscon sysfs /class/video4linux u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /bus/media u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /dev/char u:object_r:sysfs_floral_device_links:s0
++genfscon sysfs /devices/virtual/lupine/input u:object_r:sysfs_floral_input:s0
++genfscon sysfs /class/input u:object_r:sysfs_floral_input:s0
++genfscon sysfs /devices/virtual/lupine/thermal u:object_r:sysfs_thermal:s0
++genfscon sysfs /devices/virtual/lupine/power_supply u:object_r:sysfs_batteryinfo:s0
++genfscon sysfs /devices/virtual/lupine/dma_heap u:object_r:sysfs_dma_heap:s0
 +genfscon sysfs /block                             u:object_r:sysfs_block:s0
  genfscon sysfs /devices/cs_etm                    u:object_r:sysfs_devices_cs_etm:s0
  genfscon sysfs /devices/system/cpu u:object_r:sysfs_devices_system_cpu:s0
@@ -68,7 +134,7 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /class/android_usb                 u:object_r:sysfs_android_usb:s0
  genfscon sysfs /class/extcon                      u:object_r:sysfs_extcon:s0
  genfscon sysfs /class/block                       u:object_r:sysfs_block:s0
-@@ -129,6 +131,7 @@ genfscon sysfs /class/switch                      u:object_r:sysfs_switch:s0
+@@ -129,6 +144,7 @@ genfscon sysfs /class/switch                      u:object_r:sysfs_switch:s0
  genfscon sysfs /class/wakeup                      u:object_r:sysfs_wakeup:s0
  genfscon sysfs /devices/platform/nfc-power/nfc_power u:object_r:sysfs_nfc_power_writable:s0
  genfscon sysfs /devices/virtual/android_usb     u:object_r:sysfs_android_usb:s0
@@ -76,6 +142,27 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /devices/virtual/block/            u:object_r:sysfs_devices_block:s0
  genfscon sysfs /devices/virtual/block/dm-       u:object_r:sysfs_dm:s0
  genfscon sysfs /devices/virtual/block/loop       u:object_r:sysfs_loop:s0
+diff --git a/prebuilts/api/31.0/private/property_contexts b/prebuilts/api/31.0/private/property_contexts
+index da02897..16cd8b7 100644
+--- a/prebuilts/api/31.0/private/property_contexts
++++ b/prebuilts/api/31.0/private/property_contexts
+@@ -1,3 +1,6 @@
++# Existing libc compatibility switch, fixed at boot by the launcher.
++ro.floral.libc.procview u:object_r:exported_default_prop:s0 exact bool
++
+ ##########################
+ # property service keys
+ #
+diff --git a/prebuilts/api/31.0/public/floral_native_hardware.te b/prebuilts/api/31.0/public/floral_native_hardware.te
+new file mode 100644
+index 0000000..6d56016
+--- /dev/null
++++ b/prebuilts/api/31.0/public/floral_native_hardware.te
+@@ -0,0 +1,4 @@
++# Vendor init probes can read selected DRM identity without acquiring a graphics
++# HAL role or permission to open GPU device nodes.
++attribute floral_graphics_probe;
++expandattribute floral_graphics_probe false;
 diff --git a/prebuilts/api/32.0/private/floral_lxcfs_bind.te b/prebuilts/api/32.0/private/floral_lxcfs_bind.te
 index 3291635..0c61b30 100644
 --- a/prebuilts/api/32.0/private/floral_lxcfs_bind.te
@@ -114,14 +201,67 @@ index 3291635..0c61b30 100644
  
  # floral_lxcfs_bind uses android::base::KernelLogger during early boot.
  allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+diff --git a/prebuilts/api/32.0/private/floral_native_hardware.te b/prebuilts/api/32.0/private/floral_native_hardware.te
+new file mode 100644
+index 0000000..d46a446
+--- /dev/null
++++ b/prebuilts/api/32.0/private/floral_native_hardware.te
+@@ -0,0 +1,34 @@
++# Hardware discovery metadata, not hardware control. Native sysfs exports only
++# selected real objects; these rules do not authorize new device nodes or ioctls.
++type sysfs_floral_graphics, fs_type, sysfs_type;
++type sysfs_floral_codec, fs_type, sysfs_type;
++type sysfs_floral_input, fs_type, sysfs_type;
++type sysfs_floral_device_links, fs_type, sysfs_type;
++
++r_dir_file(floral_graphics_probe, sysfs_floral_graphics)
++r_dir_file(floral_graphics_probe, sysfs_floral_device_links)
++
++r_dir_file({ surfaceflinger hal_graphics_allocator hal_graphics_composer hal_codec2_server }, sysfs_floral_graphics)
++# Mesa also performs discovery in application processes. Keep the platform's
++# isolated-process restrictions; this grants metadata reads, not device access.
++r_dir_file({ appdomain -isolated_app -app_zygote }, sysfs_floral_graphics)
++r_dir_file({ appdomain -isolated_app -app_zygote }, sysfs_floral_device_links)
++r_dir_file({ hal_codec2_server hal_camera_server }, sysfs_floral_codec)
++r_dir_file({ system_server inputflinger }, sysfs_floral_input)
++r_dir_file({ surfaceflinger hal_graphics_allocator hal_graphics_composer hal_codec2_server hal_camera_server }, sysfs_floral_device_links)
++
++# init/ueventd must enumerate and label delivered nodes. Only endpoint uevent
++# files are writable in the kernel; hardware parent metadata is read-only.
++r_dir_file({ init ueventd }, sysfs_floral_graphics)
++r_dir_file({ init ueventd }, sysfs_floral_codec)
++r_dir_file({ init ueventd }, sysfs_floral_input)
++r_dir_file({ init ueventd }, sysfs_floral_device_links)
++
++# A private devpts mount has its multiplexor at /dev/pts/ptmx, labelled devpts
++# rather than ptmx_device. Permit only PTY allocation, not arbitrary tty ioctls.
++allow { init adbd } devpts:chr_file ioctl;
++allowxperm { init adbd } devpts:chr_file ioctl { TIOCGPTN TIOCSPTLCK };
++
++# libfuse opens a second FD before FUSE_DEV_IOC_CLONE. Existing platform policy
++# already permits MediaProvider read/write/ioctl on the vold-supplied FUSE FD.
++allow mediaprovider_app fuse_device:chr_file open;
 diff --git a/prebuilts/api/32.0/private/genfs_contexts b/prebuilts/api/32.0/private/genfs_contexts
-index 13bfb46..322bd43 100644
+index 13bfb46..2845f26 100644
 --- a/prebuilts/api/32.0/private/genfs_contexts
 +++ b/prebuilts/api/32.0/private/genfs_contexts
-@@ -113,8 +113,10 @@ genfscon cgroup / u:object_r:cgroup:s0
+@@ -113,8 +113,23 @@ genfscon cgroup / u:object_r:cgroup:s0
  genfscon cgroup2 / u:object_r:cgroup_v2:s0
  # sysfs labels can be set by userspace.
  genfscon sysfs / u:object_r:sysfs:s0
++# Real SDM845 hardware identity. Do not label the entire SoC as graphics/codec.
++genfscon sysfs /devices/platform/soc@0/ae00000.display-subsystem/ae01000.display-controller u:object_r:sysfs_floral_graphics:s0
++genfscon sysfs /devices/platform/soc@0/aa00000.video-codec u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /devices/platform/soc@0/acb3000.camss u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /class/drm u:object_r:sysfs_floral_graphics:s0
++genfscon sysfs /class/video4linux u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /bus/media u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /dev/char u:object_r:sysfs_floral_device_links:s0
++genfscon sysfs /devices/virtual/lupine/input u:object_r:sysfs_floral_input:s0
++genfscon sysfs /class/input u:object_r:sysfs_floral_input:s0
++genfscon sysfs /devices/virtual/lupine/thermal u:object_r:sysfs_thermal:s0
++genfscon sysfs /devices/virtual/lupine/power_supply u:object_r:sysfs_batteryinfo:s0
++genfscon sysfs /devices/virtual/lupine/dma_heap u:object_r:sysfs_dma_heap:s0
 +genfscon sysfs /block                             u:object_r:sysfs_block:s0
  genfscon sysfs /devices/cs_etm                    u:object_r:sysfs_devices_cs_etm:s0
  genfscon sysfs /devices/system/cpu u:object_r:sysfs_devices_system_cpu:s0
@@ -129,7 +269,7 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /class/android_usb                 u:object_r:sysfs_android_usb:s0
  genfscon sysfs /class/extcon                      u:object_r:sysfs_extcon:s0
  genfscon sysfs /class/block                       u:object_r:sysfs_block:s0
-@@ -129,6 +131,7 @@ genfscon sysfs /class/switch                      u:object_r:sysfs_switch:s0
+@@ -129,6 +144,7 @@ genfscon sysfs /class/switch                      u:object_r:sysfs_switch:s0
  genfscon sysfs /class/wakeup                      u:object_r:sysfs_wakeup:s0
  genfscon sysfs /devices/platform/nfc-power/nfc_power u:object_r:sysfs_nfc_power_writable:s0
  genfscon sysfs /devices/virtual/android_usb     u:object_r:sysfs_android_usb:s0
@@ -137,6 +277,27 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /devices/virtual/block/            u:object_r:sysfs_devices_block:s0
  genfscon sysfs /devices/virtual/block/dm-       u:object_r:sysfs_dm:s0
  genfscon sysfs /devices/virtual/block/loop       u:object_r:sysfs_loop:s0
+diff --git a/prebuilts/api/32.0/private/property_contexts b/prebuilts/api/32.0/private/property_contexts
+index 68011fb..4039ebb 100644
+--- a/prebuilts/api/32.0/private/property_contexts
++++ b/prebuilts/api/32.0/private/property_contexts
+@@ -1,3 +1,6 @@
++# Existing libc compatibility switch, fixed at boot by the launcher.
++ro.floral.libc.procview u:object_r:exported_default_prop:s0 exact bool
++
+ ##########################
+ # property service keys
+ #
+diff --git a/prebuilts/api/32.0/public/floral_native_hardware.te b/prebuilts/api/32.0/public/floral_native_hardware.te
+new file mode 100644
+index 0000000..6d56016
+--- /dev/null
++++ b/prebuilts/api/32.0/public/floral_native_hardware.te
+@@ -0,0 +1,4 @@
++# Vendor init probes can read selected DRM identity without acquiring a graphics
++# HAL role or permission to open GPU device nodes.
++attribute floral_graphics_probe;
++expandattribute floral_graphics_probe false;
 diff --git a/private/floral_lxcfs_bind.te b/private/floral_lxcfs_bind.te
 index 3291635..0c61b30 100644
 --- a/private/floral_lxcfs_bind.te
@@ -175,14 +336,67 @@ index 3291635..0c61b30 100644
  
  # floral_lxcfs_bind uses android::base::KernelLogger during early boot.
  allow floral_lxcfs_bind kmsg_device:chr_file w_file_perms;
+diff --git a/private/floral_native_hardware.te b/private/floral_native_hardware.te
+new file mode 100644
+index 0000000..d46a446
+--- /dev/null
++++ b/private/floral_native_hardware.te
+@@ -0,0 +1,34 @@
++# Hardware discovery metadata, not hardware control. Native sysfs exports only
++# selected real objects; these rules do not authorize new device nodes or ioctls.
++type sysfs_floral_graphics, fs_type, sysfs_type;
++type sysfs_floral_codec, fs_type, sysfs_type;
++type sysfs_floral_input, fs_type, sysfs_type;
++type sysfs_floral_device_links, fs_type, sysfs_type;
++
++r_dir_file(floral_graphics_probe, sysfs_floral_graphics)
++r_dir_file(floral_graphics_probe, sysfs_floral_device_links)
++
++r_dir_file({ surfaceflinger hal_graphics_allocator hal_graphics_composer hal_codec2_server }, sysfs_floral_graphics)
++# Mesa also performs discovery in application processes. Keep the platform's
++# isolated-process restrictions; this grants metadata reads, not device access.
++r_dir_file({ appdomain -isolated_app -app_zygote }, sysfs_floral_graphics)
++r_dir_file({ appdomain -isolated_app -app_zygote }, sysfs_floral_device_links)
++r_dir_file({ hal_codec2_server hal_camera_server }, sysfs_floral_codec)
++r_dir_file({ system_server inputflinger }, sysfs_floral_input)
++r_dir_file({ surfaceflinger hal_graphics_allocator hal_graphics_composer hal_codec2_server hal_camera_server }, sysfs_floral_device_links)
++
++# init/ueventd must enumerate and label delivered nodes. Only endpoint uevent
++# files are writable in the kernel; hardware parent metadata is read-only.
++r_dir_file({ init ueventd }, sysfs_floral_graphics)
++r_dir_file({ init ueventd }, sysfs_floral_codec)
++r_dir_file({ init ueventd }, sysfs_floral_input)
++r_dir_file({ init ueventd }, sysfs_floral_device_links)
++
++# A private devpts mount has its multiplexor at /dev/pts/ptmx, labelled devpts
++# rather than ptmx_device. Permit only PTY allocation, not arbitrary tty ioctls.
++allow { init adbd } devpts:chr_file ioctl;
++allowxperm { init adbd } devpts:chr_file ioctl { TIOCGPTN TIOCSPTLCK };
++
++# libfuse opens a second FD before FUSE_DEV_IOC_CLONE. Existing platform policy
++# already permits MediaProvider read/write/ioctl on the vold-supplied FUSE FD.
++allow mediaprovider_app fuse_device:chr_file open;
 diff --git a/private/genfs_contexts b/private/genfs_contexts
-index 13bfb46..322bd43 100644
+index 13bfb46..2845f26 100644
 --- a/private/genfs_contexts
 +++ b/private/genfs_contexts
-@@ -113,8 +113,10 @@ genfscon cgroup / u:object_r:cgroup:s0
+@@ -113,8 +113,23 @@ genfscon cgroup / u:object_r:cgroup:s0
  genfscon cgroup2 / u:object_r:cgroup_v2:s0
  # sysfs labels can be set by userspace.
  genfscon sysfs / u:object_r:sysfs:s0
++# Real SDM845 hardware identity. Do not label the entire SoC as graphics/codec.
++genfscon sysfs /devices/platform/soc@0/ae00000.display-subsystem/ae01000.display-controller u:object_r:sysfs_floral_graphics:s0
++genfscon sysfs /devices/platform/soc@0/aa00000.video-codec u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /devices/platform/soc@0/acb3000.camss u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /class/drm u:object_r:sysfs_floral_graphics:s0
++genfscon sysfs /class/video4linux u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /bus/media u:object_r:sysfs_floral_codec:s0
++genfscon sysfs /dev/char u:object_r:sysfs_floral_device_links:s0
++genfscon sysfs /devices/virtual/lupine/input u:object_r:sysfs_floral_input:s0
++genfscon sysfs /class/input u:object_r:sysfs_floral_input:s0
++genfscon sysfs /devices/virtual/lupine/thermal u:object_r:sysfs_thermal:s0
++genfscon sysfs /devices/virtual/lupine/power_supply u:object_r:sysfs_batteryinfo:s0
++genfscon sysfs /devices/virtual/lupine/dma_heap u:object_r:sysfs_dma_heap:s0
 +genfscon sysfs /block                             u:object_r:sysfs_block:s0
  genfscon sysfs /devices/cs_etm                    u:object_r:sysfs_devices_cs_etm:s0
  genfscon sysfs /devices/system/cpu u:object_r:sysfs_devices_system_cpu:s0
@@ -190,7 +404,7 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /class/android_usb                 u:object_r:sysfs_android_usb:s0
  genfscon sysfs /class/extcon                      u:object_r:sysfs_extcon:s0
  genfscon sysfs /class/block                       u:object_r:sysfs_block:s0
-@@ -129,6 +131,7 @@ genfscon sysfs /class/switch                      u:object_r:sysfs_switch:s0
+@@ -129,6 +144,7 @@ genfscon sysfs /class/switch                      u:object_r:sysfs_switch:s0
  genfscon sysfs /class/wakeup                      u:object_r:sysfs_wakeup:s0
  genfscon sysfs /devices/platform/nfc-power/nfc_power u:object_r:sysfs_nfc_power_writable:s0
  genfscon sysfs /devices/virtual/android_usb     u:object_r:sysfs_android_usb:s0
@@ -198,6 +412,27 @@ index 13bfb46..322bd43 100644
  genfscon sysfs /devices/virtual/block/            u:object_r:sysfs_devices_block:s0
  genfscon sysfs /devices/virtual/block/dm-       u:object_r:sysfs_dm:s0
  genfscon sysfs /devices/virtual/block/loop       u:object_r:sysfs_loop:s0
+diff --git a/private/property_contexts b/private/property_contexts
+index 68011fb..4039ebb 100644
+--- a/private/property_contexts
++++ b/private/property_contexts
+@@ -1,3 +1,6 @@
++# Existing libc compatibility switch, fixed at boot by the launcher.
++ro.floral.libc.procview u:object_r:exported_default_prop:s0 exact bool
++
+ ##########################
+ # property service keys
+ #
+diff --git a/public/floral_native_hardware.te b/public/floral_native_hardware.te
+new file mode 100644
+index 0000000..6d56016
+--- /dev/null
++++ b/public/floral_native_hardware.te
+@@ -0,0 +1,4 @@
++# Vendor init probes can read selected DRM identity without acquiring a graphics
++# HAL role or permission to open GPU device nodes.
++attribute floral_graphics_probe;
++expandattribute floral_graphics_probe false;
 -- 
 2.47.3
 

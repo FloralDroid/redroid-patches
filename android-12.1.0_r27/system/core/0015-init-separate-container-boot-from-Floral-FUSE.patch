@@ -1,0 +1,1134 @@
+From 5b9a274203f1859cbe7abf78dce05204456600d3 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Mon, 2 Nov 2026 02:53:32 +0800
+Subject: [PATCH] init: separate prepared containers from legacy Floral FUSE
+
+---
+ init/Android.bp               |  17 +++
+ init/Android.mk               |   2 +
+ init/builtins.cpp             |  12 +++
+ init/first_stage_init.cpp     |  17 ++-
+ init/floral_boot.cpp          | 160 +++++++++++++++++++++++++++
+ init/floral_boot.h            |  35 ++++++
+ init/floral_policy.cpp        | 196 ++++++++++++++++++++++++++++++++++
+ init/floral_policy.h          |  20 ++++
+ init/floral_selinux_check.cpp |  29 +++++
+ init/init.cpp                 |   4 +-
+ init/main.cpp                 |   6 ++
+ init/mount_namespace.cpp      |   5 +
+ init/property_service.cpp     |  25 +++++
+ init/selinux.cpp              |  30 +++---
+ init/util.cpp                 |  17 +++
+ rootdir/init.rc               |  34 ++++--
+ 16 files changed, 577 insertions(+), 32 deletions(-)
+ create mode 100644 init/floral_boot.cpp
+ create mode 100644 init/floral_boot.h
+ create mode 100644 init/floral_policy.cpp
+ create mode 100644 init/floral_policy.h
+ create mode 100644 init/floral_selinux_check.cpp
+
+diff --git a/init/Android.bp b/init/Android.bp
+index 2a06fdb..45fec38 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -53,6 +53,7 @@ init_common_sources = [
+     "util.cpp",
+ ]
+ init_device_sources = [
++    "floral_boot.cpp",
+     "block_dev_initializer.cpp",
+     "bootchart.cpp",
+     "builtins.cpp",
+@@ -160,6 +161,8 @@ libinit_cc_defaults {
+         },
+     },
+     static_libs: [
++        "libfloral_fuse",
++        "libfloral_fuse_lxcfs",
+         "libavb",
+         "libc++fs",
+         "libcgrouprc_format",
+@@ -252,6 +255,7 @@ cc_binary {
+     defaults: ["init_defaults"],
+     static_libs: ["libinit"],
+     required: [
++        "floral_selinux_check",
+         "e2fsdroid",
+         "init.rc",
+         "mke2fs",
+@@ -284,6 +288,7 @@ cc_binary {
+ 
+     srcs: [
+         "block_dev_initializer.cpp",
++        "floral_boot.cpp",
+         "devices.cpp",
+         "first_stage_console.cpp",
+         "first_stage_init.cpp",
+@@ -301,6 +306,7 @@ cc_binary {
+ 
+     static_libs: [
+         "libc++fs",
++        "libfloral_fuse",
+         "libfs_avb",
+         "libfs_mgr",
+         "libfec",
+@@ -469,8 +475,10 @@ cc_library_static {
+         "-Werror",
+     ],
+     srcs: init_common_sources + [
++        "floral_boot.cpp",
+         "test_utils/service_utils.cpp",
+     ],
++    static_libs: ["libfloral_fuse"],
+     whole_static_libs: [
+         "libcap",
+     ],
+@@ -532,3 +540,12 @@ cc_binary {
+         },
+     },
+ }
++
++// Read-only inspection of the loaded instance policy; no mount or policy control.
++cc_binary {
++    name: "floral_selinux_check",
++    srcs: ["floral_selinux_check.cpp", "floral_policy.cpp"],
++    cflags: ["-Wall", "-Wextra", "-Werror"],
++    static_libs: ["libsepol"],
++    shared_libs: ["libbase", "libselinux"],
++}
+diff --git a/init/Android.mk b/init/Android.mk
+index 3c7d95a..e02ef88 100644
+--- a/init/Android.mk
++++ b/init/Android.mk
+@@ -49,6 +49,7 @@ include $(CLEAR_VARS)
+ LOCAL_CPPFLAGS := $(init_cflags)
+ LOCAL_SRC_FILES := \
+     block_dev_initializer.cpp \
++    floral_boot.cpp \
+     devices.cpp \
+     first_stage_console.cpp \
+     first_stage_init.cpp \
+@@ -99,6 +100,7 @@ my_ramdisk_dirs :=
+ 
+ LOCAL_STATIC_LIBRARIES := \
+     libc++fs \
++    libfloral_fuse \
+     libfs_avb \
+     libfs_mgr \
+     libfec \
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index 035038f..e466e28 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "builtins.h"
++#include "floral_boot.h"
+ 
+ #include <android/api-level.h>
+ #include <dirent.h>
+@@ -1414,6 +1415,16 @@ static Result<void> do_enter_default_mount_ns(const BuiltinArguments& args) {
+     return {};
+ }
+ 
++static Result<void> do_floral_fuse_bind(const BuiltinArguments&) {
++    if (FloralFuseConfig().mode != ::floral::fuse::Mode::Lxcfs) {
++        return Error() << "floral_fuse_bind is only valid for init-selected lxcfs";
++    }
++    std::string error;
++    if (!::floral::fuse::VerifyLxcfsSource(&error)) return Error() << error;
++    if (::floral::fuse::BindLxcfsViews() != 0) return Error() << "optional LXCFS view binding failed";
++    return {};
++}
++
+ // Builtin-function-map start
+ const BuiltinFunctionMap& GetBuiltinFunctionMap() {
+     constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+@@ -1436,6 +1447,7 @@ const BuiltinFunctionMap& GetBuiltinFunctionMap() {
+         {"exec_background",         {1,     kMax, {false,  do_exec_background}}},
+         {"exec_start",              {1,     1,    {false,  do_exec_start}}},
+         {"export",                  {2,     2,    {false,  do_export}}},
++        {"floral_fuse_bind",         {0,     0,    {false,  do_floral_fuse_bind}}},
+         {"hostname",                {1,     1,    {true,   do_hostname}}},
+         {"ifup",                    {1,     1,    {true,   do_ifup}}},
+         {"init_user0",              {0,     0,    {false,  do_init_user0}}},
+diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
+index c1b2422..6eb4a1e 100644
+--- a/init/first_stage_init.cpp
++++ b/init/first_stage_init.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "first_stage_init.h"
++#include "floral_boot.h"
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -227,6 +228,7 @@ bool LoadKernelModules(bool recovery, bool want_console, int& modules_loaded) {
+ }
+ 
+ int FirstStageMain(int argc, char** argv) {
++    InitializeFloralBoot(argc, argv);
+     if (REBOOT_BOOTLOADER_ON_PANIC) {
+         InstallRebootSignalHandlers();
+     }
+@@ -427,22 +429,15 @@ int FirstStageMain(int argc, char** argv) {
+ 
+     const char* path = "/system/bin/init";
+     const char* stage = selinuxns_ready ? "selinux_setup" : "second_stage";
+-    std::vector<const char *> args = {path, stage};
+-    std::string init_cmdline;
+-    android::base::ReadFileToString("/proc/self/cmdline", &init_cmdline);
+-    std::replace(init_cmdline.begin(), init_cmdline.end(), '\0', ' ');
+-    auto cmd_vector = android::base::Split(android::base::Trim(init_cmdline), " ");
+-    int i = 0;
+-    for (const auto& entry : cmd_vector) {
+-        if (i++ == 0) continue; // ignore first arg '/init'
+-        args.push_back(entry.c_str());
+-    }
++    auto arguments = FloralStageArguments(stage);
++    std::vector<char*> args;
++    for (auto& argument : arguments) args.push_back(argument.data());
+     args.push_back(nullptr);
+     auto fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+     dup2(fd, STDOUT_FILENO);
+     dup2(fd, STDERR_FILENO);
+     close(fd);
+-    execv(path, const_cast<char**>(args.data()));
++    execv(path, args.data());
+ 
+     // execv() only returns if an error happened, in which case we
+     // panic and never fall through this conditional.
+diff --git a/init/floral_boot.cpp b/init/floral_boot.cpp
+new file mode 100644
+index 0000000..64b4096
+--- /dev/null
++++ b/init/floral_boot.cpp
+@@ -0,0 +1,160 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_boot.h"
++#include "selinux.h"
++
++#include <android-base/logging.h>
++#include <linux/magic.h>
++#include <selinux/selinux.h>
++#include <sys/mount.h>
++#include <sys/vfs.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++
++namespace android::init {
++namespace {
++bool initialized = false;
++bool container = false;
++std::string selinux_mode;
++std::vector<std::string> original_arguments;
++std::map<std::string, std::string> frozen;
++::floral::fuse::BootConfig fuse_config;
++}  // namespace
++
++[[noreturn]] void FailFloralBoot(const std::string& error) {
++    LOG(ERROR) << "Floral boot: " << error;
++    dprintf(STDERR_FILENO, "Floral boot: %s\n", error.c_str());
++    _exit(1);
++}
++
++void InitializeFloralBoot(int argc, char** argv) {
++    if (initialized) return;
++    std::map<std::string, std::string> values;
++    for (int i = 1; i < argc; ++i) {
++        original_arguments.emplace_back(argv[i]);
++        const auto& argument = original_arguments.back();
++        const auto equal = argument.find('=');
++        const auto key = argument.substr(0, equal);
++        if (key != "androidboot.lupine" && key != "androidboot.selinux") continue;
++        if (equal == std::string::npos) FailFloralBoot("missing value for " + key);
++        const auto value = argument.substr(equal + 1);
++        const auto [entry, inserted] = values.emplace(key, value);
++        if (!inserted && entry->second != value) FailFloralBoot("conflicting " + key);
++    }
++
++    const auto marker = values.find("androidboot.lupine");
++    if (marker != values.end()) {
++        if (marker->second != "0" && marker->second != "1") FailFloralBoot("invalid Lupine marker");
++        container = marker->second == "1";
++    }
++    frozen["androidboot.lupine"] = container ? "1" : "0";
++
++    if (container) {
++        selinux_mode = values["androidboot.selinux"];
++        if (selinux_mode != "enforcing" && selinux_mode != "permissive" &&
++            selinux_mode != "disabled") FailFloralBoot("invalid or missing Lupine SELinux mode");
++        frozen["androidboot.selinux"] = selinux_mode;
++        for (const auto& argument : original_arguments) {
++            if (argument.compare(0, sizeof("androidboot.floral_fuse") - 1, "androidboot.floral_fuse") == 0 ||
++                argument.compare(0, sizeof("androidboot.lupine.") - 1, "androidboot.lupine.") == 0) {
++                FailFloralBoot("obsolete boot argument: " + argument);
++            }
++        }
++        if (argc < 2 || (strcmp(argv[1], "selinux_setup") != 0 &&
++                         strcmp(argv[1], "second_stage") != 0)) {
++            FailFloralBoot("Lupine requires a host-prepared init stage");
++        }
++    } else {
++        std::string error;
++        if (!::floral::fuse::ParseBootArguments(original_arguments, &fuse_config, &error) ||
++            !::floral::fuse::ResolveBootMode(&fuse_config, &error)) FailFloralBoot(error);
++        frozen["androidboot.floral_fuse"] = ::floral::fuse::ModeName(fuse_config.mode);
++    }
++    initialized = true;
++}
++
++bool IsLupineContainer() { return container; }
++const std::string& LupineSELinuxMode() { return selinux_mode; }
++const ::floral::fuse::BootConfig& FloralFuseConfig() { return fuse_config; }
++
++std::vector<std::string> FloralBootArguments() {
++    std::vector<std::string> result;
++    for (const auto& [key, value] : frozen) result.push_back(key + "=" + value);
++    return result;
++}
++
++std::vector<std::string> FloralStageArguments(const char* stage) {
++    std::vector<std::string> result = {"/system/bin/init", stage};
++    for (const auto& argument : original_arguments) {
++        if (argument.compare(0, 12, "androidboot.") != 0) continue;
++        if (frozen.count(argument.substr(0, argument.find('=')))) continue;
++        result.push_back(argument);
++    }
++    const auto selected = FloralBootArguments();
++    result.insert(result.end(), selected.begin(), selected.end());
++    return result;
++}
++
++bool FloralBootPropertyAllowed(const std::string& name, const std::string& value) {
++    const bool reserved = name == "ro.boot.lupine" ||
++            name.compare(0, sizeof("ro.boot.floral_fuse") - 1, "ro.boot.floral_fuse") == 0 ||
++            (container && (name == "ro.boot.selinux" ||
++                            name.compare(0, sizeof("ro.boot.lupine.") - 1, "ro.boot.lupine.") == 0));
++    if (!reserved) return true;
++    const auto expected = frozen.find("androidboot." + name.substr(8));
++    return initialized && expected != frozen.end() && expected->second == value;
++}
++
++void CheckFloralBootProperty(const std::string& name, const std::string& value) {
++    if (!FloralBootPropertyAllowed(name, value)) FailFloralBoot("conflicting boot property: " + name);
++}
++
++void CheckLupineSELinuxStage(bool loading_policy) {
++    if (!container) return;
++    struct statfs fs = {};
++    if (statfs("/sys/fs/selinux", &fs) != 0) {
++        if (selinux_mode == "disabled" && !loading_policy && errno == ENOENT) return;
++        FailFloralBoot("missing SELinux control directory");
++    }
++    if (selinux_mode == "disabled") {
++        if (loading_policy || fs.f_type == SELINUX_MAGIC) FailFloralBoot("disabled instance has selinuxfs");
++        return;
++    }
++    if (fs.f_type != SELINUX_MAGIC || is_selinux_enabled() <= 0) {
++        FailFloralBoot("host did not prepare private selinuxfs");
++    }
++    if (!loading_policy && (getenv(kEnvSelinuxStartedAt) == nullptr ||
++            security_getenforce() != (selinux_mode == "enforcing" ? 1 : 0))) {
++        FailFloralBoot("requested SELinux setup did not complete");
++    }
++}
++
++void PrivatizeLupineControls() {
++    if (!container) return;
++    for (const auto* path : {"/proc", "/sys"}) {
++        if (mount(nullptr, path, nullptr, MS_PRIVATE | MS_REC, nullptr) != 0) {
++            FailFloralBoot(std::string("private control mounts: ") + path + ": " + strerror(errno));
++        }
++    }
++}
++
++}  // namespace android::init
+diff --git a/init/floral_boot.h b/init/floral_boot.h
+new file mode 100644
+index 0000000..9133ba9
+--- /dev/null
++++ b/init/floral_boot.h
+@@ -0,0 +1,35 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <string>
++#include <vector>
++#include <fuse_view.h>
++
++namespace android::init {
++void InitializeFloralBoot(int argc, char** argv);
++bool IsLupineContainer();
++const std::string& LupineSELinuxMode();
++const ::floral::fuse::BootConfig& FloralFuseConfig();
++std::vector<std::string> FloralBootArguments();
++std::vector<std::string> FloralStageArguments(const char* stage);
++bool FloralBootPropertyAllowed(const std::string& name, const std::string& value);
++void CheckFloralBootProperty(const std::string& name, const std::string& value);
++void CheckLupineSELinuxStage(bool loading_policy);
++void PrivatizeLupineControls();
++[[noreturn]] void FailFloralBoot(const std::string& error);
++}  // namespace android::init
+diff --git a/init/floral_policy.cpp b/init/floral_policy.cpp
+new file mode 100644
+index 0000000..c0d20fd
+--- /dev/null
++++ b/init/floral_policy.cpp
+@@ -0,0 +1,196 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include "floral_policy.h"
++
++#include <android-base/unique_fd.h>
++#include <fcntl.h>
++#include <selinux/selinux.h>
++#include <sepol/policydb/policydb.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <cerrno>
++#include <cstring>
++#include <memory>
++#include <set>
++#include <string_view>
++
++namespace floral::selinux {
++namespace {
++
++bool Fail(const std::string& reason, std::string* error) {
++    *error = reason;
++    return false;
++}
++
++bool PolicyImage(std::string* image, std::string* error) {
++    android::base::unique_fd fd(open("/sys/fs/selinux/policy", O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
++    if (!fd.ok()) return Fail("cannot open instance SELinux policy: " + std::string(strerror(errno)), error);
++    image->clear();
++    char data[16384];
++    for (;;) {
++        const auto size = read(fd.get(), data, sizeof(data));
++        if (size < 0 && errno == EINTR) continue;
++        if (size < 0) return Fail("cannot read instance SELinux policy: " + std::string(strerror(errno)), error);
++        if (size == 0) return !image->empty() || Fail("empty SELinux policy", error);
++        if (image->size() + static_cast<size_t>(size) > 64 * 1024 * 1024) {
++            return Fail("SELinux policy exceeds inspection limit", error);
++        }
++        image->append(data, static_cast<size_t>(size));
++    }
++}
++
++bool HasAttribute(policydb_t& policy, uint32_t type, const char* attribute) {
++    const auto* attr = static_cast<type_datum_t*>(hashtab_search(policy.p_types.table, attribute));
++    return attr && policy.type_attr_map &&
++           ebitmap_get_bit(&policy.type_attr_map[type - 1], attr->s.value - 1);
++}
++
++bool Matches(policydb_t& policy, uint32_t concrete, uint32_t key) {
++    return concrete == key || (policy.type_attr_map &&
++           ebitmap_get_bit(&policy.type_attr_map[concrete - 1], key - 1));
++}
++
++uint32_t Permission(class_datum_t& cls, const char* name) {
++    auto* permission = static_cast<perm_datum_t*>(hashtab_search(cls.permissions.table, name));
++    if (!permission && cls.comdatum) {
++        permission = static_cast<perm_datum_t*>(hashtab_search(cls.comdatum->permissions.table, name));
++    }
++    if (!permission || permission->s.value == 0 || permission->s.value > 32) return 0;
++    return uint32_t{1} << (permission->s.value - 1);
++}
++
++bool ExpandControlledDomains(policydb_t& policy, std::set<uint32_t>* users, std::string* error) {
++    size_t previous;
++    do {
++        previous = users->size();
++        for (const auto* table : {&policy.te_avtab, &policy.te_cond_avtab}) {
++            for (uint32_t bucket = 0; bucket < table->nslot; ++bucket) {
++                for (auto* rule = table->htable[bucket]; rule; rule = rule->next) {
++                    if (!(rule->key.specified & AVTAB_ALLOWED)) continue;
++                    const auto cls_id = rule->key.target_class;
++                    if (!cls_id || cls_id > policy.p_classes.nprim) {
++                        return Fail("invalid SELinux class", error);
++                    }
++                    if (std::string_view(policy.p_class_val_to_name[cls_id - 1]) != "process") continue;
++                    auto& cls = *policy.class_val_to_struct[cls_id - 1];
++                    const auto control = Permission(cls, "ptrace") | Permission(cls, "dyntransition");
++                    if (!(rule->datum.data & control) ||
++                        !std::any_of(users->begin(), users->end(), [&](uint32_t source) {
++                            return Matches(policy, source, rule->key.source_type);
++                        })) continue;
++                    for (uint32_t target = 1; target <= policy.p_types.nprim; ++target) {
++                        const auto* datum = policy.type_val_to_struct[target - 1];
++                        if (datum && datum->flavor == TYPE_TYPE &&
++                            HasAttribute(policy, target, "domain") &&
++                            Matches(policy, target, rule->key.target_type)) users->insert(target);
++                    }
++                }
++            }
++        }
++    } while (users->size() != previous);
++    return true;
++}
++
++bool AuditTable(policydb_t& policy, const avtab_t& table,
++                const std::set<uint32_t>& users, std::string* error) {
++    for (uint32_t bucket = 0; bucket < table.nslot; ++bucket) {
++        for (auto* rule = table.htable[bucket]; rule; rule = rule->next) {
++            if (!(rule->key.specified & AVTAB_ALLOWED)) continue;
++            const auto cls_id = rule->key.target_class;
++            if (!cls_id || cls_id > policy.p_classes.nprim) return Fail("invalid SELinux class", error);
++            auto& cls = *policy.class_val_to_struct[cls_id - 1];
++            const std::string_view cls_name = policy.p_class_val_to_name[cls_id - 1];
++            uint32_t denied = 0;
++            if (cls_name == "filesystem") {
++                for (const auto* perm : {"mount", "remount", "unmount", "relabelfrom", "relabelto"}) {
++                    denied |= Permission(cls, perm);
++                }
++            } else if (cls_name == "file" || cls_name == "dir") {
++                denied = Permission(cls, "mounton");
++            } else if (cls_name == "capability") {
++                denied = Permission(cls, "sys_admin") | Permission(cls, "sys_module");
++            } else if (cls_name == "security") {
++                for (const auto* perm : {"load_policy", "setenforce", "setbool", "setsecparam"}) {
++                    denied |= Permission(cls, perm);
++                }
++            }
++            for (const auto source : users) {
++                if (!Matches(policy, source, rule->key.source_type)) continue;
++                if (rule->datum.data & denied) {
++                    return Fail(std::string("user domain can manage mounts/policy: ") +
++                                policy.p_type_val_to_name[source - 1] + ":" + std::string(cls_name), error);
++                }
++            }
++        }
++    }
++    return true;
++}
++
++bool AuditUserPolicy(policydb_t& policy, std::string* error) {
++    std::set<uint32_t> users;
++    if (!hashtab_search(policy.p_types.table, "appdomain") ||
++        !hashtab_search(policy.p_types.table, "domain")) return Fail("missing Android domain attributes", error);
++    if (ebitmap_get_bit(&policy.permissive_map, 0)) return Fail("global permissive policy exception", error);
++    for (uint32_t type = 1; type <= policy.p_types.nprim; ++type) {
++        const auto* datum = policy.type_val_to_struct[type - 1];
++        if (!datum || datum->flavor != TYPE_TYPE) continue;
++        const std::string_view name = policy.p_type_val_to_name[type - 1];
++        if (HasAttribute(policy, type, "appdomain") || name == "shell" || name == "su" ||
++            name == "runas_app" || name == "app_zygote") {
++            if (ebitmap_get_bit(&policy.permissive_map, type)) {
++                return Fail("permissive user domain: " + std::string(name), error);
++            }
++            users.insert(type);
++        }
++    }
++    if (users.empty()) return Fail("no user domains found in SELinux policy", error);
++    // Ptrace and dynamic transitions give control over another domain. Ordinary
++    // exec transitions retain the target program's entrypoint and Android policy.
++    if (!ExpandControlledDomains(policy, &users, error)) return false;
++    for (const auto type : users) {
++        if (ebitmap_get_bit(&policy.permissive_map, type)) {
++            return Fail("permissive controlled domain: " +
++                        std::string(policy.p_type_val_to_name[type - 1]), error);
++        }
++    }
++    // Also reject dormant conditional grants, rather than treating today's boolean
++    // value as a durable security boundary. No policy is rewritten by this check.
++    return AuditTable(policy, policy.te_avtab, users, error) &&
++           AuditTable(policy, policy.te_cond_avtab, users, error);
++}
++
++}  // namespace
++
++bool VerifyEnforcingPolicy(std::string* error) {
++    if (security_getenforce() != 1) return Fail("requested Enforcing is not active", error);
++    std::string image;
++    if (!PolicyImage(&image, error)) return false;
++    policydb_t policy = {};
++    if (policydb_init(&policy) != 0) return Fail("cannot initialize SELinux policy inspector", error);
++    if (policydb_from_image(nullptr, image.data(), image.size(), &policy) != 0) {
++        return Fail("cannot decode loaded SELinux policy", error);
++    }
++    const auto destroy = [](policydb_t* value) { policydb_destroy(value); };
++    std::unique_ptr<policydb_t, decltype(destroy)> cleanup(&policy, destroy);
++    if (!AuditUserPolicy(policy, error)) return false;
++    std::string after;
++    if (!PolicyImage(&after, error)) return false;
++    return (image == after && security_getenforce() == 1) ||
++           Fail("SELinux policy/enforcement changed during inspection", error);
++}
++
++}  // namespace floral::selinux
+diff --git a/init/floral_policy.h b/init/floral_policy.h
+new file mode 100644
+index 0000000..efaa453
+--- /dev/null
++++ b/init/floral_policy.h
+@@ -0,0 +1,20 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#pragma once
++#include <string>
++namespace floral::selinux {
++bool VerifyEnforcingPolicy(std::string* error);
++}
+diff --git a/init/floral_selinux_check.cpp b/init/floral_selinux_check.cpp
+new file mode 100644
+index 0000000..4b99a5f
+--- /dev/null
++++ b/init/floral_selinux_check.cpp
+@@ -0,0 +1,29 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_policy.h"
++
++#include <cstdio>
++
++int main(int argc, char**) {
++    if (argc != 1) return 1;
++    std::string error;
++    if (!floral::selinux::VerifyEnforcingPolicy(&error)) {
++        fprintf(stderr, "%s\n", error.c_str());
++        return 2;
++    }
++    return 0;
++}
+diff --git a/init/init.cpp b/init/init.cpp
+index aa544b1..9725480 100755
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "init.h"
++#include "floral_boot.h"
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -768,7 +769,7 @@ void SendLoadPersistentPropertiesMessage() {
+ }
+ 
+ int SecondStageMain(int argc, char** argv) {
+-    if (REBOOT_BOOTLOADER_ON_PANIC) {
++    if (REBOOT_BOOTLOADER_ON_PANIC && !IsLupineContainer()) {
+         InstallRebootSignalHandlers();
+     }
+ 
+@@ -872,6 +873,7 @@ int SecondStageMain(int argc, char** argv) {
+     Action::set_function_map(&function_map);
+ 
+     if (!SetupMountNamespaces()) {
++        if (IsLupineContainer()) FailFloralBoot("SetupMountNamespaces failed");
+         PLOG(FATAL) << "SetupMountNamespaces failed";
+     }
+ 
+diff --git a/init/main.cpp b/init/main.cpp
+index 23f5530..c031afa 100644
+--- a/init/main.cpp
++++ b/init/main.cpp
+@@ -16,6 +16,7 @@
+ 
+ #include "builtins.h"
+ #include "first_stage_init.h"
++#include "floral_boot.h"
+ #include "init.h"
+ #include "selinux.h"
+ #include "subcontext.h"
+@@ -67,10 +68,15 @@ int main(int argc, char** argv) {
+         }
+ 
+         if (!strcmp(argv[1], "selinux_setup")) {
++            InitializeFloralBoot(argc, argv);
++            CheckLupineSELinuxStage(true);
+             return SetupSelinux(argv);
+         }
+ 
+         if (!strcmp(argv[1], "second_stage")) {
++            InitializeFloralBoot(argc, argv);
++            CheckLupineSELinuxStage(false);
++
+             return SecondStageMain(argc, argv);
+         }
+     }
+diff --git a/init/mount_namespace.cpp b/init/mount_namespace.cpp
+index 785001d..aeb5060 100644
+--- a/init/mount_namespace.cpp
++++ b/init/mount_namespace.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "mount_namespace.h"
++#include "floral_boot.h"
+ 
+ #include <sys/mount.h>
+ 
+@@ -211,6 +212,10 @@ bool SetupMountNamespaces() {
+         return false;
+     }
+ 
++    // Do not export resource views or inherit external propagation peers.
++    // This must precede cloning either Android mount namespace.
++    PrivatizeLupineControls();
++
+     // /apex is a private mountpoint to give different sets of APEXes for
+     // the bootstrap and default mount namespaces. The processes running with
+     // the bootstrap namespace get APEXes from the read-only partition.
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index 954454e..d38388e 100755
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "property_service.h"
++#include "floral_boot.h"
+ 
+ #include <android/api-level.h>
+ #include <ctype.h>
+@@ -176,6 +177,10 @@ static bool CheckMacPerms(const std::string& name, const char* target_context,
+ 
+ static uint32_t PropertySet(const std::string& name, const std::string& value, std::string* error,
+                             bool allow_read_only_override = false) {
++    if (!FloralBootPropertyAllowed(name, value)) {
++        *error = "Floral property conflicts with frozen boot arguments";
++        return PROP_ERROR_READ_ONLY_PROPERTY;
++    }
+     size_t valuelen = value.size();
+ 
+     if (!IsLegalPropertyName(name)) {
+@@ -704,6 +709,8 @@ static void LoadProperties(char* data, const char* filter, const char* filename,
+ 
+             while (isspace(*value)) value++;
+ 
++            CheckFloralBootProperty(key, value);
++
+             if (flen > 0) {
+                 if (filter[flen - 1] == '*') {
+                     if (strncmp(key, filter, flen - 1) != 0) continue;
+@@ -1256,6 +1263,11 @@ static void ProcessKernelDt() {
+         android::base::ReadFileToString(file_name, &dt_file);
+         std::replace(dt_file.begin(), dt_file.end(), ',', '.');
+ 
++        // Device-tree string properties conventionally end in one NUL.
++        auto floral_dt_value = dt_file;
++        if (!floral_dt_value.empty() && floral_dt_value.back() == '\0') floral_dt_value.pop_back();
++        CheckFloralBootProperty("ro.boot."s + dp->d_name, floral_dt_value);
++
+         InitPropertySet("ro.boot."s + dp->d_name, dt_file);
+     }
+ }
+@@ -1265,6 +1277,7 @@ constexpr auto ANDROIDBOOT_PREFIX = "androidboot."sv;
+ static void ProcessKernelCmdline() {
+     ImportKernelCmdline([&](const std::string& key, const std::string& value) {
+         if (StartsWith(key, ANDROIDBOOT_PREFIX)) {
++            CheckFloralBootProperty("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+             InitPropertySet("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+         } else if (StartsWith(key, "ro.")) {
+             InitPropertySet(key, value);
+@@ -1276,6 +1289,7 @@ static void ProcessKernelCmdline() {
+ static void ProcessBootconfig() {
+     ImportBootconfig([&](const std::string& key, const std::string& value) {
+         if (StartsWith(key, ANDROIDBOOT_PREFIX)) {
++            CheckFloralBootProperty("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+             InitPropertySet("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+         }
+     });
+@@ -1301,6 +1315,17 @@ void PropertyInit() {
+     ProcessKernelCmdline();
+     ProcessBootconfig();
+ 
++    // Only this component's reserved keys use the container argv channel here.
++    for (const auto& argument : FloralBootArguments()) {
++        const auto equal = argument.find('=');
++        const auto name = "ro.boot." + argument.substr(12, equal - 12);
++        const auto value = argument.substr(equal + 1);
++        const auto present = GetProperty(name, "");
++        if (!present.empty() && present != value) FailFloralBoot("conflicting " + name);
++        if (present.empty()) InitPropertySet(name, value);
++        if (GetProperty(name, "") != value) FailFloralBoot("unable to publish " + name);
++    }
++
+     // Propagate the kernel variables to internal variables
+     // used by init as well as the current required properties.
+     ExportKernelBootProps();
+diff --git a/init/selinux.cpp b/init/selinux.cpp
+index bbac63b..888185e 100644
+--- a/init/selinux.cpp
++++ b/init/selinux.cpp
+@@ -50,6 +50,7 @@
+ //    the SEPolicy is compiled if needed.
+ 
+ #include "selinux.h"
++#include "floral_boot.h"
+ 
+ #include <android/api-level.h>
+ #include <errno.h>
+@@ -144,6 +145,9 @@ void RestoreContainerContexts() {
+ }
+ 
+ EnforcingStatus StatusFromProperty() {
++    if (IsLupineContainer()) {
++        return LupineSELinuxMode() == "permissive" ? SELINUX_PERMISSIVE : SELINUX_ENFORCING;
++    }
+     EnforcingStatus status = SELINUX_ENFORCING;
+ 
+     ImportKernelCmdline([&](const std::string& key, const std::string& value) {
+@@ -164,6 +168,7 @@ EnforcingStatus StatusFromProperty() {
+ }
+ 
+ bool IsEnforcing() {
++    if (IsLupineContainer()) return LupineSELinuxMode() == "enforcing";
+     if (ALLOW_PERMISSIVE_SELINUX) {
+         return StatusFromProperty() == SELINUX_ENFORCING;
+     }
+@@ -646,7 +651,9 @@ int SelinuxKlogCallback(int type, const char* fmt, ...) {
+     if (length_written <= 0) {
+         return 0;
+     }
+-    if (type == SELINUX_AVC) {
++    if (IsLupineContainer()) {
++        android::base::StderrLogger(android::base::MAIN, severity, "selinux", nullptr, 0, buf);
++    } else if (type == SELINUX_AVC) {
+         SelinuxAvcLog(buf, sizeof(buf));
+     } else {
+         android::base::KernelLogger(android::base::MAIN, severity, "selinux", nullptr, 0, buf);
+@@ -781,13 +788,13 @@ int SetupSelinux(char** argv) {
+     SetStdioToDevNull(argv);
+     InitKernelLogging(argv);
+ 
+-    if (REBOOT_BOOTLOADER_ON_PANIC) {
++    if (REBOOT_BOOTLOADER_ON_PANIC && !IsLupineContainer()) {
+         InstallRebootSignalHandlers();
+     }
+ 
+     boot_clock::time_point start_time = boot_clock::now();
+ 
+-    MountMissingSystemPartitions();
++    if (!IsLupineContainer()) MountMissingSystemPartitions();
+ 
+     SelinuxSetupKernelLogging();
+ 
+@@ -817,11 +824,8 @@ int SetupSelinux(char** argv) {
+         snapuserd_helper = nullptr;
+     }
+ 
+-    for (int i = 2; argv[i] != nullptr; ++i) {
+-        if (std::string_view(argv[i]) == "androidboot.lupine.selinuxns=1") {
+-            RestoreContainerContexts();
+-            break;
+-        }
++    if (IsLupineContainer()) {
++        RestoreContainerContexts();
+     }
+ 
+     SelinuxSetEnforcement();
+@@ -837,13 +841,11 @@ int SetupSelinux(char** argv) {
+     setenv(kEnvSelinuxStartedAt, std::to_string(start_time.time_since_epoch().count()).c_str(), 1);
+ 
+     const char* path = "/system/bin/init";
+-    // Preserve the container's androidboot arguments through the SELinux stage.
+-    std::vector<const char*> args = {path, "second_stage"};
+-    for (int i = 2; argv[i] != nullptr; ++i) {
+-        args.push_back(argv[i]);
+-    }
++    auto arguments = FloralStageArguments("second_stage");
++    std::vector<char*> args;
++    for (auto& argument : arguments) args.push_back(argument.data());
+     args.push_back(nullptr);
+-    execv(path, const_cast<char**>(args.data()));
++    execv(path, args.data());
+ 
+     // execv() only returns if an error happened, in which case we
+     // panic and never return from this function.
+diff --git a/init/util.cpp b/init/util.cpp
+index db81372..4722062 100644
+--- a/init/util.cpp
++++ b/init/util.cpp
+@@ -41,6 +41,10 @@
+ #include <cutils/sockets.h>
+ #include <selinux/android.h>
+ 
++#ifdef __ANDROID__
++#include "floral_boot.h"
++#endif
++
+ #ifdef INIT_FULL_SOURCES
+ #include <android/api-level.h>
+ #include <sys/system_properties.h>
+@@ -698,6 +702,9 @@ Result<std::string> ParseUmountAll(const std::vector<std::string>& args) {
+ }
+ 
+ static void InitAborter(const char* abort_message) {
++#ifdef __ANDROID__
++    if (IsLupineContainer()) _exit(1);
++#endif
+     // When init forks, it continues to use this aborter for LOG(FATAL), but we want children to
+     // simply abort instead of trying to reboot the system.
+     if (getpid() != 1) {
+@@ -724,6 +731,10 @@ static void InitAborter(const char* abort_message) {
+ // access any fds that it opens, including the one opened below for /dev/null.  Therefore,
+ // SetStdioToDevNull() must be called again in second stage init.
+ void SetStdioToDevNull(char** argv) {
++#ifdef __ANDROID__
++    // Lupine supplies valid stdio descriptors and captures init diagnostics.
++    if (IsLupineContainer()) return;
++#endif
+     // Make stdin/stdout/stderr all point to /dev/null.
+     int fd = open("/dev/null", O_RDWR);  // NOLINT(android-cloexec-open)
+     if (fd == -1) {
+@@ -739,6 +750,12 @@ void SetStdioToDevNull(char** argv) {
+ }
+ 
+ void InitKernelLogging(char** argv) {
++#ifdef __ANDROID__
++    if (IsLupineContainer()) {
++        android::base::InitLogging(argv, &android::base::StderrLogger, InitAborter);
++        return;
++    }
++#endif
+     SetFatalRebootTarget();
+     android::base::InitLogging(argv, &android::base::KernelLogger, InitAborter);
+ }
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 5530cd7..984ad46 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -51,10 +51,12 @@ on early-init
+     mkdir /linkerconfig/bootstrap 0755
+     mkdir /linkerconfig/default 0755
+ 
++on early-init && property:ro.boot.lupine=0
+     # Disable dm-verity hash prefetching, since it doesn't help performance
+     # Read more in b/136247322
+     write /sys/module/dm_verity/parameters/prefetch_cluster 0
+ 
++on early-init
+     # Generate ld.config.txt for early executed processes
+     exec -- /system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap
+     chmod 644 /linkerconfig/bootstrap/ld.config.txt
+@@ -78,9 +80,11 @@ on early-init
+     mkdir /dev/boringssl 0755 root root
+     mkdir /dev/boringssl/selftest 0755 root root
+ 
+-    # Mount tracefs (with GID=AID_READTRACEFS)
++on early-init && property:ro.boot.lupine=0
++    # Mount tracefs (with GID=AID_READTRACEFS).
+     mount tracefs tracefs /sys/kernel/tracing gid=3012
+ 
++on early-init
+     # create sys dirctory
+     mkdir /dev/sys 0755 system system
+     mkdir /dev/sys/fs 0755 system system
+@@ -235,8 +239,6 @@ on init
+     mkdir /dev/binderfs
+     chmod 0755 /dev/binderfs
+ 
+-    # Mount fusectl
+-
+     symlink /dev/binderfs/binder /dev/binder
+     symlink /dev/binderfs/hwbinder /dev/hwbinder
+     symlink /dev/binderfs/vndbinder /dev/vndbinder
+@@ -391,12 +393,15 @@ on init
+     # This is needed by any process that uses socket tagging.
+     chmod 0644 /dev/xt_qtaguid
+ 
++on init && property:ro.boot.lupine=0
+     mount bpf bpf /sys/fs/bpf nodev noexec nosuid
+ 
++on init
+     # Create location for fs_mgr to store abbreviated output from filesystem
+     # checker programs.
+     mkdir /dev/fscklogs 0770 root system
+ 
++on init && property:ro.boot.lupine=0
+     # pstore/ramoops previous console log
+     mount pstore pstore /sys/fs/pstore nodev noexec nosuid
+     chown system log /sys/fs/pstore
+@@ -408,6 +413,7 @@ on init
+     chown system log /sys/fs/pstore/pmsg-ramoops-0
+     chmod 0440 /sys/fs/pstore/pmsg-ramoops-0
+ 
++on init
+     # enable armv8_deprecated instruction hooks
+     write /proc/sys/abi/swp 1
+ 
+@@ -417,16 +423,19 @@ on init
+ 
+     export DOWNLOAD_CACHE /data/cache
+ 
++on init && property:ro.boot.lupine=0
+     # This allows the ledtrig-transient properties to be created here so
+     # that they can be chown'd to system:system later on boot
+     write /sys/class/leds/vibrator/trigger "transient"
+ 
++on init
+     # This is used by Bionic to select optimized routines.
+     write /dev/cpu_variant:${ro.bionic.arch} ${ro.bionic.cpu_variant}
+     chmod 0444 /dev/cpu_variant:${ro.bionic.arch}
+     write /dev/cpu_variant:${ro.bionic.2nd_arch} ${ro.bionic.2nd_cpu_variant}
+     chmod 0444 /dev/cpu_variant:${ro.bionic.2nd_arch}
+ 
++on init && property:ro.boot.lupine=0
+     # Allow system processes to read / write power state.
+     chown system system /sys/power/state
+     chown system system /sys/power/wakeup_count
+@@ -437,13 +446,16 @@ on init
+     chmod 0660 /sys/power/wake_lock
+     chmod 0660 /sys/power/wake_unlock
+ 
++on init
+     # Start logd before any other services run to ensure we capture all of their logs.
+     start logd
+-    # Start lmkd before any other services run so that it can register them
++on init && property:ro.boot.lupine=0
+     chown root system /sys/module/lowmemorykiller/parameters/adj
+     chmod 0664 /sys/module/lowmemorykiller/parameters/adj
+     chown root system /sys/module/lowmemorykiller/parameters/minfree
+     chmod 0664 /sys/module/lowmemorykiller/parameters/minfree
++on init
++    # Start lmkd before any other services run so that it can register them
+     start lmkd
+ 
+     # Start essential services.
+@@ -517,10 +529,12 @@ on post-fs
+     mount none /mnt/user/0 /storage bind rec
+     mount none none /storage slave rec
+ 
++on post-fs && property:ro.boot.lupine=0
+     # Make sure /sys/kernel/debug (if present) is labeled properly
+     # Note that tracefs may be mounted under debug, so we need to cross filesystems
+     restorecon --recursive --cross-filesystems /sys/kernel/debug
+ 
++on post-fs
+     # We chown/chmod /cache again so because mount is run as root + defaults
+     chown system cache /cache
+     chmod 0770 /cache
+@@ -579,12 +593,14 @@ on post-fs
+     restorecon_recursive /metadata/apex
+ 
+     mkdir /metadata/staged-install 0770 root system
+-on late-fs
++
++on late-fs && property:ro.boot.lupine=0
+     # Ensure that tracefs has the correct permissions.
+     # This does not work correctly if it is called in post-fs.
+     chmod 0755 /sys/kernel/tracing
+     chmod 0755 /sys/kernel/debug/tracing
+ 
++on late-fs
+     # HALs required before storage encryption can get unlocked (FBE/FDE)
+     class_start early_hal
+ 
+@@ -600,11 +616,14 @@ on late-fs && property:ro.kernel.version=4.19
+     setprop bootreceiver.enable 0
+ on late-fs && property:ro.kernel.version=5.4
+     setprop bootreceiver.enable 0
++on late-fs && property:ro.boot.lupine=1
++    setprop bootreceiver.enable 0
++
+ on late-fs
+     # Bootreceiver tracing instance is enabled by default.
+     setprop bootreceiver.enable ${bootreceiver.enable:-1}
+ 
+-on property:ro.product.cpu.abilist64=* && property:bootreceiver.enable=1
++on property:ro.product.cpu.abilist64=* && property:bootreceiver.enable=1 && property:ro.boot.lupine=0
+     # Set up a tracing instance for system_server to monitor error_report_end events.
+     # These are sent by kernel tools like KASAN and KFENCE when a memory corruption
+     # is detected. This is only needed for 64-bit systems.
+@@ -1007,6 +1026,7 @@ on boot
+     write /proc/sys/vm/overcommit_memory 1
+     write /proc/sys/vm/min_free_order_shift 4
+ 
++on boot && property:ro.boot.lupine=0
+     # System server manages zram writeback
+     chown root system /sys/block/zram0/idle
+     chmod 0664 /sys/block/zram0/idle
+@@ -1088,6 +1108,8 @@ on boot
+     chown system system /sys/kernel/ipv4/tcp_rmem_min
+     chown system system /sys/kernel/ipv4/tcp_rmem_def
+     chown system system /sys/kernel/ipv4/tcp_rmem_max
++
++on boot
+     chown root radio /proc/cmdline
+ 
+     # Define default initial receive window size in segments.
+-- 
+2.47.3
+

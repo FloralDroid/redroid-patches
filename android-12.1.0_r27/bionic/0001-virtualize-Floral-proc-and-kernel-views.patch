@@ -1,9 +1,8 @@
-From f95429bf9639b0a9272b84d1fab18d76a90c5bbd Mon Sep 17 00:00:00 2001
+From 65b61730fc36daa04a5cfc96e3f624f33ee8c1e2 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Sat, 5 Sep 2026 17:49:34 +0800
 Subject: [PATCH] bionic: virtualize Floral proc and kernel views
 
-Change-Id: I82b54d65e69c9b85d1b245a063e65bb93901886e
 ---
  libc/Android.bp                 |   2 +
  libc/SYSCALLS.TXT               |   4 +-
@@ -92,7 +91,7 @@ index 0000000..1915726
 +         strcmp(value, "yes") == 0;
 +}
 diff --git a/libc/bionic/sysinfo.cpp b/libc/bionic/sysinfo.cpp
-index 7ab8e9e..3f386cf 100644
+index 7ab8e9e..764f460 100644
 --- a/libc/bionic/sysinfo.cpp
 +++ b/libc/bionic/sysinfo.cpp
 @@ -29,12 +29,412 @@
@@ -471,8 +470,8 @@ index 7ab8e9e..3f386cf 100644
 +}
 +
 +int ReadFloralCpuCount() {
-+  if (!__floral_procview_enabled()) return 0;
-+
++  // CPU enumeration still uses the instance proc view when sysinfo rewriting
++  // is disabled: this switch must not change configured CPU-count semantics.
 +  FILE* file = fopen("/proc/cpuinfo", "re");
 +  if (file == nullptr) return 0;
 +
@@ -574,7 +573,7 @@ index 0000000..031659b
 +}
 diff --git a/libc/private/floral_procview.h b/libc/private/floral_procview.h
 new file mode 100644
-index 0000000..06cebb2
+index 0000000..f59f551
 --- /dev/null
 +++ b/libc/private/floral_procview.h
 @@ -0,0 +1,17 @@
@@ -591,7 +590,7 @@ index 0000000..06cebb2
 +
 +__BEGIN_DECLS
 +
-+// Returns whether libc should expose the container resource views.
++// Controls the legacy sysinfo resource rewrite, not CPU enumeration or uname.
 +bool __floral_procview_enabled();
 +
 +__END_DECLS

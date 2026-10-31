@@ -1,0 +1,224 @@
+From 3eb0df442e0e27ad2a69d195787c2488aae29646 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Mon, 2 Nov 2026 01:56:11 +0800
+Subject: [PATCH] sepolicy: confine the independent Floral policy inspector
+
+---
+ prebuilts/api/31.0/private/file_contexts           |  3 +++
+ prebuilts/api/31.0/private/floral_container.te     |  2 ++
+ prebuilts/api/31.0/private/floral_fuse.te          | 12 ++++++++++++
+ prebuilts/api/31.0/private/floral_selinux_check.te |  9 +++++++++
+ prebuilts/api/31.0/private/genfs_contexts          |  1 +
+ prebuilts/api/32.0/private/file_contexts           |  3 +++
+ prebuilts/api/32.0/private/floral_container.te     |  2 ++
+ prebuilts/api/32.0/private/floral_fuse.te          | 12 ++++++++++++
+ prebuilts/api/32.0/private/floral_selinux_check.te |  9 +++++++++
+ prebuilts/api/32.0/private/genfs_contexts          |  1 +
+ private/file_contexts                              |  3 +++
+ private/floral_container.te                        |  2 ++
+ private/floral_fuse.te                             | 12 ++++++++++++
+ private/floral_selinux_check.te                    |  9 +++++++++
+ private/genfs_contexts                             |  1 +
+ 15 files changed, 81 insertions(+)
+ create mode 100644 prebuilts/api/31.0/private/floral_container.te
+ create mode 100644 prebuilts/api/31.0/private/floral_fuse.te
+ create mode 100644 prebuilts/api/31.0/private/floral_selinux_check.te
+ create mode 100644 prebuilts/api/32.0/private/floral_container.te
+ create mode 100644 prebuilts/api/32.0/private/floral_fuse.te
+ create mode 100644 prebuilts/api/32.0/private/floral_selinux_check.te
+ create mode 100644 private/floral_container.te
+ create mode 100644 private/floral_fuse.te
+ create mode 100644 private/floral_selinux_check.te
+
+diff --git a/prebuilts/api/31.0/private/file_contexts b/prebuilts/api/31.0/private/file_contexts
+index b85917f..cc09cca 100644
+--- a/prebuilts/api/31.0/private/file_contexts
++++ b/prebuilts/api/31.0/private/file_contexts
+@@ -814,3 +814,6 @@
+ # Container Ethernet configuration is platform data, not vendor data.
+ /system/bin/ipconfigstore    u:object_r:redroid_ipconfig_exec:s0
+ /data/misc/ethernet(/.*)?    u:object_r:redroid_ethernet_data_file:s0
++
++/system/bin/floral_fuse_bind -- u:object_r:floral_fuse_exec:s0
++/system/bin/floral_selinux_check -- u:object_r:floral_selinux_check_exec:s0
+diff --git a/prebuilts/api/31.0/private/floral_container.te b/prebuilts/api/31.0/private/floral_container.te
+new file mode 100644
+index 0000000..44e98dd
+--- /dev/null
++++ b/prebuilts/api/31.0/private/floral_container.te
+@@ -0,0 +1,2 @@
++# init makes the prepared proc mount private after sharing its root.
++allow init proc:dir mounton;
+diff --git a/prebuilts/api/31.0/private/floral_fuse.te b/prebuilts/api/31.0/private/floral_fuse.te
+new file mode 100644
+index 0000000..7389f8e
+--- /dev/null
++++ b/prebuilts/api/31.0/private/floral_fuse.te
+@@ -0,0 +1,12 @@
++# The optional legacy helper only verifies its init-selected source.
++# Mounting remains an init builtin.
++type floral_fuse, domain, coredomain;
++type floral_fuse_exec, exec_type, system_file_type, file_type;
++init_daemon_domain(floral_fuse)
++get_prop(floral_fuse, bootloader_prop)
++allow floral_fuse rootfs:dir search;
++allow floral_fuse kmsg_device:chr_file { open write };
++allow floral_fuse fuse:filesystem getattr;
++allow floral_fuse fuse:dir r_dir_perms;
++allow floral_fuse proc:dir r_dir_perms;
++allow floral_fuse proc_mounts:file r_file_perms;
+diff --git a/prebuilts/api/31.0/private/floral_selinux_check.te b/prebuilts/api/31.0/private/floral_selinux_check.te
+new file mode 100644
+index 0000000..7b5bd4c
+--- /dev/null
++++ b/prebuilts/api/31.0/private/floral_selinux_check.te
+@@ -0,0 +1,9 @@
++# Read-only inspection of the loaded instance policy.
++type floral_selinux_check, domain, coredomain;
++type floral_selinux_check_exec, exec_type, system_file_type, file_type;
++init_daemon_domain(floral_selinux_check)
++allow floral_selinux_check rootfs:dir search;
++allow floral_selinux_check sysfs:dir search;
++allow floral_selinux_check selinuxfs:dir search;
++allow floral_selinux_check selinuxfs:file r_file_perms;
++allow floral_selinux_check kernel:security read_policy;
+diff --git a/prebuilts/api/31.0/private/genfs_contexts b/prebuilts/api/31.0/private/genfs_contexts
+index 322bd43..2250415 100644
+--- a/prebuilts/api/31.0/private/genfs_contexts
++++ b/prebuilts/api/31.0/private/genfs_contexts
+@@ -21,6 +21,7 @@ genfscon proc /meminfo u:object_r:proc_meminfo:s0
+ genfscon proc /misc u:object_r:proc_misc:s0
+ genfscon proc /modules u:object_r:proc_modules:s0
+ genfscon proc /mounts u:object_r:proc_mounts:s0
++genfscon proc /mountinfo u:object_r:proc_mounts:s0
+ genfscon proc /net u:object_r:proc_net:s0
+ genfscon proc /net/tcp u:object_r:proc_net_tcp_udp:s0
+ genfscon proc /net/udp u:object_r:proc_net_tcp_udp:s0
+diff --git a/prebuilts/api/32.0/private/file_contexts b/prebuilts/api/32.0/private/file_contexts
+index d6f5592..3cba293 100644
+--- a/prebuilts/api/32.0/private/file_contexts
++++ b/prebuilts/api/32.0/private/file_contexts
+@@ -816,3 +816,6 @@
+ # Container Ethernet configuration is platform data, not vendor data.
+ /system/bin/ipconfigstore    u:object_r:redroid_ipconfig_exec:s0
+ /data/misc/ethernet(/.*)?    u:object_r:redroid_ethernet_data_file:s0
++
++/system/bin/floral_fuse_bind -- u:object_r:floral_fuse_exec:s0
++/system/bin/floral_selinux_check -- u:object_r:floral_selinux_check_exec:s0
+diff --git a/prebuilts/api/32.0/private/floral_container.te b/prebuilts/api/32.0/private/floral_container.te
+new file mode 100644
+index 0000000..44e98dd
+--- /dev/null
++++ b/prebuilts/api/32.0/private/floral_container.te
+@@ -0,0 +1,2 @@
++# init makes the prepared proc mount private after sharing its root.
++allow init proc:dir mounton;
+diff --git a/prebuilts/api/32.0/private/floral_fuse.te b/prebuilts/api/32.0/private/floral_fuse.te
+new file mode 100644
+index 0000000..7389f8e
+--- /dev/null
++++ b/prebuilts/api/32.0/private/floral_fuse.te
+@@ -0,0 +1,12 @@
++# The optional legacy helper only verifies its init-selected source.
++# Mounting remains an init builtin.
++type floral_fuse, domain, coredomain;
++type floral_fuse_exec, exec_type, system_file_type, file_type;
++init_daemon_domain(floral_fuse)
++get_prop(floral_fuse, bootloader_prop)
++allow floral_fuse rootfs:dir search;
++allow floral_fuse kmsg_device:chr_file { open write };
++allow floral_fuse fuse:filesystem getattr;
++allow floral_fuse fuse:dir r_dir_perms;
++allow floral_fuse proc:dir r_dir_perms;
++allow floral_fuse proc_mounts:file r_file_perms;
+diff --git a/prebuilts/api/32.0/private/floral_selinux_check.te b/prebuilts/api/32.0/private/floral_selinux_check.te
+new file mode 100644
+index 0000000..7b5bd4c
+--- /dev/null
++++ b/prebuilts/api/32.0/private/floral_selinux_check.te
+@@ -0,0 +1,9 @@
++# Read-only inspection of the loaded instance policy.
++type floral_selinux_check, domain, coredomain;
++type floral_selinux_check_exec, exec_type, system_file_type, file_type;
++init_daemon_domain(floral_selinux_check)
++allow floral_selinux_check rootfs:dir search;
++allow floral_selinux_check sysfs:dir search;
++allow floral_selinux_check selinuxfs:dir search;
++allow floral_selinux_check selinuxfs:file r_file_perms;
++allow floral_selinux_check kernel:security read_policy;
+diff --git a/prebuilts/api/32.0/private/genfs_contexts b/prebuilts/api/32.0/private/genfs_contexts
+index 322bd43..2250415 100644
+--- a/prebuilts/api/32.0/private/genfs_contexts
++++ b/prebuilts/api/32.0/private/genfs_contexts
+@@ -21,6 +21,7 @@ genfscon proc /meminfo u:object_r:proc_meminfo:s0
+ genfscon proc /misc u:object_r:proc_misc:s0
+ genfscon proc /modules u:object_r:proc_modules:s0
+ genfscon proc /mounts u:object_r:proc_mounts:s0
++genfscon proc /mountinfo u:object_r:proc_mounts:s0
+ genfscon proc /net u:object_r:proc_net:s0
+ genfscon proc /net/tcp u:object_r:proc_net_tcp_udp:s0
+ genfscon proc /net/udp u:object_r:proc_net_tcp_udp:s0
+diff --git a/private/file_contexts b/private/file_contexts
+index d6f5592..3cba293 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -816,3 +816,6 @@
+ # Container Ethernet configuration is platform data, not vendor data.
+ /system/bin/ipconfigstore    u:object_r:redroid_ipconfig_exec:s0
+ /data/misc/ethernet(/.*)?    u:object_r:redroid_ethernet_data_file:s0
++
++/system/bin/floral_fuse_bind -- u:object_r:floral_fuse_exec:s0
++/system/bin/floral_selinux_check -- u:object_r:floral_selinux_check_exec:s0
+diff --git a/private/floral_container.te b/private/floral_container.te
+new file mode 100644
+index 0000000..44e98dd
+--- /dev/null
++++ b/private/floral_container.te
+@@ -0,0 +1,2 @@
++# init makes the prepared proc mount private after sharing its root.
++allow init proc:dir mounton;
+diff --git a/private/floral_fuse.te b/private/floral_fuse.te
+new file mode 100644
+index 0000000..7389f8e
+--- /dev/null
++++ b/private/floral_fuse.te
+@@ -0,0 +1,12 @@
++# The optional legacy helper only verifies its init-selected source.
++# Mounting remains an init builtin.
++type floral_fuse, domain, coredomain;
++type floral_fuse_exec, exec_type, system_file_type, file_type;
++init_daemon_domain(floral_fuse)
++get_prop(floral_fuse, bootloader_prop)
++allow floral_fuse rootfs:dir search;
++allow floral_fuse kmsg_device:chr_file { open write };
++allow floral_fuse fuse:filesystem getattr;
++allow floral_fuse fuse:dir r_dir_perms;
++allow floral_fuse proc:dir r_dir_perms;
++allow floral_fuse proc_mounts:file r_file_perms;
+diff --git a/private/floral_selinux_check.te b/private/floral_selinux_check.te
+new file mode 100644
+index 0000000..7b5bd4c
+--- /dev/null
++++ b/private/floral_selinux_check.te
+@@ -0,0 +1,9 @@
++# Read-only inspection of the loaded instance policy.
++type floral_selinux_check, domain, coredomain;
++type floral_selinux_check_exec, exec_type, system_file_type, file_type;
++init_daemon_domain(floral_selinux_check)
++allow floral_selinux_check rootfs:dir search;
++allow floral_selinux_check sysfs:dir search;
++allow floral_selinux_check selinuxfs:dir search;
++allow floral_selinux_check selinuxfs:file r_file_perms;
++allow floral_selinux_check kernel:security read_policy;
+diff --git a/private/genfs_contexts b/private/genfs_contexts
+index 322bd43..2250415 100644
+--- a/private/genfs_contexts
++++ b/private/genfs_contexts
+@@ -21,6 +21,7 @@ genfscon proc /meminfo u:object_r:proc_meminfo:s0
+ genfscon proc /misc u:object_r:proc_misc:s0
+ genfscon proc /modules u:object_r:proc_modules:s0
+ genfscon proc /mounts u:object_r:proc_mounts:s0
++genfscon proc /mountinfo u:object_r:proc_mounts:s0
+ genfscon proc /net u:object_r:proc_net:s0
+ genfscon proc /net/tcp u:object_r:proc_net_tcp_udp:s0
+ genfscon proc /net/udp u:object_r:proc_net_tcp_udp:s0
