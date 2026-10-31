@@ -1,10 +1,9 @@
-From b9640a085636c224e18d9de906d22b657815e3fc Mon Sep 17 00:00:00 2001
+From 0e33076aa063460dc88926d909b97ddb623ca814 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Thu, 15 Oct 2026 14:07:03 +0800
 Subject: [PATCH] sepolicy: label Floral HALs and permit native graphics and
  codec clients
 
-Restore vendor probe and HAL domain transitions, label DRI and same-process driver dependencies, and separate public identity properties from boot configuration. Grant concrete app domains the allocator and Codec2 roles while preserving isolated app neverallows. Give Codec2 FMQ memfd objects a shared type. Keep the SwiftShader execmem grant out of the production SurfaceFlinger policy.
 ---
  redroid_arm64/BoardConfig.mk                  |  1 +
  redroid_arm64_only/BoardConfig.mk             |  1 +
@@ -12,19 +11,21 @@ Restore vendor probe and HAL domain transitions, label DRI and same-process driv
  redroid_x86_64_only/BoardConfig.mk            |  1 +
  sepolicy/vendor/app.te                        | 21 +++++++++++++++++++
  sepolicy/vendor/domain.te                     |  2 ++
- sepolicy/vendor/file.te                       |  2 ++
- sepolicy/vendor/file_contexts                 | 17 +++++++++++++++
+ sepolicy/vendor/file.te                       |  8 +++++++
+ sepolicy/vendor/file_contexts                 | 19 +++++++++++++++++
  sepolicy/vendor/genfs_contexts                |  1 +
  sepolicy/vendor/hal_codec2.te                 |  5 +++++
  sepolicy/vendor/hal_graphics_allocator.te     |  3 +++
- .../vendor/hal_graphics_composer_default.te   |  2 ++
+ .../vendor/hal_graphics_composer_default.te   |  5 +++++
+ sepolicy/vendor/hal_power_default.te          |  4 ++++
+ sepolicy/vendor/hal_sensors_default.te        |  3 +++
  sepolicy/vendor/mediacodec.te                 |  6 ++++++
  sepolicy/vendor/property.te                   |  2 ++
  sepolicy/vendor/property_contexts             |  8 +++++++
- sepolicy/vendor/redroid_init.te               | 17 +++++++++++++++
+ sepolicy/vendor/redroid_init.te               | 20 ++++++++++++++++++
  sepolicy/vendor/rild.te                       |  2 ++
  sepolicy/vendor/surfaceflinger.te             |  2 ++
- 18 files changed, 94 insertions(+)
+ 20 files changed, 115 insertions(+)
  create mode 100644 sepolicy/vendor/app.te
  create mode 100644 sepolicy/vendor/domain.te
  create mode 100644 sepolicy/vendor/file.te
@@ -33,6 +34,8 @@ Restore vendor probe and HAL domain transitions, label DRI and same-process driv
  create mode 100644 sepolicy/vendor/hal_codec2.te
  create mode 100644 sepolicy/vendor/hal_graphics_allocator.te
  create mode 100644 sepolicy/vendor/hal_graphics_composer_default.te
+ create mode 100644 sepolicy/vendor/hal_power_default.te
+ create mode 100644 sepolicy/vendor/hal_sensors_default.te
  create mode 100644 sepolicy/vendor/mediacodec.te
  create mode 100644 sepolicy/vendor/property.te
  create mode 100644 sepolicy/vendor/property_contexts
@@ -125,19 +128,27 @@ index 0000000..f030f12
 +get_prop(domain, vendor_floral_identity_prop)
 diff --git a/sepolicy/vendor/file.te b/sepolicy/vendor/file.te
 new file mode 100644
-index 0000000..9f05e53
+index 0000000..0334ccb
 --- /dev/null
 +++ b/sepolicy/vendor/file.te
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,8 @@
 +# libdrm reads the SDM845 DRM parent's uevent to enumerate render devices.
 +type sysfs_redroid_gpu, fs_type, sysfs_type;
++
++# Immutable public instance profile, separate from private radio/Wi-Fi inputs.
++type floral_profile_file, file_type;
++allow init floral_profile_file:file r_file_perms;
++allow system_server floral_stream_file:dir search;
++allow system_server floral_profile_file:file r_file_perms;
 diff --git a/sepolicy/vendor/file_contexts b/sepolicy/vendor/file_contexts
 new file mode 100644
-index 0000000..2f14b3e
+index 0000000..fc52f38
 --- /dev/null
 +++ b/sepolicy/vendor/file_contexts
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,19 @@
 +/dev/dri(/.*)?    u:object_r:gpu_device:s0
++/dev/pts/ptmx    u:object_r:ptmx_device:s0
++/ipc/floral_stream/device\.prop    u:object_r:floral_profile_file:s0
 +/dev/media[0-9]+    u:object_r:video_device:s0
 +
 +/vendor/bin/(gpu_config|post-fs-data\.redroid)\.sh    u:object_r:redroid_init_exec:s0
@@ -183,12 +194,34 @@ index 0000000..ccea1b1
 +allow { hal_graphics_allocator_client hal_graphics_allocator_server appdomain -isolated_app } sysfs_redroid_gpu:file r_file_perms;
 diff --git a/sepolicy/vendor/hal_graphics_composer_default.te b/sepolicy/vendor/hal_graphics_composer_default.te
 new file mode 100644
-index 0000000..e2870de
+index 0000000..2d8cb8d
 --- /dev/null
 +++ b/sepolicy/vendor/hal_graphics_composer_default.te
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,5 @@
 +# Display dimensions, density, frame rate and control-channel lease.
 +get_prop(hal_graphics_composer_default, vendor_floral_config_prop)
++
++# The standard HIDL composer service initializes its vendor Binder thread pool.
++vndbinder_use(hal_graphics_composer_default)
+diff --git a/sepolicy/vendor/hal_power_default.te b/sepolicy/vendor/hal_power_default.te
+new file mode 100644
+index 0000000..7bf6602
+--- /dev/null
++++ b/sepolicy/vendor/hal_power_default.te
+@@ -0,0 +1,4 @@
++# Read the immutable instance profile, never host power_supply state. The
++# transport directory grants traversal only; socket ownership is unchanged.
++allow hal_power_default floral_stream_file:dir search;
++allow hal_power_default floral_profile_file:file r_file_perms;
+diff --git a/sepolicy/vendor/hal_sensors_default.te b/sepolicy/vendor/hal_sensors_default.te
+new file mode 100644
+index 0000000..68e1521
+--- /dev/null
++++ b/sepolicy/vendor/hal_sensors_default.te
+@@ -0,0 +1,3 @@
++# Sensor identities come from the same immutable instance profile as init.
++allow hal_sensors_default floral_stream_file:dir search;
++allow hal_sensors_default floral_profile_file:file r_file_perms;
 diff --git a/sepolicy/vendor/mediacodec.te b/sepolicy/vendor/mediacodec.te
 new file mode 100644
 index 0000000..7a34904
@@ -225,14 +258,17 @@ index 0000000..a657a37
 +ro.boot.floral_gpu_model            u:object_r:vendor_floral_identity_prop:s0 exact string
 diff --git a/sepolicy/vendor/redroid_init.te b/sepolicy/vendor/redroid_init.te
 new file mode 100644
-index 0000000..f0274b6
+index 0000000..e6726da
 --- /dev/null
 +++ b/sepolicy/vendor/redroid_init.te
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,20 @@
 +# One-shot vendor probes. Protected platform properties are set by init.
 +type redroid_init, domain;
 +type redroid_init_exec, exec_type, vendor_file_type, file_type;
 +init_daemon_domain(redroid_init)
++
++# Public platform role: read the selected DRM identity labels, not GPU controls.
++typeattribute redroid_init floral_graphics_probe;
 +
 +allow redroid_init vendor_shell_exec:file rx_file_perms;
 +allow redroid_init vendor_toolbox_exec:file rx_file_perms;

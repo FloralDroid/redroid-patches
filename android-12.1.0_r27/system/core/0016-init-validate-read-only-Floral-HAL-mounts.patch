@@ -1,0 +1,538 @@
+From c8155677877697f7bc1a7f47279d126b35d365e8 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Mon, 2 Nov 2026 02:53:32 +0800
+Subject: [PATCH] init: validate and label read-only Floral HAL submounts
+
+Retain read-only HAL mount ownership, propagation and labeling checks.
+All boot parameters are already forwarded unchanged by the preceding
+patch, so no property-specific forwarding exception is needed.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ init/builtins.cpp              |  39 ++++++++++
+ init/floral_hal_labels.h       | 124 +++++++++++++++++++++++++++++
+ init/floral_ipc_mount.h        | 138 +++++++++++++++++++++++++--------
+ init/floral_ipc_mount_test.cpp |  34 +++++++-
+ init/selinux.cpp               |  21 ++++-
+ 5 files changed, 320 insertions(+), 36 deletions(-)
+ create mode 100644 init/floral_hal_labels.h
+
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index e466e28..aa71b91 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -36,6 +36,7 @@
+ #include <sys/resource.h>
+ #include <sys/socket.h>
+ #include <sys/stat.h>
++#include <sys/statvfs.h>
+ #include <sys/syscall.h>
+ #include <sys/system_properties.h>
+ #include <sys/time.h>
+@@ -1024,6 +1025,26 @@ static Result<void> do_copy_per_line(const BuiltinArguments& args) {
+     return {};
+ }
+ 
++static bool IsImmutableFloralHALFile(const std::string& path) {
++    return IsLupineContainer() && (path == "/ipc/floral_stream/device.prop" ||
++                                  path == "/ipc/floral_stream/radio.json" ||
++                                  path == "/ipc/floral_stream/wifi.json");
++}
++
++static Result<struct stat> InspectImmutableFloralHAL(const std::string& path) {
++    android::base::unique_fd fd(open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC));
++    if (!fd.ok()) return ErrnoErrorIgnoreEnoent() << "open HAL profile";
++    struct stat status = {};
++    struct statvfs fs = {};
++    if (fstat(fd.get(), &status) != 0 || fstatvfs(fd.get(), &fs) != 0) {
++        return ErrnoError() << "inspect HAL profile";
++    }
++    if (!S_ISREG(status.st_mode) || !(fs.f_flag & ST_RDONLY)) {
++        return Error() << "HAL profile is not an immutable regular file";
++    }
++    return status;
++}
++
+ static Result<void> do_chown(const BuiltinArguments& args) {
+     auto uid = DecodeUid(args[1]);
+     if (!uid.ok()) {
+@@ -1041,6 +1062,16 @@ static Result<void> do_chown(const BuiltinArguments& args) {
+         }
+     }
+ 
++    if (IsImmutableFloralHALFile(path)) {
++        auto status = InspectImmutableFloralHAL(path);
++        if (!status.ok()) return status.error();
++        if (status->st_uid != *uid ||
++            (*gid != static_cast<gid_t>(-1) && status->st_gid != *gid)) {
++            return Error() << "immutable HAL profile owner mismatch";
++        }
++        return {};
++    }
++
+     if (lchown(path.c_str(), *uid, *gid) == -1) {
+         return ErrnoErrorIgnoreEnoent() << "lchown() failed";
+     }
+@@ -1063,6 +1094,14 @@ static mode_t get_mode(const char *s) {
+ 
+ static Result<void> do_chmod(const BuiltinArguments& args) {
+     mode_t mode = get_mode(args[1].c_str());
++    if (IsImmutableFloralHALFile(args[2])) {
++        auto status = InspectImmutableFloralHAL(args[2]);
++        if (!status.ok()) return status.error();
++        if ((status->st_mode & 07777) != mode) {
++            return Error() << "immutable HAL profile mode mismatch";
++        }
++        return {};
++    }
+     if (fchmodat(AT_FDCWD, args[2].c_str(), mode, AT_SYMLINK_NOFOLLOW) < 0) {
+         return ErrnoErrorIgnoreEnoent() << "fchmodat() failed";
+     }
+diff --git a/init/floral_hal_labels.h b/init/floral_hal_labels.h
+new file mode 100644
+index 0000000..ded8da2
+--- /dev/null
++++ b/init/floral_hal_labels.h
+@@ -0,0 +1,124 @@
++/* Copyright 2026 FloralDroid
++ * SPDX-License-Identifier: Apache-2.0
++ */
++#pragma once
++
++#include <fcntl.h>
++#include <stdlib.h>
++#include <linux/magic.h>
++#include <sys/mount.h>
++#include <sys/vfs.h>
++#include <sys/statvfs.h>
++#include <unistd.h>
++
++#include <selinux/selinux.h>
++
++#include "floral_ipc_mount.h"
++
++namespace android::init::floral {
++
++// Run only after policy load and before enforcement or any HAL is started.
++// tmpfs uses fs_use_trans, not xattr initialization: a host xattr alone cannot
++// initialize the SID interpreted by the Android SELinux namespace.
++inline bool LabelImmutableHalFiles(std::string* error) {
++    if (!KeepIpcMountPrivate(error)) return false;
++    IpcMounts mounts;
++    // Absence of IPC is supported; do not create an implicit transport.
++    int parent = open("/ipc", O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    if (parent < 0) return errno == ENOENT || IpcError(error, "cannot inspect IPC parent");
++    int leaf = openat(parent, "floral_stream", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
++    int saved = errno;
++    close(parent);
++    if (leaf < 0) return saved == ENOENT || IpcError(error, "cannot inspect IPC leaf");
++    struct Fd {
++        int fd;
++        ~Fd() { if (fd >= 0) close(fd); }
++    } close_leaf{leaf};
++    if (!CheckIpcMountFile(true, &mounts, error) ||
++        !CheckIpcFdMount(leaf, mounts.leaf, error)) return false;
++    struct stat leaf_status{};
++    if (fstat(leaf, &leaf_status) != 0) return IpcError(error, "cannot inspect IPC inode");
++    constexpr const char* context = "u:object_r:floral_stream_file:s0";
++    if (fsetfilecon(leaf, context) != 0) return IpcError(error, "cannot label IPC directory");
++
++    for (size_t i = 0; i < kIpcHalFiles.size(); ++i) {
++        const auto& spec = kIpcHalFiles[i];
++        const char* context = std::string(spec.name) == "device.prop"
++                ? "u:object_r:floral_profile_file:s0" : "u:object_r:floral_stream_file:s0";
++        int fd = openat(leaf, spec.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
++        if (fd < 0 && errno == ENOENT && mounts.files[i] == 0) continue;
++        Fd source{fd};
++        struct stat before{};
++        struct statvfs flags{};
++        if (fd < 0 || mounts.files[i] == 0 || fstat(fd, &before) != 0 ||
++            !S_ISREG(before.st_mode) || before.st_uid != spec.owner ||
++            before.st_gid != spec.owner || (before.st_mode & 07777) != spec.mode ||
++            before.st_size > 64 * 1024 || fstatvfs(fd, &flags) != 0 ||
++            !(flags.f_flag & ST_RDONLY) || !CheckIpcFdMount(fd, mounts.files[i], error)) {
++            return IpcError(error, std::string("invalid immutable HAL snapshot: ") + spec.name);
++        }
++
++        char* existing = nullptr;
++        int existing_length = fgetfilecon(fd, &existing);
++        bool already_labeled = existing_length >= 0 && existing && std::string(existing) == context;
++        freecon(existing);
++        if (already_labeled) continue;
++        // Only repair the runtime's tmpfs snapshots. Never relabel an image,
++        // arbitrary external filesystem or a file outside the transport FS.
++        struct statfs filesystem{};
++        if (before.st_dev != leaf_status.st_dev || fstatfs(fd, &filesystem) != 0 ||
++            filesystem.f_type != TMPFS_MAGIC) {
++            return IpcError(error, "incorrect HAL label outside runtime tmpfs");
++        }
++
++        // Create a private writable alias of this pinned inode, not its parent
++        // filesystem. The original delivery mount never loses its read-only bit.
++        char alias[] = "/dev/.floral-hal-label-XXXXXX";
++        int target = mkstemp(alias);
++        if (target < 0) return IpcError(error, "cannot create HAL labeling target");
++        close(target);
++        struct Alias {
++            const char* path;
++            bool mounted = false;
++            ~Alias() {
++                if (mounted) umount2(path, MNT_DETACH);
++                unlink(path);
++            }
++        } cleanup{alias};
++        const auto pinned = "/proc/self/fd/" + std::to_string(fd);
++        if (mount(pinned.c_str(), alias, nullptr, MS_BIND, nullptr) != 0) {
++            return IpcError(error, "cannot bind HAL labeling alias");
++        }
++        cleanup.mounted = true;
++        if (mount(nullptr, alias, nullptr, MS_PRIVATE, nullptr) != 0 ||
++            mount(nullptr, alias, nullptr, MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC,
++                  nullptr) != 0) {
++            return IpcError(error, "cannot prepare private HAL labeling alias");
++        }
++        Fd writable{open(alias, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)};
++        struct stat same{};
++        if (writable.fd < 0 || fstat(writable.fd, &same) != 0 ||
++            before.st_dev != same.st_dev || before.st_ino != same.st_ino ||
++            fsetfilecon(writable.fd, context) != 0) {
++            return IpcError(error, "cannot label pinned HAL snapshot");
++        }
++        // Check the SID visible through the actual read-only consumer FD.
++        char* actual = nullptr;
++        int length = fgetfilecon(fd, &actual);
++        bool correct = length >= 0 && actual && std::string(actual) == context;
++        freecon(actual);
++        if (!correct || fstatvfs(fd, &flags) != 0 || !(flags.f_flag & ST_RDONLY)) {
++            return IpcError(error, "HAL snapshot label or read-only state mismatch");
++        }
++        close(writable.fd);
++        writable.fd = -1;
++        if (umount2(alias, 0) != 0) return IpcError(error, "cannot remove HAL labeling alias");
++        cleanup.mounted = false;
++    }
++    IpcMounts after;
++    if (!CheckIpcMountFile(true, &after, error) || mounts.leaf != after.leaf ||
++        mounts.files != after.files) return IpcError(error, "HAL mounts changed while labeling");
++    return true;
++}
++
++}  // namespace android::init::floral
+diff --git a/init/floral_ipc_mount.h b/init/floral_ipc_mount.h
+index 9009dd0..a892469 100644
+--- a/init/floral_ipc_mount.h
++++ b/init/floral_ipc_mount.h
+@@ -21,6 +21,7 @@
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
++#include <array>
+ #include <cerrno>
+ #include <cstring>
+ #include <fstream>
+@@ -31,6 +32,21 @@ namespace android::init::floral {
+ 
+ constexpr const char* kIpcMount = "/ipc/floral_stream";
+ 
++struct IpcHalFile {
++    const char* name;
++    uid_t owner;
++    mode_t mode;
++};
++
++constexpr std::array<IpcHalFile, 3> kIpcHalFiles = {{{"device.prop", 0, 0444},
++                                                  {"radio.json", 1001, 0600},
++                                                  {"wifi.json", 1000, 0600}}};
++
++struct IpcMounts {
++    unsigned int leaf = 0;
++    std::array<unsigned int, kIpcHalFiles.size()> files = {};
++};
++
+ inline bool IpcError(std::string* error, const std::string& message) {
+     *error = message;
+     return false;
+@@ -45,11 +61,12 @@ inline bool HasMountOption(const std::string& options, const std::string& expect
+     return false;
+ }
+ 
+-// Check the actual single leaf mount, not merely a directory or a parent bind.
++// Check the IPC leaf and its optional immutable HAL file binds.
+ // Mountinfo paths are escaped by the kernel; this fixed path needs no decoding.
+-inline bool CheckIpcMount(std::istream& input, bool require_private, unsigned int* mount_id,
++inline bool CheckIpcMount(std::istream& input, bool require_private, IpcMounts* mounts,
+                           std::string* error) {
+-    bool found = false;
++    *mounts = {};
++    std::array<unsigned int, kIpcHalFiles.size()> hal_parents = {};
+     std::string line;
+     while (std::getline(input, line)) {
+         std::istringstream fields(line);
+@@ -72,19 +89,34 @@ inline bool CheckIpcMount(std::istream& input, bool require_private, unsigned in
+         if (!separator || !(fields >> fs >> source >> super_options)) {
+             return IpcError(error, "incomplete mountinfo record");
+         }
+-        if (path.compare(0, std::strlen(kIpcMount) + 1, std::string(kIpcMount) + "/") == 0) {
+-            return IpcError(error, "unexpected mount below Floral IPC");
++        // These files are part of the IPC contract, independent of the view backend.
++        const bool child = path.compare(0, std::strlen(kIpcMount) + 1,
++                                        std::string(kIpcMount) + "/") == 0;
++        if (child) {
++            size_t index = 0;
++            while (index < kIpcHalFiles.size() &&
++                   path != std::string(kIpcMount) + "/" + kIpcHalFiles[index].name) {
++                ++index;
++            }
++            if (index == kIpcHalFiles.size() || parent == 0) {
++                return IpcError(error, "unexpected mount below Floral IPC");
++            }
++            if (mounts->files[index] != 0) return IpcError(error, "stacked Floral HAL mounts");
++            mounts->files[index] = id;
++            hal_parents[index] = parent;
++        } else {
++            if (path != kIpcMount) continue;
++            if (mounts->leaf != 0) return IpcError(error, "stacked Floral IPC mounts");
++            mounts->leaf = id;
+         }
+-        if (path != kIpcMount) continue;
+-        if (found) return IpcError(error, "stacked Floral IPC mounts");
+-        found = true;
+-        *mount_id = id;
+-        for (const char* option : {"rw", "nosuid", "nodev", "noexec"}) {
++        for (const char* option : {child ? "ro" : "rw", "nosuid", "nodev", "noexec"}) {
+             if (!HasMountOption(options, option)) {
+                 return IpcError(error, "unsafe Floral IPC mount flags");
+             }
+         }
+-        if (HasMountOption(options, "ro")) return IpcError(error, "read-only Floral IPC mount");
++        if (HasMountOption(options, child ? "rw" : "ro")) {
++            return IpcError(error, "conflicting Floral IPC mount access");
++        }
+         if (!propagation.empty()) {
+             // Only the shared group created by SetupMountNamespaces is expected.
+             if (require_private || propagation.compare(0, 7, "shared:") != 0) {
+@@ -99,13 +131,34 @@ inline bool CheckIpcMount(std::istream& input, bool require_private, unsigned in
+         }
+     }
+     if (input.bad()) return IpcError(error, "cannot read mountinfo");
+-    return found || IpcError(error, "Floral IPC directory is not a separate mount");
++    if (mounts->leaf == 0) return IpcError(error, "Floral IPC directory is not a separate mount");
++    for (const auto parent : hal_parents) {
++        if (parent != 0 && parent != mounts->leaf) {
++            return IpcError(error, "Floral HAL mount is outside its IPC leaf");
++        }
++    }
++    return true;
+ }
+ 
+-inline bool CheckIpcMountFile(bool require_private, unsigned int* mount_id, std::string* error) {
++inline bool CheckIpcMountFile(bool require_private, IpcMounts* mounts, std::string* error) {
+     std::ifstream input("/proc/self/mountinfo");
+     if (!input.is_open()) return IpcError(error, "cannot open mountinfo");
+-    return CheckIpcMount(input, require_private, mount_id, error);
++    return CheckIpcMount(input, require_private, mounts, error);
++}
++
++inline bool CheckIpcFdMount(int fd, unsigned int expected, std::string* error) {
++    std::ifstream fdinfo("/proc/self/fdinfo/" + std::to_string(fd));
++    std::string line;
++    unsigned int id = 0;
++    while (std::getline(fdinfo, line)) {
++        std::istringstream fields(line);
++        std::string key;
++        if ((fields >> key) && key == "mnt_id:") {
++            if (!(fields >> id)) return IpcError(error, "invalid Floral IPC fdinfo");
++            break;
++        }
++    }
++    return (id != 0 && id == expected) || IpcError(error, "Floral IPC mount identity changed");
+ }
+ 
+ inline bool KeepIpcMountPrivate(std::string* error) {
+@@ -124,41 +177,60 @@ inline bool KeepIpcMountPrivate(std::string* error) {
+     }
+     // Own the FD across all validation and mount calls, including error exits.
+     struct CloseFd {
+-        int fd;
+-        ~CloseFd() { close(fd); }
++        int fd = -1;
++        ~CloseFd() { if (fd >= 0) close(fd); }
+     } close_leaf{leaf};
+     struct stat before {};
+     if (fstat(leaf, &before) != 0 || !S_ISDIR(before.st_mode) || before.st_uid != 0 ||
+         before.st_gid != 0 || (before.st_mode & 07777) != 0773) {
+         return IpcError(error, "unsafe Floral IPC directory owner/mode");
+     }
+-    unsigned int before_id = 0;
+-    if (!CheckIpcMountFile(false, &before_id, error)) return false;
+-    std::ifstream fdinfo("/proc/self/fdinfo/" + std::to_string(leaf));
+-    std::string line;
+-    unsigned int fd_mount_id = 0;
+-    while (std::getline(fdinfo, line)) {
+-        std::istringstream fields(line);
+-        std::string key;
+-        if ((fields >> key) && key == "mnt_id:") {
+-            if (!(fields >> fd_mount_id)) return IpcError(error, "invalid Floral IPC fdinfo");
+-            break;
++    IpcMounts before_mounts;
++    if (!CheckIpcMountFile(false, &before_mounts, error) ||
++        !CheckIpcFdMount(leaf, before_mounts.leaf, error)) return false;
++
++    std::array<CloseFd, kIpcHalFiles.size()> files;
++    std::array<struct stat, kIpcHalFiles.size()> file_stats = {};
++    for (size_t i = 0; i < files.size(); ++i) {
++        if (before_mounts.files[i] == 0) continue;
++        const auto& spec = kIpcHalFiles[i];
++        files[i].fd = openat(leaf, spec.name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
++        auto& status = file_stats[i];
++        if (files[i].fd < 0 || fstat(files[i].fd, &status) != 0 || !S_ISREG(status.st_mode) ||
++            status.st_uid != spec.owner || status.st_gid != spec.owner ||
++            (status.st_mode & 07777) != spec.mode) {
++            return IpcError(error, std::string("unsafe Floral HAL file: ") + spec.name);
+         }
++        if (!CheckIpcFdMount(files[i].fd, before_mounts.files[i], error)) return false;
+     }
+-    if (fd_mount_id != before_id) return IpcError(error, "Floral IPC mount identity changed");
++
+     // Address the pinned directory, not a pathname which could be substituted.
+     const auto pinned = "/proc/self/fd/" + std::to_string(leaf);
+-    if (mount(nullptr, pinned.c_str(), nullptr, MS_PRIVATE, nullptr) != 0) {
++    if (mount(nullptr, pinned.c_str(), nullptr, MS_PRIVATE | MS_REC, nullptr) != 0) {
+         return IpcError(error, "cannot make Floral IPC private: " + std::string(strerror(errno)));
+     }
+-    unsigned int after_id = 0;
+-    if (!CheckIpcMountFile(true, &after_id, error) || before_id != after_id) {
+-        return IpcError(error, "Floral IPC mount changed during initialization: " + *error);
+-    }
+     struct stat after {};
+     if (lstat(kIpcMount, &after) != 0 || before.st_dev != after.st_dev || before.st_ino != after.st_ino) {
+         return IpcError(error, "Floral IPC source changed during initialization");
+     }
++    for (size_t i = 0; i < files.size(); ++i) {
++        if (files[i].fd < 0) continue;
++        const int fd = openat(leaf, kIpcHalFiles[i].name, O_PATH | O_NOFOLLOW | O_CLOEXEC);
++        CloseFd close_file{fd};
++        const auto& status = file_stats[i];
++        if (fd < 0 || fstat(fd, &after) != 0 || after.st_dev != status.st_dev ||
++            after.st_ino != status.st_ino || after.st_mode != status.st_mode ||
++            after.st_uid != status.st_uid || after.st_gid != status.st_gid) {
++            return IpcError(error, "Floral HAL source changed during initialization");
++        }
++        if (!CheckIpcFdMount(fd, before_mounts.files[i], error)) return false;
++    }
++
++    IpcMounts after_mounts;
++    if (!CheckIpcMountFile(true, &after_mounts, error)) return false;
++    if (before_mounts.leaf != after_mounts.leaf || before_mounts.files != after_mounts.files) {
++        return IpcError(error, "Floral IPC mounts changed during initialization");
++    }
+     return true;
+ }
+ 
+diff --git a/init/floral_ipc_mount_test.cpp b/init/floral_ipc_mount_test.cpp
+index ace4708..7a6ea28 100644
+--- a/init/floral_ipc_mount_test.cpp
++++ b/init/floral_ipc_mount_test.cpp
+@@ -22,9 +22,9 @@ namespace android::init::floral {
+ 
+ static bool Check(const std::string& records, bool require_private = false) {
+     std::istringstream input(records);
+-    unsigned int id = 0;
++    IpcMounts mounts;
+     std::string error;
+-    return CheckIpcMount(input, require_private, &id, &error);
++    return CheckIpcMount(input, require_private, &mounts, &error);
+ }
+ 
+ static std::string Record(const std::string& options = "rw,nosuid,nodev,noexec",
+@@ -55,4 +55,34 @@ TEST(FloralIpcMount, RejectsUnsafeOrMissingMounts) {
+     EXPECT_FALSE(Check("42 1 0:23 / /ipc/floral_stream rw,nosuid,nodev,noexec shared:1\n"));
+ }
+ 
++static std::string HalRecord(const std::string& name = "device.prop",
++                             const std::string& options = "ro,nosuid,nodev,noexec",
++                             const std::string& optional = "", unsigned int parent = 42) {
++    return "43 " + std::to_string(parent) + " 0:23 /profile /ipc/floral_stream/" + name + " " +
++           options + " " + optional + "- ext4 /dev/loop0 rw\n";
++}
++
++TEST(FloralIpcMount, AcceptsOnlyNamedReadOnlyHalMounts) {
++    for (const auto* name : {"device.prop", "radio.json", "wifi.json"}) {
++        EXPECT_TRUE(Check(Record() + HalRecord(name)));
++        EXPECT_TRUE(Check(HalRecord(name) + Record()));
++        EXPECT_TRUE(Check(Record("rw,nosuid,nodev,noexec", "") + HalRecord(name), true));
++    }
++    EXPECT_FALSE(Check(Record() + HalRecord("other.json")));
++    EXPECT_FALSE(Check(Record() + HalRecord("device.prop/child")));
++    EXPECT_FALSE(Check(Record() + HalRecord() + HalRecord()));
++    EXPECT_FALSE(Check(Record() + HalRecord("device.prop", "ro,nosuid,nodev,noexec", "", 1)));
++    EXPECT_FALSE(Check(Record() + HalRecord("device.prop", "ro,nosuid,nodev,noexec", "", 0)));
++    for (const auto* flags : {"rw,nosuid,nodev,noexec", "ro,nodev,noexec", "ro,nosuid,noexec",
++                              "ro,nosuid,nodev", "rw,ro,nosuid,nodev,noexec"}) {
++        EXPECT_FALSE(Check(Record() + HalRecord("device.prop", flags)));
++    }
++    EXPECT_TRUE(Check(Record() + HalRecord("device.prop", "ro,nosuid,nodev,noexec", "shared:2 ")));
++    EXPECT_FALSE(Check(Record("rw,nosuid,nodev,noexec", "") +
++                               HalRecord("device.prop", "ro,nosuid,nodev,noexec", "shared:2 "), true));
++    for (const auto* optional : {"master:1 ", "shared:1 master:2 ", "unbindable "}) {
++        EXPECT_FALSE(Check(Record() + HalRecord("device.prop", "ro,nosuid,nodev,noexec", optional)));
++    }
++}
++
+ }  // namespace android::init::floral
+diff --git a/init/selinux.cpp b/init/selinux.cpp
+index 888185e..22b0c3d 100644
+--- a/init/selinux.cpp
++++ b/init/selinux.cpp
+@@ -50,6 +50,7 @@
+ //    the SEPolicy is compiled if needed.
+ 
+ #include "selinux.h"
++#include "floral_hal_labels.h"
+ #include "floral_boot.h"
+ 
+ #include <android/api-level.h>
+@@ -60,6 +61,9 @@
+ #include <linux/netlink.h>
+ #include <stdlib.h>
+ #include <sys/stat.h>
++#include <sys/sysmacros.h>
++#include <sys/vfs.h>
++#include <linux/magic.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ 
+@@ -142,6 +146,17 @@ void RestoreContainerContexts() {
+             PLOG(FATAL) << "Could not restore container context for " << entry->fts_path;
+         }
+     }
++
++    // The runtime's private devpts multiplexor is reached via /dev/ptmx ->
++    // pts/ptmx. Label the endpoint, not just the symlink; leave all slaves alone.
++    struct stat ptmx = {};
++    struct statfs ptsfs = {};
++    if (lstat("/dev/pts/ptmx", &ptmx) != 0 || !S_ISCHR(ptmx.st_mode) ||
++        major(ptmx.st_rdev) != 5 || minor(ptmx.st_rdev) != 2 ||
++        statfs("/dev/pts", &ptsfs) != 0 || ptsfs.f_type != DEVPTS_SUPER_MAGIC ||
++        lsetfilecon("/dev/pts/ptmx", "u:object_r:ptmx_device:s0") != 0) {
++        PLOG(FATAL) << "Could not label private devpts multiplexor";
++    }
+ }
+ 
+ EnforcingStatus StatusFromProperty() {
+@@ -825,7 +840,11 @@ int SetupSelinux(char** argv) {
+     }
+ 
+     if (IsLupineContainer()) {
+-        RestoreContainerContexts();
++            RestoreContainerContexts();
++            std::string error;
++            if (!floral::LabelImmutableHalFiles(&error)) {
++                LOG(FATAL) << "Could not label immutable Floral HAL files: " << error;
++            }
+     }
+ 
+     SelinuxSetEnforcement();
+-- 
+2.47.3
+
