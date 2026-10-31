@@ -1,0 +1,276 @@
+From contact@home56.top Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 30 Oct 2026 23:20:24 +0800
+Subject: [PATCH] sepolicy: label the read-only Floral FUSE view verifier
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Confine the read-only view verifier and label mountinfo and osrelease
+with the existing proc_mounts and proc_version types. Grant read_policy
+without granting broad proc access or changing Android neverallow rules.
+Mirror the component policy and labels into the API 31/32 snapshots.
+
+Requires the existing patches through 0008. No private uevent transport
+or additional socket permission is introduced.
+
+Base-tree: 2ba190005fb056fcf8c5a613e3fa080705d08762
+Result-tree: 904f6eeb955b4c875757cdb688f466eb6c9b83c4
+---
+ prebuilts/api/31.0/private/file_contexts  |  3 +++
+ prebuilts/api/31.0/private/floral_fuse.te | 40 +++++++++++++++++++++++++++++++
+ prebuilts/api/31.0/private/genfs_contexts |  2 ++
+ prebuilts/api/32.0/private/file_contexts  |  3 +++
+ prebuilts/api/32.0/private/floral_fuse.te | 40 +++++++++++++++++++++++++++++++
+ prebuilts/api/32.0/private/genfs_contexts |  2 ++
+ private/file_contexts                     |  3 +++
+ private/floral_fuse.te                    | 40 +++++++++++++++++++++++++++++++
+ private/genfs_contexts                    |  2 ++
+ 9 files changed, 135 insertions(+)
+ create mode 100644 prebuilts/api/31.0/private/floral_fuse.te
+ create mode 100644 prebuilts/api/32.0/private/floral_fuse.te
+ create mode 100644 private/floral_fuse.te
+
+diff --git a/prebuilts/api/31.0/private/file_contexts b/prebuilts/api/31.0/private/file_contexts
+index b85917f7544968e3e5fa18ad8f3e464b3d482474..39dc78febc83c239e952ba79888b16ce30437e5c 100644
+--- a/prebuilts/api/31.0/private/file_contexts
++++ b/prebuilts/api/31.0/private/file_contexts
+@@ -243,6 +243,9 @@
+ /system/bin/run-as	--	u:object_r:runas_exec:s0
+ /system/bin/bootanimation u:object_r:bootanim_exec:s0
+ /system/bin/bootstat		u:object_r:bootstat_exec:s0
++/system/bin/floral_fuse_bind -- u:object_r:floral_fuse_exec:s0
++/run/lupine-fuse u:object_r:floral_fuse_staging_file:s0
++/run/lupine-fuse/\.floral-view -- u:object_r:floral_fuse_staging_file:s0
+ /system/bin/app_process32	u:object_r:zygote_exec:s0
+ /system/bin/app_process64	u:object_r:zygote_exec:s0
+ /system/bin/servicemanager	u:object_r:servicemanager_exec:s0
+diff --git a/prebuilts/api/31.0/private/floral_fuse.te b/prebuilts/api/31.0/private/floral_fuse.te
+new file mode 100644
+index 0000000000000000000000000000000000000000..96bf1115a842580a13344432039b7aa277d0ee67
+--- /dev/null
++++ b/prebuilts/api/31.0/private/floral_fuse.te
+@@ -0,0 +1,40 @@
++# Copyright 2026 FloralDroid
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++# Read-only revalidation helper. Data mounts in Lupine are supplied by the host;
++# legacy LXCFS mounts run as an init builtin, not a new privileged service domain.
++type floral_fuse, domain, coredomain;
++type floral_fuse_exec, exec_type, system_file_type, file_type;
++type floral_fuse_staging_file, file_type;
++init_daemon_domain(floral_fuse)
++
++get_prop(floral_fuse, bootloader_prop)
++allow floral_fuse rootfs:dir search;
++allow floral_fuse kmsg_device:chr_file { open write };
++allow { init floral_fuse } floral_fuse_staging_file:dir r_dir_perms;
++allow { init floral_fuse } floral_fuse_staging_file:file r_file_perms;
++allow { init floral_fuse } fuse:filesystem getattr;
++allow { init floral_fuse } sysfs:dir r_dir_perms;
++allow { init floral_fuse } {
++    proc_mounts proc_cpuinfo proc_meminfo proc_stat proc_swaps proc_uptime proc_loadavg
++    proc_slabinfo proc_zoneinfo proc_vmstat proc_buddyinfo proc_version
++    proc_diskstats proc_interrupts proc_pressure_cpu proc_pressure_io proc_pressure_mem
++}:file r_file_perms;
++allow floral_fuse proc:dir r_dir_perms;
++allow floral_fuse selinuxfs:dir search;
++allow floral_fuse selinuxfs:file r_file_perms;
++allow floral_fuse kernel:security read_policy;
++
++# No mount/sys_admin, policy-management or property-setting permission is added
++# to this domain. Existing trusted Android mount domains are unchanged.
+diff --git a/prebuilts/api/31.0/private/genfs_contexts b/prebuilts/api/31.0/private/genfs_contexts
+index 322bd4325492dbe518dae7582d56885f05f4e382..fdde61fd4dd95bf0cac66b00256b27bc60aab658 100644
+--- a/prebuilts/api/31.0/private/genfs_contexts
++++ b/prebuilts/api/31.0/private/genfs_contexts
+@@ -21,6 +21,7 @@ genfscon proc /meminfo u:object_r:proc_meminfo:s0
+ genfscon proc /misc u:object_r:proc_misc:s0
+ genfscon proc /modules u:object_r:proc_modules:s0
+ genfscon proc /mounts u:object_r:proc_mounts:s0
++genfscon proc /mountinfo u:object_r:proc_mounts:s0
+ genfscon proc /net u:object_r:proc_net:s0
+ genfscon proc /net/tcp u:object_r:proc_net_tcp_udp:s0
+ genfscon proc /net/udp u:object_r:proc_net_tcp_udp:s0
+@@ -100,6 +101,7 @@ genfscon proc /uid_concurrent_policy_time u:object_r:proc_uid_concurrent_policy_
+ genfscon proc /uid_cpupower/ u:object_r:proc_uid_cpupower:s0
+ genfscon proc /uptime u:object_r:proc_uptime:s0
+ genfscon proc /version u:object_r:proc_version:s0
++genfscon proc /sys/kernel/osrelease u:object_r:proc_version:s0
+ genfscon proc /vmallocinfo u:object_r:proc_vmallocinfo:s0
+ genfscon proc /vmstat u:object_r:proc_vmstat:s0
+ genfscon proc /zoneinfo u:object_r:proc_zoneinfo:s0
+diff --git a/prebuilts/api/32.0/private/file_contexts b/prebuilts/api/32.0/private/file_contexts
+index d6f559250467988e95a567ff5109d4deb9ce5ac3..6f3ef6336bb472843eb847244e2512ed54e1252e 100644
+--- a/prebuilts/api/32.0/private/file_contexts
++++ b/prebuilts/api/32.0/private/file_contexts
+@@ -243,6 +243,9 @@
+ /system/bin/run-as	--	u:object_r:runas_exec:s0
+ /system/bin/bootanimation u:object_r:bootanim_exec:s0
+ /system/bin/bootstat		u:object_r:bootstat_exec:s0
++/system/bin/floral_fuse_bind -- u:object_r:floral_fuse_exec:s0
++/run/lupine-fuse u:object_r:floral_fuse_staging_file:s0
++/run/lupine-fuse/\.floral-view -- u:object_r:floral_fuse_staging_file:s0
+ /system/bin/app_process32	u:object_r:zygote_exec:s0
+ /system/bin/app_process64	u:object_r:zygote_exec:s0
+ /system/bin/servicemanager	u:object_r:servicemanager_exec:s0
+diff --git a/prebuilts/api/32.0/private/floral_fuse.te b/prebuilts/api/32.0/private/floral_fuse.te
+new file mode 100644
+index 0000000000000000000000000000000000000000..96bf1115a842580a13344432039b7aa277d0ee67
+--- /dev/null
++++ b/prebuilts/api/32.0/private/floral_fuse.te
+@@ -0,0 +1,40 @@
++# Copyright 2026 FloralDroid
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++# Read-only revalidation helper. Data mounts in Lupine are supplied by the host;
++# legacy LXCFS mounts run as an init builtin, not a new privileged service domain.
++type floral_fuse, domain, coredomain;
++type floral_fuse_exec, exec_type, system_file_type, file_type;
++type floral_fuse_staging_file, file_type;
++init_daemon_domain(floral_fuse)
++
++get_prop(floral_fuse, bootloader_prop)
++allow floral_fuse rootfs:dir search;
++allow floral_fuse kmsg_device:chr_file { open write };
++allow { init floral_fuse } floral_fuse_staging_file:dir r_dir_perms;
++allow { init floral_fuse } floral_fuse_staging_file:file r_file_perms;
++allow { init floral_fuse } fuse:filesystem getattr;
++allow { init floral_fuse } sysfs:dir r_dir_perms;
++allow { init floral_fuse } {
++    proc_mounts proc_cpuinfo proc_meminfo proc_stat proc_swaps proc_uptime proc_loadavg
++    proc_slabinfo proc_zoneinfo proc_vmstat proc_buddyinfo proc_version
++    proc_diskstats proc_interrupts proc_pressure_cpu proc_pressure_io proc_pressure_mem
++}:file r_file_perms;
++allow floral_fuse proc:dir r_dir_perms;
++allow floral_fuse selinuxfs:dir search;
++allow floral_fuse selinuxfs:file r_file_perms;
++allow floral_fuse kernel:security read_policy;
++
++# No mount/sys_admin, policy-management or property-setting permission is added
++# to this domain. Existing trusted Android mount domains are unchanged.
+diff --git a/prebuilts/api/32.0/private/genfs_contexts b/prebuilts/api/32.0/private/genfs_contexts
+index 322bd4325492dbe518dae7582d56885f05f4e382..fdde61fd4dd95bf0cac66b00256b27bc60aab658 100644
+--- a/prebuilts/api/32.0/private/genfs_contexts
++++ b/prebuilts/api/32.0/private/genfs_contexts
+@@ -21,6 +21,7 @@ genfscon proc /meminfo u:object_r:proc_meminfo:s0
+ genfscon proc /misc u:object_r:proc_misc:s0
+ genfscon proc /modules u:object_r:proc_modules:s0
+ genfscon proc /mounts u:object_r:proc_mounts:s0
++genfscon proc /mountinfo u:object_r:proc_mounts:s0
+ genfscon proc /net u:object_r:proc_net:s0
+ genfscon proc /net/tcp u:object_r:proc_net_tcp_udp:s0
+ genfscon proc /net/udp u:object_r:proc_net_tcp_udp:s0
+@@ -100,6 +101,7 @@ genfscon proc /uid_concurrent_policy_time u:object_r:proc_uid_concurrent_policy_
+ genfscon proc /uid_cpupower/ u:object_r:proc_uid_cpupower:s0
+ genfscon proc /uptime u:object_r:proc_uptime:s0
+ genfscon proc /version u:object_r:proc_version:s0
++genfscon proc /sys/kernel/osrelease u:object_r:proc_version:s0
+ genfscon proc /vmallocinfo u:object_r:proc_vmallocinfo:s0
+ genfscon proc /vmstat u:object_r:proc_vmstat:s0
+ genfscon proc /zoneinfo u:object_r:proc_zoneinfo:s0
+diff --git a/private/file_contexts b/private/file_contexts
+index d6f559250467988e95a567ff5109d4deb9ce5ac3..6f3ef6336bb472843eb847244e2512ed54e1252e 100644
+--- a/private/file_contexts
++++ b/private/file_contexts
+@@ -243,6 +243,9 @@
+ /system/bin/run-as	--	u:object_r:runas_exec:s0
+ /system/bin/bootanimation u:object_r:bootanim_exec:s0
+ /system/bin/bootstat		u:object_r:bootstat_exec:s0
++/system/bin/floral_fuse_bind -- u:object_r:floral_fuse_exec:s0
++/run/lupine-fuse u:object_r:floral_fuse_staging_file:s0
++/run/lupine-fuse/\.floral-view -- u:object_r:floral_fuse_staging_file:s0
+ /system/bin/app_process32	u:object_r:zygote_exec:s0
+ /system/bin/app_process64	u:object_r:zygote_exec:s0
+ /system/bin/servicemanager	u:object_r:servicemanager_exec:s0
+diff --git a/private/floral_fuse.te b/private/floral_fuse.te
+new file mode 100644
+index 0000000000000000000000000000000000000000..96bf1115a842580a13344432039b7aa277d0ee67
+--- /dev/null
++++ b/private/floral_fuse.te
+@@ -0,0 +1,40 @@
++# Copyright 2026 FloralDroid
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++# Read-only revalidation helper. Data mounts in Lupine are supplied by the host;
++# legacy LXCFS mounts run as an init builtin, not a new privileged service domain.
++type floral_fuse, domain, coredomain;
++type floral_fuse_exec, exec_type, system_file_type, file_type;
++type floral_fuse_staging_file, file_type;
++init_daemon_domain(floral_fuse)
++
++get_prop(floral_fuse, bootloader_prop)
++allow floral_fuse rootfs:dir search;
++allow floral_fuse kmsg_device:chr_file { open write };
++allow { init floral_fuse } floral_fuse_staging_file:dir r_dir_perms;
++allow { init floral_fuse } floral_fuse_staging_file:file r_file_perms;
++allow { init floral_fuse } fuse:filesystem getattr;
++allow { init floral_fuse } sysfs:dir r_dir_perms;
++allow { init floral_fuse } {
++    proc_mounts proc_cpuinfo proc_meminfo proc_stat proc_swaps proc_uptime proc_loadavg
++    proc_slabinfo proc_zoneinfo proc_vmstat proc_buddyinfo proc_version
++    proc_diskstats proc_interrupts proc_pressure_cpu proc_pressure_io proc_pressure_mem
++}:file r_file_perms;
++allow floral_fuse proc:dir r_dir_perms;
++allow floral_fuse selinuxfs:dir search;
++allow floral_fuse selinuxfs:file r_file_perms;
++allow floral_fuse kernel:security read_policy;
++
++# No mount/sys_admin, policy-management or property-setting permission is added
++# to this domain. Existing trusted Android mount domains are unchanged.
+diff --git a/private/genfs_contexts b/private/genfs_contexts
+index 322bd4325492dbe518dae7582d56885f05f4e382..fdde61fd4dd95bf0cac66b00256b27bc60aab658 100644
+--- a/private/genfs_contexts
++++ b/private/genfs_contexts
+@@ -21,6 +21,7 @@ genfscon proc /meminfo u:object_r:proc_meminfo:s0
+ genfscon proc /misc u:object_r:proc_misc:s0
+ genfscon proc /modules u:object_r:proc_modules:s0
+ genfscon proc /mounts u:object_r:proc_mounts:s0
++genfscon proc /mountinfo u:object_r:proc_mounts:s0
+ genfscon proc /net u:object_r:proc_net:s0
+ genfscon proc /net/tcp u:object_r:proc_net_tcp_udp:s0
+ genfscon proc /net/udp u:object_r:proc_net_tcp_udp:s0
+@@ -100,6 +101,7 @@ genfscon proc /uid_concurrent_policy_time u:object_r:proc_uid_concurrent_policy_
+ genfscon proc /uid_cpupower/ u:object_r:proc_uid_cpupower:s0
+ genfscon proc /uptime u:object_r:proc_uptime:s0
+ genfscon proc /version u:object_r:proc_version:s0
++genfscon proc /sys/kernel/osrelease u:object_r:proc_version:s0
+ genfscon proc /vmallocinfo u:object_r:proc_vmallocinfo:s0
+ genfscon proc /vmstat u:object_r:proc_vmstat:s0
+ genfscon proc /zoneinfo u:object_r:proc_zoneinfo:s0
+
+-- 
+2.47.3

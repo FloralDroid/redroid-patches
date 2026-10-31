@@ -1,0 +1,108 @@
+From contact@home56.top Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 30 Oct 2026 23:20:24 +0800
+Subject: [PATCH] init: read immutable Lupine device and HAL metadata
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Read the initial device metadata from read-only Lupine sysfs during
+coldboot; live events continue through standard KOBJECT_UEVENT sockets.
+Honor HAL chown/chmod requests only when the host-delivered immutable
+file already has the requested ownership and mode. Other modes retain
+the original paths and operations.
+
+Base-tree: 2883e713153311e407de69f4678b4960bb2a6532
+Result-tree: c190502753019735fb61b912cc3c0710cfbccfd4
+---
+ init/builtins.cpp        | 24 ++++++++++++++++++++++++
+ init/uevent_listener.cpp | 17 +++++++++++++++++
+ 2 files changed, 41 insertions(+)
+
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index f29c8041198006f25de43db38c867deb8fe8c66f..3d171f4db950c12d600769ff73c107c3b496998e 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -1024,6 +1024,12 @@ static Result<void> do_copy_per_line(const BuiltinArguments& args) {
+     return {};
+ }
+ 
++static bool IsImmutableFloralHALFile(const std::string& path) {
++    return IsLupineFuse() && (path == "/ipc/floral_stream/device.prop" ||
++                             path == "/ipc/floral_stream/radio.json" ||
++                             path == "/ipc/floral_stream/wifi.json");
++}
++
+ static Result<void> do_chown(const BuiltinArguments& args) {
+     auto uid = DecodeUid(args[1]);
+     if (!uid.ok()) {
+@@ -1041,6 +1047,16 @@ static Result<void> do_chown(const BuiltinArguments& args) {
+         }
+     }
+ 
++    if (IsImmutableFloralHALFile(path)) {
++        struct stat status = {};
++        if (lstat(path.c_str(), &status) != 0) return ErrnoErrorIgnoreEnoent() << "stat HAL profile";
++        if (!S_ISREG(status.st_mode) || status.st_uid != *uid ||
++            (*gid != static_cast<gid_t>(-1) && status.st_gid != *gid)) {
++            return Error() << "immutable HAL profile owner mismatch";
++        }
++        return {};
++    }
++
+     if (lchown(path.c_str(), *uid, *gid) == -1) {
+         return ErrnoErrorIgnoreEnoent() << "lchown() failed";
+     }
+@@ -1063,6 +1079,14 @@ static mode_t get_mode(const char *s) {
+ 
+ static Result<void> do_chmod(const BuiltinArguments& args) {
+     mode_t mode = get_mode(args[1].c_str());
++    if (IsImmutableFloralHALFile(args[2])) {
++        struct stat status = {};
++        if (lstat(args[2].c_str(), &status) != 0) return ErrnoErrorIgnoreEnoent() << "stat HAL profile";
++        if (!S_ISREG(status.st_mode) || (status.st_mode & 07777) != mode) {
++            return Error() << "immutable HAL profile mode mismatch";
++        }
++        return {};
++    }
+     if (fchmodat(AT_FDCWD, args[2].c_str(), mode, AT_SYMLINK_NOFOLLOW) < 0) {
+         return ErrnoErrorIgnoreEnoent() << "fchmodat() failed";
+     }
+diff --git a/init/uevent_listener.cpp b/init/uevent_listener.cpp
+index 7cd396a8b0ecd77eee03b4d5b771e14ac1e45a92..16836d13aa4b106d8c4876e73f122271d53c817c 100644
+--- a/init/uevent_listener.cpp
++++ b/init/uevent_listener.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "uevent_listener.h"
++#include "floral_fuse.h"
+ 
+ #include <fcntl.h>
+ #include <poll.h>
+@@ -130,6 +131,22 @@ ListenerAction UeventListener::RegenerateUeventsForDir(DIR* d,
+     int dfd = dirfd(d);
+ 
+     int fd = openat(dfd, "uevent", O_WRONLY | O_CLOEXEC);
++    if (fd < 0 && errno == EROFS && IsLupineFuse()) {
++        // Immutable instance sysfs provides the initial event fields directly.
++        android::base::unique_fd snapshot(openat(dfd, "uevent", O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
++        if (!snapshot.ok()) PLOG(FATAL) << "Cannot read instance uevent snapshot";
++        char message[UEVENT_MSG_LEN + 2];
++        const ssize_t count = TEMP_FAILURE_RETRY(read(snapshot.get(), message, UEVENT_MSG_LEN));
++        if (count <= 0 || count == UEVENT_MSG_LEN) LOG(FATAL) << "Invalid instance uevent snapshot";
++        for (ssize_t index = 0; index < count; ++index) {
++            if (message[index] == '\n') message[index] = 0;
++        }
++        message[count] = message[count + 1] = 0;
++        Uevent event;
++        ParseEvent(message, &event);
++        if (event.action == "add" && !event.path.empty() && !event.subsystem.empty() &&
++            callback(event) == ListenerAction::kStop) return ListenerAction::kStop;
++    }
+     if (fd >= 0) {
+         write(fd, "add\n", 4);
+         close(fd);
+
+-- 
+2.47.3

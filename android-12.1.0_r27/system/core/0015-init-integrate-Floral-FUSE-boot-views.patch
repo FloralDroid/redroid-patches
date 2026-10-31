@@ -1,0 +1,1067 @@
+From contact@home56.top Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 30 Oct 2026 23:20:24 +0800
+Subject: [PATCH] init: integrate fixed Floral FUSE boot views
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Consume the none/lxcfs/lupine boot contract and verify the host-installed
+views before services start. Keep the instance control mounts private and
+leave normal device-node handling intact. Do not relabel read-only sysfs.
+
+Requires runtime_floral_fuse and the existing patches through 0014.
+
+Base-tree: 5017b3eabf9c9f0b7688229b4240689e570cc036
+Result-tree: 2883e713153311e407de69f4678b4960bb2a6532
+---
+ init/Android.bp           |   7 ++
+ init/Android.mk           |   2 +
+ init/builtins.cpp         |  12 ++++
+ init/devices.cpp          |   2 +
+ init/first_stage_init.cpp |  17 ++---
+ init/floral_fuse.cpp      | 174 ++++++++++++++++++++++++++++++++++++++++++++++
+ init/floral_fuse.h        |  39 +++++++++++
+ init/init.cpp             |   7 +-
+ init/main.cpp             |  10 +++
+ init/mount_namespace.cpp  |   5 ++
+ init/property_service.cpp |  25 +++++++
+ init/selinux.cpp          |  19 ++---
+ init/ueventd.cpp          |  22 +++---
+ init/util.cpp             |  12 ++++
+ rootdir/init.rc           | 158 +++++++++++++++++++++++++++++++++++++++--
+ 15 files changed, 477 insertions(+), 34 deletions(-)
+ create mode 100644 init/floral_fuse.cpp
+ create mode 100644 init/floral_fuse.h
+
+diff --git a/init/Android.bp b/init/Android.bp
+index 2a06fdb24e45118f96a43b066f9cc82cbcbb788c..0dd52f3d5f251beb53de5ef9be1ae2a976be095b 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -53,6 +53,7 @@ init_common_sources = [
+     "util.cpp",
+ ]
+ init_device_sources = [
++    "floral_fuse.cpp",
+     "block_dev_initializer.cpp",
+     "bootchart.cpp",
+     "builtins.cpp",
+@@ -160,6 +161,8 @@ libinit_cc_defaults {
+         },
+     },
+     static_libs: [
++        "libfloral_fuse",
++        "libfloral_fuse_lxcfs",
+         "libavb",
+         "libc++fs",
+         "libcgrouprc_format",
+@@ -284,6 +287,7 @@ cc_binary {
+ 
+     srcs: [
+         "block_dev_initializer.cpp",
++        "floral_fuse.cpp",
+         "devices.cpp",
+         "first_stage_console.cpp",
+         "first_stage_init.cpp",
+@@ -301,6 +305,7 @@ cc_binary {
+ 
+     static_libs: [
+         "libc++fs",
++        "libfloral_fuse",
+         "libfs_avb",
+         "libfs_mgr",
+         "libfec",
+@@ -469,8 +474,10 @@ cc_library_static {
+         "-Werror",
+     ],
+     srcs: init_common_sources + [
++        "floral_fuse.cpp",
+         "test_utils/service_utils.cpp",
+     ],
++    static_libs: ["libfloral_fuse"],
+     whole_static_libs: [
+         "libcap",
+     ],
+diff --git a/init/Android.mk b/init/Android.mk
+index 3c7d95acf2cf9096d4b5e9b91b0dab65026bcefe..f14f0a231bbccd826aca5b4fddffddc63bb1180f 100644
+--- a/init/Android.mk
++++ b/init/Android.mk
+@@ -49,6 +49,7 @@ include $(CLEAR_VARS)
+ LOCAL_CPPFLAGS := $(init_cflags)
+ LOCAL_SRC_FILES := \
+     block_dev_initializer.cpp \
++    floral_fuse.cpp \
+     devices.cpp \
+     first_stage_console.cpp \
+     first_stage_init.cpp \
+@@ -99,6 +100,7 @@ my_ramdisk_dirs :=
+ 
+ LOCAL_STATIC_LIBRARIES := \
+     libc++fs \
++    libfloral_fuse \
+     libfs_avb \
+     libfs_mgr \
+     libfec \
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index 035038f32a4e66ab295341248b6302c8727eb9d5..f29c8041198006f25de43db38c867deb8fe8c66f 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "builtins.h"
++#include "floral_fuse.h"
+ 
+ #include <android/api-level.h>
+ #include <dirent.h>
+@@ -1414,6 +1415,16 @@ static Result<void> do_enter_default_mount_ns(const BuiltinArguments& args) {
+     return {};
+ }
+ 
++static Result<void> do_floral_fuse_bind(const BuiltinArguments&) {
++    if (FloralFuseConfig().mode != ::floral::fuse::Mode::Lxcfs) {
++        return Error() << "floral_fuse_bind is only valid for init-selected lxcfs";
++    }
++    std::string error;
++    if (!::floral::fuse::VerifyLxcfsSource(&error)) return Error() << error;
++    if (::floral::fuse::BindLxcfsViews() != 0) return Error() << "optional LXCFS view binding failed";
++    return {};
++}
++
+ // Builtin-function-map start
+ const BuiltinFunctionMap& GetBuiltinFunctionMap() {
+     constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+@@ -1436,6 +1447,7 @@ const BuiltinFunctionMap& GetBuiltinFunctionMap() {
+         {"exec_background",         {1,     kMax, {false,  do_exec_background}}},
+         {"exec_start",              {1,     1,    {false,  do_exec_start}}},
+         {"export",                  {2,     2,    {false,  do_export}}},
++        {"floral_fuse_bind",         {0,     0,    {false,  do_floral_fuse_bind}}},
+         {"hostname",                {1,     1,    {true,   do_hostname}}},
+         {"ifup",                    {1,     1,    {true,   do_ifup}}},
+         {"init_user0",              {0,     0,    {false,  do_init_user0}}},
+diff --git a/init/devices.cpp b/init/devices.cpp
+index ce6298a9db7d2827568831bb998ae3b57c40f522..8e225fac1006d76d4045a79cb00804925fded241 100644
+--- a/init/devices.cpp
++++ b/init/devices.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "devices.h"
++#include "floral_fuse.h"
+ 
+ #include <errno.h>
+ #include <fnmatch.h>
+@@ -221,6 +222,7 @@ bool DeviceHandler::FindPlatformDevice(std::string path, std::string* platform_d
+ 
+ void DeviceHandler::FixupSysPermissions(const std::string& upath,
+                                         const std::string& subsystem) const {
++    if (IsLupineFuse()) return;
+     // upaths omit the "/sys" that paths in this list
+     // contain, so we prepend it...
+     std::string path = "/sys" + upath;
+diff --git a/init/first_stage_init.cpp b/init/first_stage_init.cpp
+index c1b24229483e77270e95108fc5594f0152fc81db..f097c38f597dc109db997d7a35bcbda413a9b91f 100644
+--- a/init/first_stage_init.cpp
++++ b/init/first_stage_init.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "first_stage_init.h"
++#include "floral_fuse.h"
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -227,6 +228,7 @@ bool LoadKernelModules(bool recovery, bool want_console, int& modules_loaded) {
+ }
+ 
+ int FirstStageMain(int argc, char** argv) {
++    InitializeFloralFuse(argc, argv);
+     if (REBOOT_BOOTLOADER_ON_PANIC) {
+         InstallRebootSignalHandlers();
+     }
+@@ -427,22 +429,15 @@ int FirstStageMain(int argc, char** argv) {
+ 
+     const char* path = "/system/bin/init";
+     const char* stage = selinuxns_ready ? "selinux_setup" : "second_stage";
+-    std::vector<const char *> args = {path, stage};
+-    std::string init_cmdline;
+-    android::base::ReadFileToString("/proc/self/cmdline", &init_cmdline);
+-    std::replace(init_cmdline.begin(), init_cmdline.end(), '\0', ' ');
+-    auto cmd_vector = android::base::Split(android::base::Trim(init_cmdline), " ");
+-    int i = 0;
+-    for (const auto& entry : cmd_vector) {
+-        if (i++ == 0) continue; // ignore first arg '/init'
+-        args.push_back(entry.c_str());
+-    }
++    auto arguments = FloralFuseStageArguments(stage);
++    std::vector<char*> args;
++    for (auto& argument : arguments) args.push_back(argument.data());
+     args.push_back(nullptr);
+     auto fd = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
+     dup2(fd, STDOUT_FILENO);
+     dup2(fd, STDERR_FILENO);
+     close(fd);
+-    execv(path, const_cast<char**>(args.data()));
++    execv(path, args.data());
+ 
+     // execv() only returns if an error happened, in which case we
+     // panic and never fall through this conditional.
+diff --git a/init/floral_fuse.cpp b/init/floral_fuse.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..11450deb8a7d1b2ad7e27b0d156cf5e7648dfe4c
+--- /dev/null
++++ b/init/floral_fuse.cpp
+@@ -0,0 +1,174 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "floral_fuse.h"
++
++#include <android-base/logging.h>
++#include <sys/mount.h>
++#include <sys/stat.h>
++#include <sys/vfs.h>
++#include <linux/magic.h>
++#include <selinux/selinux.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <cstring>
++#include <cstdio>
++#include <cstdlib>
++#include "selinux.h"
++
++namespace android::init {
++namespace {
++::floral::fuse::BootConfig config;
++bool initialized = false;
++std::vector<std::string> original_arguments;
++std::string selinux_mode;
++}  // namespace
++
++[[noreturn]] void FailFloralFuse(const std::string& error) {
++    // Never invoke init's fatal/reboot handler for a failed external view.
++    LOG(ERROR) << "Floral FUSE: " << error;
++    dprintf(STDERR_FILENO, "Floral FUSE: %s\n", error.c_str());
++    _exit(1);
++}
++
++void InitializeFloralFuse(int argc, char** argv) {
++    if (initialized) return;
++    for (int i = 1; i < argc; ++i) original_arguments.emplace_back(argv[i]);
++    std::string error;
++    if (!::floral::fuse::ParseBootArguments(original_arguments, &config, &error) ||
++        !::floral::fuse::ResolveBootMode(&config, &error)) FailFloralFuse(error);
++    initialized = true;
++    if (!IsLupineFuse()) return;
++    if (argc < 2 || (strcmp(argv[1], "second_stage") != 0 &&
++                     strcmp(argv[1], "selinux_setup") != 0)) {
++        FailFloralFuse("Lupine v1 requires /system/bin/init second_stage, not first stage");
++    }
++    for (const auto& argument : original_arguments) {
++        constexpr char prefix[] = "androidboot.selinux=";
++        if (argument.compare(0, sizeof(prefix) - 1, prefix) != 0) continue;
++        const auto value = argument.substr(sizeof(prefix) - 1);
++        if ((value != "disabled" && value != "permissive" && value != "enforcing") ||
++            (!selinux_mode.empty() && selinux_mode != value)) {
++            FailFloralFuse("invalid/conflicting Lupine SELinux mode");
++        }
++        selinux_mode = value;
++    }
++    if (selinux_mode.empty()) FailFloralFuse("Lupine requires its explicit SELinux mode");
++}
++
++const ::floral::fuse::BootConfig& FloralFuseConfig() { return config; }
++bool IsLupineFuse() { return initialized && config.mode == ::floral::fuse::Mode::Lupine; }
++const std::string& FloralFuseSELinuxMode() { return selinux_mode; }
++
++bool EnterFloralFuseSELinuxNamespace() {
++    if (!IsLupineFuse()) return false;
++    if (getenv(kEnvSelinuxStartedAt) != nullptr) {
++        const int expected = selinux_mode == "enforcing" ? 1 : 0;
++        if (security_getenforce() != expected) FailFloralFuse("SELinux mode changed after setup");
++        return false;
++    }
++    struct statfs fs = {};
++    if (statfs("/sys/fs/selinux", &fs) != 0) {
++        FailFloralFuse("missing projected /sys/fs/selinux control directory");
++    }
++    if (fs.f_type == SELINUX_MAGIC) FailFloralFuse("inherited selinuxfs is not permitted");
++    if (selinux_mode == "disabled") return false;
++    // Use the same lsm_ctx ABI as the preceding SELinux namespace patch.
++    struct LsmContext {
++        uint64_t id;
++        uint64_t flags;
++        uint64_t len;
++        uint64_t ctx_len;
++    };
++    static_assert(sizeof(LsmContext) == 32);
++    LsmContext context = {101, 0, sizeof(LsmContext), 0};
++    if (syscall(460, 106, &context, sizeof(context), 0) != 0) {
++        FailFloralFuse("cannot create requested private SELinux namespace: " +
++                      std::string(strerror(errno)));
++    }
++    if (mount("selinuxfs", "/sys/fs/selinux", "selinuxfs",
++              MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) {
++        FailFloralFuse("cannot mount private selinuxfs: " + std::string(strerror(errno)));
++    }
++    return true;
++}
++
++std::vector<std::string> FloralFuseStageArguments(const char* stage) {
++    std::vector<std::string> arguments = {"/system/bin/init", stage};
++    for (const auto& argument : original_arguments) {
++        if (argument.compare(0, 12, "androidboot.") == 0 &&
++            argument.compare(0, 23, "androidboot.floral_fuse") != 0) {
++            arguments.push_back(argument);
++        }
++    }
++    const auto frozen = ::floral::fuse::BootArguments(config);
++    arguments.insert(arguments.end(), frozen.begin(), frozen.end());
++    return arguments;
++}
++
++bool FloralFusePropertyAllowed(const std::string& name, const std::string& value) {
++    constexpr char prefix[] = "ro.boot.floral_fuse";
++    if (name.compare(0, sizeof(prefix) - 1, prefix) != 0) return true;
++    if (!initialized) return false;
++    for (const auto& argument : ::floral::fuse::BootArguments(config)) {
++        const auto equal = argument.find('=');
++        if (name == "ro.boot." + argument.substr(12, equal - 12) &&
++            value == argument.substr(equal + 1)) return true;
++    }
++    return false;
++}
++
++void CheckFloralFuseProperty(const std::string& name, const std::string& value) {
++    if (!FloralFusePropertyAllowed(name, value)) FailFloralFuse("boot property conflicts with frozen argv: " + name);
++}
++
++void VerifyFloralFuse(bool controls_ready) {
++    if (!IsLupineFuse()) return;
++    std::string error;
++    if (!::floral::fuse::VerifyLupineView(config, controls_ready, &error,
++                                      controls_ready)) FailFloralFuse(error);
++}
++
++void PrepareFloralFuseControls() {
++    if (!IsLupineFuse()) return;
++    // The canonical second-stage entry did not execute first-stage mkdirs.
++    // Only ordinary mount-staging directories are created, never device nodes
++    // or replacements for the host-delivered /dev/proc/sys mounts.
++    for (const char* path : {"/mnt/vendor", "/mnt/product"}) {
++        if (mkdir(path, 0755) != 0 && errno != EEXIST) {
++            FailFloralFuse(std::string("mount staging directory ") + path + ": " + strerror(errno));
++        }
++        struct stat status = {};
++        if (lstat(path, &status) != 0 || !S_ISDIR(status.st_mode)) {
++            FailFloralFuse(std::string("invalid mount staging directory: ") + path);
++        }
++    }
++    if (mount("bpf", "/sys/fs/bpf", "bpf", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) {
++        FailFloralFuse("private bpffs: " + std::string(strerror(errno)));
++    }
++    VerifyFloralFuse(true);
++}
++
++void PrivatizeFloralFuse() {
++    if (!IsLupineFuse()) return;
++    std::string error;
++    if (!::floral::fuse::MakeLupineViewPrivate(&error)) FailFloralFuse(error);
++    // The preceding IPC patch independently validates and privatizes its leaf.
++    VerifyFloralFuse(true);
++}
++
++}  // namespace android::init
+diff --git a/init/floral_fuse.h b/init/floral_fuse.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce202db16fa15ea97cfe01b234ef01d869a88826
+--- /dev/null
++++ b/init/floral_fuse.h
+@@ -0,0 +1,39 @@
++/*
++ * Copyright 2026 FloralDroid
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#pragma once
++
++#include <string>
++#include <vector>
++
++#include <fuse_view.h>
++
++namespace android::init {
++
++// Frozen before any stage can remount proc/sys/dev or launch a service.
++void InitializeFloralFuse(int argc, char** argv);
++const ::floral::fuse::BootConfig& FloralFuseConfig();
++bool IsLupineFuse();
++bool EnterFloralFuseSELinuxNamespace();
++std::vector<std::string> FloralFuseStageArguments(const char* stage);
++void CheckFloralFuseProperty(const std::string& name, const std::string& value);
++bool FloralFusePropertyAllowed(const std::string& name, const std::string& value);
++void VerifyFloralFuse(bool controls_ready);
++void PrepareFloralFuseControls();
++void PrivatizeFloralFuse();
++const std::string& FloralFuseSELinuxMode();
++[[noreturn]] void FailFloralFuse(const std::string& error);
++
++}  // namespace android::init
+diff --git a/init/init.cpp b/init/init.cpp
+index aa544b1dfa558f3142fa5567003c187dcee86fe3..84d28322b10e5546dac22a5935c1d4da6d07b9c0 100755
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "init.h"
++#include "floral_fuse.h"
+ 
+ #include <dirent.h>
+ #include <fcntl.h>
+@@ -768,7 +769,7 @@ void SendLoadPersistentPropertiesMessage() {
+ }
+ 
+ int SecondStageMain(int argc, char** argv) {
+-    if (REBOOT_BOOTLOADER_ON_PANIC) {
++    if (REBOOT_BOOTLOADER_ON_PANIC && !IsLupineFuse()) {
+         InstallRebootSignalHandlers();
+     }
+ 
+@@ -844,6 +845,9 @@ int SecondStageMain(int argc, char** argv) {
+     SelabelInitialize();
+     SelinuxRestoreContext();
+ 
++    // One bpffs per instance, before bootstrap/default namespaces are cloned.
++    PrepareFloralFuseControls();
++
+     Epoll epoll;
+     if (auto result = epoll.Open(); !result.ok()) {
+         PLOG(FATAL) << result.error();
+@@ -872,6 +876,7 @@ int SecondStageMain(int argc, char** argv) {
+     Action::set_function_map(&function_map);
+ 
+     if (!SetupMountNamespaces()) {
++        if (IsLupineFuse()) FailFloralFuse("SetupMountNamespaces failed");
+         PLOG(FATAL) << "SetupMountNamespaces failed";
+     }
+ 
+diff --git a/init/main.cpp b/init/main.cpp
+index 23f5530fe576facc8be21348d305608b75e8b0ab..0d03ca68bbae1926ce27b71a76ffddfdcd2655cf 100644
+--- a/init/main.cpp
++++ b/init/main.cpp
+@@ -16,6 +16,7 @@
+ 
+ #include "builtins.h"
+ #include "first_stage_init.h"
++#include "floral_fuse.h"
+ #include "init.h"
+ #include "selinux.h"
+ #include "subcontext.h"
+@@ -67,10 +68,19 @@ int main(int argc, char** argv) {
+         }
+ 
+         if (!strcmp(argv[1], "selinux_setup")) {
++            InitializeFloralFuse(argc, argv);
+             return SetupSelinux(argv);
+         }
+ 
+         if (!strcmp(argv[1], "second_stage")) {
++            InitializeFloralFuse(argc, argv);
++            // Check the host-installed data view before SELinux setup can mount anything.
++            VerifyFloralFuse(false);
++            // Lupine bypasses first stage; other modes keep its existing SELinux path.
++            if (EnterFloralFuseSELinuxNamespace()) {
++                return SetupSelinux(argv);
++            }
++
+             return SecondStageMain(argc, argv);
+         }
+     }
+diff --git a/init/mount_namespace.cpp b/init/mount_namespace.cpp
+index 785001d5dc14521e9c95ba847a84b23861321aa8..3da0bf767fdf8f84845ce73b6840505984b972f1 100644
+--- a/init/mount_namespace.cpp
++++ b/init/mount_namespace.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "mount_namespace.h"
++#include "floral_fuse.h"
+ 
+ #include <sys/mount.h>
+ 
+@@ -211,6 +212,10 @@ bool SetupMountNamespaces() {
+         return false;
+     }
+ 
++    // Do not export resource views or inherit external propagation peers.
++    // This must precede cloning either Android mount namespace.
++    PrivatizeFloralFuse();
++
+     // /apex is a private mountpoint to give different sets of APEXes for
+     // the bootstrap and default mount namespaces. The processes running with
+     // the bootstrap namespace get APEXes from the read-only partition.
+diff --git a/init/property_service.cpp b/init/property_service.cpp
+index 954454e55c052bc1885313a57bc616e2bec09544..ee7d6d8ac4ffd0c41571f6aba280feecb45c24e6 100755
+--- a/init/property_service.cpp
++++ b/init/property_service.cpp
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "property_service.h"
++#include "floral_fuse.h"
+ 
+ #include <android/api-level.h>
+ #include <ctype.h>
+@@ -176,6 +177,10 @@ static bool CheckMacPerms(const std::string& name, const char* target_context,
+ 
+ static uint32_t PropertySet(const std::string& name, const std::string& value, std::string* error,
+                             bool allow_read_only_override = false) {
++    if (!FloralFusePropertyAllowed(name, value)) {
++        *error = "Floral FUSE property conflicts with frozen boot arguments";
++        return PROP_ERROR_READ_ONLY_PROPERTY;
++    }
+     size_t valuelen = value.size();
+ 
+     if (!IsLegalPropertyName(name)) {
+@@ -704,6 +709,8 @@ static void LoadProperties(char* data, const char* filter, const char* filename,
+ 
+             while (isspace(*value)) value++;
+ 
++            CheckFloralFuseProperty(key, value);
++
+             if (flen > 0) {
+                 if (filter[flen - 1] == '*') {
+                     if (strncmp(key, filter, flen - 1) != 0) continue;
+@@ -1256,6 +1263,11 @@ static void ProcessKernelDt() {
+         android::base::ReadFileToString(file_name, &dt_file);
+         std::replace(dt_file.begin(), dt_file.end(), ',', '.');
+ 
++        // Device-tree string properties conventionally end in one NUL.
++        auto floral_dt_value = dt_file;
++        if (!floral_dt_value.empty() && floral_dt_value.back() == '\0') floral_dt_value.pop_back();
++        CheckFloralFuseProperty("ro.boot."s + dp->d_name, floral_dt_value);
++
+         InitPropertySet("ro.boot."s + dp->d_name, dt_file);
+     }
+ }
+@@ -1265,6 +1277,7 @@ constexpr auto ANDROIDBOOT_PREFIX = "androidboot."sv;
+ static void ProcessKernelCmdline() {
+     ImportKernelCmdline([&](const std::string& key, const std::string& value) {
+         if (StartsWith(key, ANDROIDBOOT_PREFIX)) {
++            CheckFloralFuseProperty("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+             InitPropertySet("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+         } else if (StartsWith(key, "ro.")) {
+             InitPropertySet(key, value);
+@@ -1276,6 +1289,7 @@ static void ProcessKernelCmdline() {
+ static void ProcessBootconfig() {
+     ImportBootconfig([&](const std::string& key, const std::string& value) {
+         if (StartsWith(key, ANDROIDBOOT_PREFIX)) {
++            CheckFloralFuseProperty("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+             InitPropertySet("ro.boot." + key.substr(ANDROIDBOOT_PREFIX.size()), value);
+         }
+     });
+@@ -1301,6 +1315,17 @@ void PropertyInit() {
+     ProcessKernelCmdline();
+     ProcessBootconfig();
+ 
++    // Only this component's reserved keys use the container argv channel here.
++    for (const auto& argument : ::floral::fuse::BootArguments(FloralFuseConfig())) {
++        const auto equal = argument.find('=');
++        const auto name = "ro.boot." + argument.substr(12, equal - 12);
++        const auto value = argument.substr(equal + 1);
++        const auto present = GetProperty(name, "");
++        if (!present.empty() && present != value) FailFloralFuse("conflicting " + name);
++        if (present.empty()) InitPropertySet(name, value);
++        if (GetProperty(name, "") != value) FailFloralFuse("unable to publish " + name);
++    }
++
+     // Propagate the kernel variables to internal variables
+     // used by init as well as the current required properties.
+     ExportKernelBootProps();
+diff --git a/init/selinux.cpp b/init/selinux.cpp
+index bbac63b31334bafa1791607363a3b79b35d642fd..9a7c0db0e0bdf29658dd840d201df8cfbf9ea72a 100644
+--- a/init/selinux.cpp
++++ b/init/selinux.cpp
+@@ -50,6 +50,7 @@
+ //    the SEPolicy is compiled if needed.
+ 
+ #include "selinux.h"
++#include "floral_fuse.h"
+ 
+ #include <android/api-level.h>
+ #include <errno.h>
+@@ -144,6 +145,9 @@ void RestoreContainerContexts() {
+ }
+ 
+ EnforcingStatus StatusFromProperty() {
++    if (IsLupineFuse()) {
++        return FloralFuseSELinuxMode() == "permissive" ? SELINUX_PERMISSIVE : SELINUX_ENFORCING;
++    }
+     EnforcingStatus status = SELINUX_ENFORCING;
+ 
+     ImportKernelCmdline([&](const std::string& key, const std::string& value) {
+@@ -164,6 +168,7 @@ EnforcingStatus StatusFromProperty() {
+ }
+ 
+ bool IsEnforcing() {
++    if (IsLupineFuse()) return FloralFuseSELinuxMode() == "enforcing";
+     if (ALLOW_PERMISSIVE_SELINUX) {
+         return StatusFromProperty() == SELINUX_ENFORCING;
+     }
+@@ -781,13 +786,13 @@ int SetupSelinux(char** argv) {
+     SetStdioToDevNull(argv);
+     InitKernelLogging(argv);
+ 
+-    if (REBOOT_BOOTLOADER_ON_PANIC) {
++    if (REBOOT_BOOTLOADER_ON_PANIC && !IsLupineFuse()) {
+         InstallRebootSignalHandlers();
+     }
+ 
+     boot_clock::time_point start_time = boot_clock::now();
+ 
+-    MountMissingSystemPartitions();
++    if (!IsLupineFuse()) MountMissingSystemPartitions();
+ 
+     SelinuxSetupKernelLogging();
+ 
+@@ -837,13 +842,11 @@ int SetupSelinux(char** argv) {
+     setenv(kEnvSelinuxStartedAt, std::to_string(start_time.time_since_epoch().count()).c_str(), 1);
+ 
+     const char* path = "/system/bin/init";
+-    // Preserve the container's androidboot arguments through the SELinux stage.
+-    std::vector<const char*> args = {path, "second_stage"};
+-    for (int i = 2; argv[i] != nullptr; ++i) {
+-        args.push_back(argv[i]);
+-    }
++    auto arguments = FloralFuseStageArguments("second_stage");
++    std::vector<char*> args;
++    for (auto& argument : arguments) args.push_back(argument.data());
+     args.push_back(nullptr);
+-    execv(path, const_cast<char**>(args.data()));
++    execv(path, args.data());
+ 
+     // execv() only returns if an error happened, in which case we
+     // panic and never return from this function.
+diff --git a/init/ueventd.cpp b/init/ueventd.cpp
+index 62078a26e188b9e52ad1d51c2fd1323f4ced1104..fda0143cf28ccef894df5f99dcee2e9113715655 100644
+--- a/init/ueventd.cpp
++++ b/init/ueventd.cpp
+@@ -244,10 +244,11 @@ void ColdBoot::WaitForSubProcesses() {
+ 
+ void ColdBoot::Run() {
+     android::base::Timer cold_boot_timer;
++    const bool lupine = android::base::GetProperty("ro.boot.floral_fuse", "") == "lupine";
+ 
+     RegenerateUevents();
+ 
+-    if (enable_parallel_restorecon_) {
++    if (enable_parallel_restorecon_ && !lupine) {
+         selinux_android_restorecon("/sys", 0);
+         selinux_android_restorecon("/sys/devices", 0);
+         GenerateRestoreCon("/sys");
+@@ -257,7 +258,7 @@ void ColdBoot::Run() {
+ 
+     ForkSubProcesses();
+ 
+-    if (!enable_parallel_restorecon_) {
++    if (!enable_parallel_restorecon_ && !lupine) {
+         selinux_android_restorecon("/sys", SELINUX_ANDROID_RESTORECON_RECURSE);
+     }
+ 
+@@ -301,13 +302,16 @@ int ueventd_main(int argc, char** argv) {
+             std::move(ueventd_configuration.dev_permissions),
+             std::move(ueventd_configuration.sysfs_permissions),
+             std::move(ueventd_configuration.subsystems), android::fs_mgr::GetBootDevices(), true));
+-    uevent_handlers.emplace_back(std::make_unique<FirmwareHandler>(
+-            std::move(ueventd_configuration.firmware_directories),
+-            std::move(ueventd_configuration.external_firmware_handlers)));
+-
+-    if (ueventd_configuration.enable_modalias_handling) {
+-        std::vector<std::string> base_paths = {"/odm/lib/modules", "/vendor/lib/modules"};
+-        uevent_handlers.emplace_back(std::make_unique<ModaliasHandler>(base_paths));
++    const bool lupine = android::base::GetProperty("ro.boot.floral_fuse", "") == "lupine";
++    if (!lupine) {
++        uevent_handlers.emplace_back(std::make_unique<FirmwareHandler>(
++                std::move(ueventd_configuration.firmware_directories),
++                std::move(ueventd_configuration.external_firmware_handlers)));
++
++        if (ueventd_configuration.enable_modalias_handling) {
++            std::vector<std::string> base_paths = {"/odm/lib/modules", "/vendor/lib/modules"};
++            uevent_handlers.emplace_back(std::make_unique<ModaliasHandler>(base_paths));
++        }
+     }
+     UeventListener uevent_listener(ueventd_configuration.uevent_socket_rcvbuf_size);
+ 
+diff --git a/init/util.cpp b/init/util.cpp
+index db813721338253e9d79a8142263a99344e8b07b4..8f77c176caecdc503deb1fb028bc85c98acd92d6 100644
+--- a/init/util.cpp
++++ b/init/util.cpp
+@@ -48,6 +48,9 @@
+ #include "reboot_utils.h"
+ #include "selabel.h"
+ #include "selinux.h"
++#ifdef __ANDROID__
++#include "floral_fuse.h"
++#endif
+ #else
+ #include "host_init_stubs.h"
+ #endif
+@@ -698,6 +701,9 @@ Result<std::string> ParseUmountAll(const std::vector<std::string>& args) {
+ }
+ 
+ static void InitAborter(const char* abort_message) {
++#ifdef __ANDROID__
++    if (IsLupineFuse()) _exit(1);
++#endif
+     // When init forks, it continues to use this aborter for LOG(FATAL), but we want children to
+     // simply abort instead of trying to reboot the system.
+     if (getpid() != 1) {
+@@ -739,6 +745,12 @@ void SetStdioToDevNull(char** argv) {
+ }
+ 
+ void InitKernelLogging(char** argv) {
++#ifdef __ANDROID__
++    if (IsLupineFuse()) {
++        android::base::InitLogging(argv, &android::base::KernelLogger, InitAborter);
++        return;
++    }
++#endif
+     SetFatalRebootTarget();
+     android::base::InitLogging(argv, &android::base::KernelLogger, InitAborter);
+ }
+diff --git a/rootdir/init.rc b/rootdir/init.rc
+index 5530cd7c338cee69b256ff53e7ce1a1499d71c78..b88a76c04b0bc48ec24ce987cd8cea353136c13a 100644
+--- a/rootdir/init.rc
++++ b/rootdir/init.rc
+@@ -51,10 +51,15 @@ on early-init
+     mkdir /linkerconfig/bootstrap 0755
+     mkdir /linkerconfig/default 0755
+ 
++on early-init && property:ro.boot.floral_fuse=none
++    write /sys/module/dm_verity/parameters/prefetch_cluster 0
++
++on early-init && property:ro.boot.floral_fuse=lxcfs
+     # Disable dm-verity hash prefetching, since it doesn't help performance
+     # Read more in b/136247322
+     write /sys/module/dm_verity/parameters/prefetch_cluster 0
+ 
++on early-init
+     # Generate ld.config.txt for early executed processes
+     exec -- /system/bin/bootstrap/linkerconfig --target /linkerconfig/bootstrap
+     chmod 644 /linkerconfig/bootstrap/ld.config.txt
+@@ -78,9 +83,14 @@ on early-init
+     mkdir /dev/boringssl 0755 root root
+     mkdir /dev/boringssl/selftest 0755 root root
+ 
+-    # Mount tracefs (with GID=AID_READTRACEFS)
++on early-init && property:ro.boot.floral_fuse=none
++    mount tracefs tracefs /sys/kernel/tracing gid=3012
++
++on early-init && property:ro.boot.floral_fuse=lxcfs
++    # Mount tracefs (with GID=AID_READTRACEFS).
+     mount tracefs tracefs /sys/kernel/tracing gid=3012
+ 
++on early-init
+     # create sys dirctory
+     mkdir /dev/sys 0755 system system
+     mkdir /dev/sys/fs 0755 system system
+@@ -235,8 +245,6 @@ on init
+     mkdir /dev/binderfs
+     chmod 0755 /dev/binderfs
+ 
+-    # Mount fusectl
+-
+     symlink /dev/binderfs/binder /dev/binder
+     symlink /dev/binderfs/hwbinder /dev/hwbinder
+     symlink /dev/binderfs/vndbinder /dev/vndbinder
+@@ -391,12 +399,29 @@ on init
+     # This is needed by any process that uses socket tagging.
+     chmod 0644 /dev/xt_qtaguid
+ 
++on init && property:ro.boot.floral_fuse=none
++    mount bpf bpf /sys/fs/bpf nodev noexec nosuid
++
++on init && property:ro.boot.floral_fuse=lxcfs
+     mount bpf bpf /sys/fs/bpf nodev noexec nosuid
+ 
++on init
+     # Create location for fs_mgr to store abbreviated output from filesystem
+     # checker programs.
+     mkdir /dev/fscklogs 0770 root system
+ 
++on init && property:ro.boot.floral_fuse=none
++    mount pstore pstore /sys/fs/pstore nodev noexec nosuid
++    chown system log /sys/fs/pstore
++    chmod 0550 /sys/fs/pstore
++    chown system log /sys/fs/pstore/console-ramoops
++    chmod 0440 /sys/fs/pstore/console-ramoops
++    chown system log /sys/fs/pstore/console-ramoops-0
++    chmod 0440 /sys/fs/pstore/console-ramoops-0
++    chown system log /sys/fs/pstore/pmsg-ramoops-0
++    chmod 0440 /sys/fs/pstore/pmsg-ramoops-0
++
++on init && property:ro.boot.floral_fuse=lxcfs
+     # pstore/ramoops previous console log
+     mount pstore pstore /sys/fs/pstore nodev noexec nosuid
+     chown system log /sys/fs/pstore
+@@ -408,6 +433,7 @@ on init
+     chown system log /sys/fs/pstore/pmsg-ramoops-0
+     chmod 0440 /sys/fs/pstore/pmsg-ramoops-0
+ 
++on init
+     # enable armv8_deprecated instruction hooks
+     write /proc/sys/abi/swp 1
+ 
+@@ -417,16 +443,31 @@ on init
+ 
+     export DOWNLOAD_CACHE /data/cache
+ 
++on init && property:ro.boot.floral_fuse=none
++    write /sys/class/leds/vibrator/trigger "transient"
++
++on init && property:ro.boot.floral_fuse=lxcfs
+     # This allows the ledtrig-transient properties to be created here so
+     # that they can be chown'd to system:system later on boot
+     write /sys/class/leds/vibrator/trigger "transient"
+ 
++on init
+     # This is used by Bionic to select optimized routines.
+     write /dev/cpu_variant:${ro.bionic.arch} ${ro.bionic.cpu_variant}
+     chmod 0444 /dev/cpu_variant:${ro.bionic.arch}
+     write /dev/cpu_variant:${ro.bionic.2nd_arch} ${ro.bionic.2nd_cpu_variant}
+     chmod 0444 /dev/cpu_variant:${ro.bionic.2nd_arch}
+ 
++on init && property:ro.boot.floral_fuse=none
++    chown system system /sys/power/state
++    chown system system /sys/power/wakeup_count
++    chmod 0660 /sys/power/state
++    chown radio wakelock /sys/power/wake_lock
++    chown radio wakelock /sys/power/wake_unlock
++    chmod 0660 /sys/power/wake_lock
++    chmod 0660 /sys/power/wake_unlock
++
++on init && property:ro.boot.floral_fuse=lxcfs
+     # Allow system processes to read / write power state.
+     chown system system /sys/power/state
+     chown system system /sys/power/wakeup_count
+@@ -437,13 +478,22 @@ on init
+     chmod 0660 /sys/power/wake_lock
+     chmod 0660 /sys/power/wake_unlock
+ 
++on init
+     # Start logd before any other services run to ensure we capture all of their logs.
+     start logd
+     # Start lmkd before any other services run so that it can register them
++on init && property:ro.boot.floral_fuse=none
++    chown root system /sys/module/lowmemorykiller/parameters/adj
++    chmod 0664 /sys/module/lowmemorykiller/parameters/adj
++    chown root system /sys/module/lowmemorykiller/parameters/minfree
++    chmod 0664 /sys/module/lowmemorykiller/parameters/minfree
++
++on init && property:ro.boot.floral_fuse=lxcfs
+     chown root system /sys/module/lowmemorykiller/parameters/adj
+     chmod 0664 /sys/module/lowmemorykiller/parameters/adj
+     chown root system /sys/module/lowmemorykiller/parameters/minfree
+     chmod 0664 /sys/module/lowmemorykiller/parameters/minfree
++on init
+     start lmkd
+ 
+     # Start essential services.
+@@ -517,10 +567,15 @@ on post-fs
+     mount none /mnt/user/0 /storage bind rec
+     mount none none /storage slave rec
+ 
++on post-fs && property:ro.boot.floral_fuse=none
++    restorecon --recursive --cross-filesystems /sys/kernel/debug
++
++on post-fs && property:ro.boot.floral_fuse=lxcfs
+     # Make sure /sys/kernel/debug (if present) is labeled properly
+     # Note that tracefs may be mounted under debug, so we need to cross filesystems
+     restorecon --recursive --cross-filesystems /sys/kernel/debug
+ 
++on post-fs
+     # We chown/chmod /cache again so because mount is run as root + defaults
+     chown system cache /cache
+     chmod 0770 /cache
+@@ -539,9 +594,15 @@ on post-fs
+     chown root log /proc/vmallocinfo
+     chmod 0440 /proc/vmallocinfo
+ 
++on post-fs && property:ro.boot.floral_fuse=none
++    chown root log /proc/slabinfo
++    chmod 0440 /proc/slabinfo
++
++on post-fs && property:ro.boot.floral_fuse=lxcfs
+     chown root log /proc/slabinfo
+     chmod 0440 /proc/slabinfo
+ 
++on post-fs
+     chown root log /proc/pagetypeinfo
+     chmod 0440 /proc/pagetypeinfo
+ 
+@@ -553,9 +614,14 @@ on post-fs
+     chown system log /proc/last_kmsg
+     chmod 0440 /proc/last_kmsg
+ 
++on post-fs && property:ro.boot.floral_fuse=none
++    chmod 0444 /sys/fs/selinux/policy
++
++on post-fs && property:ro.boot.floral_fuse=lxcfs
+     # make the selinux kernel policy world-readable
+     chmod 0444 /sys/fs/selinux/policy
+ 
++on post-fs
+     # create the lost+found directories, so as to enforce our permissions
+     mkdir /cache/lost+found 0770 root root
+ 
+@@ -579,12 +645,17 @@ on post-fs
+     restorecon_recursive /metadata/apex
+ 
+     mkdir /metadata/staged-install 0770 root system
+-on late-fs
++on late-fs && property:ro.boot.floral_fuse=none
++    chmod 0755 /sys/kernel/tracing
++    chmod 0755 /sys/kernel/debug/tracing
++
++on late-fs && property:ro.boot.floral_fuse=lxcfs
+     # Ensure that tracefs has the correct permissions.
+     # This does not work correctly if it is called in post-fs.
+     chmod 0755 /sys/kernel/tracing
+     chmod 0755 /sys/kernel/debug/tracing
+ 
++on late-fs
+     # HALs required before storage encryption can get unlocked (FBE/FDE)
+     class_start early_hal
+ 
+@@ -600,11 +671,21 @@ on late-fs && property:ro.kernel.version=4.19
+     setprop bootreceiver.enable 0
+ on late-fs && property:ro.kernel.version=5.4
+     setprop bootreceiver.enable 0
++on late-fs && property:ro.boot.floral_fuse=lupine
++    setprop bootreceiver.enable 0
++
+ on late-fs
+     # Bootreceiver tracing instance is enabled by default.
+     setprop bootreceiver.enable ${bootreceiver.enable:-1}
+ 
+-on property:ro.product.cpu.abilist64=* && property:bootreceiver.enable=1
++on property:ro.product.cpu.abilist64=* && property:bootreceiver.enable=1 && property:ro.boot.floral_fuse=none
++    mkdir /sys/kernel/tracing/instances/bootreceiver 0700 system system
++    restorecon_recursive /sys/kernel/tracing/instances/bootreceiver
++    write /sys/kernel/tracing/instances/bootreceiver/buffer_size_kb 1
++    write /sys/kernel/tracing/instances/bootreceiver/trace_options disable_on_free
++    write /sys/kernel/tracing/instances/bootreceiver/events/error_report/error_report_end/enable 1
++
++on property:ro.product.cpu.abilist64=* && property:bootreceiver.enable=1 && property:ro.boot.floral_fuse=lxcfs
+     # Set up a tracing instance for system_server to monitor error_report_end events.
+     # These are sent by kernel tools like KASAN and KFENCE when a memory corruption
+     # is detected. This is only needed for 64-bit systems.
+@@ -1007,6 +1088,71 @@ on boot
+     write /proc/sys/vm/overcommit_memory 1
+     write /proc/sys/vm/min_free_order_shift 4
+ 
++on boot && property:ro.boot.floral_fuse=none
++    # Legacy raw-sysfs setup is deliberately absent in Lupine's read-only projection.
++    chown root system /sys/block/zram0/idle
++    chmod 0664 /sys/block/zram0/idle
++    chown root system /sys/block/zram0/writeback
++    chmod 0664 /sys/block/zram0/writeback
++    mkdir /dev/sys/fs/by-name 0755 system system
++    symlink /sys/fs/f2fs/${dev.mnt.blk.data} /dev/sys/fs/by-name/userdata
++    mkdir /dev/sys/block/by-name 0755 system system
++    symlink /sys/devices/virtual/block/${dev.mnt.blk.data} /dev/sys/block/by-name/userdata
++    write /dev/sys/fs/by-name/userdata/cp_interval 200
++    write /dev/sys/fs/by-name/userdata/gc_urgent_sleep_time 50
++    write /dev/sys/fs/by-name/userdata/iostat_enable 1
++    write /dev/sys/block/by-name/userdata/queue/discard_max_bytes 134217728
++    chown system system /sys/power/autosleep
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/timer_rate
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/timer_rate
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/timer_slack
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/timer_slack
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/min_sample_time
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/min_sample_time
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/hispeed_freq
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/hispeed_freq
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/target_loads
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/target_loads
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/go_hispeed_load
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/go_hispeed_load
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/above_hispeed_delay
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/above_hispeed_delay
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/boost
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/boost
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/boostpulse
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/input_boost
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/input_boost
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/boostpulse_duration
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/boostpulse_duration
++    chown system system /sys/devices/system/cpu/cpufreq/interactive/io_is_busy
++    chmod 0660 /sys/devices/system/cpu/cpufreq/interactive/io_is_busy
++    chown system system /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
++    chmod 0660 /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
++    chown system system /sys/class/leds/vibrator/trigger
++    chown system system /sys/class/leds/vibrator/activate
++    chown system system /sys/class/leds/vibrator/brightness
++    chown system system /sys/class/leds/vibrator/duration
++    chown system system /sys/class/leds/vibrator/state
++    chown system system /sys/class/timed_output/vibrator/enable
++    chown system system /sys/class/leds/keyboard-backlight/brightness
++    chown system system /sys/class/leds/lcd-backlight/brightness
++    chown system system /sys/class/leds/button-backlight/brightness
++    chown system system /sys/class/leds/jogball-backlight/brightness
++    chown system system /sys/class/leds/red/brightness
++    chown system system /sys/class/leds/green/brightness
++    chown system system /sys/class/leds/blue/brightness
++    chown system system /sys/class/leds/red/device/grpfreq
++    chown system system /sys/class/leds/red/device/grppwm
++    chown system system /sys/class/leds/red/device/blink
++    chown system system /sys/module/sco/parameters/disable_esco
++    chown system system /sys/kernel/ipv4/tcp_wmem_min
++    chown system system /sys/kernel/ipv4/tcp_wmem_def
++    chown system system /sys/kernel/ipv4/tcp_wmem_max
++    chown system system /sys/kernel/ipv4/tcp_rmem_min
++    chown system system /sys/kernel/ipv4/tcp_rmem_def
++    chown system system /sys/kernel/ipv4/tcp_rmem_max
++
++on boot && property:ro.boot.floral_fuse=lxcfs
+     # System server manages zram writeback
+     chown root system /sys/block/zram0/idle
+     chmod 0664 /sys/block/zram0/idle
+@@ -1088,6 +1234,8 @@ on boot
+     chown system system /sys/kernel/ipv4/tcp_rmem_min
+     chown system system /sys/kernel/ipv4/tcp_rmem_def
+     chown system system /sys/kernel/ipv4/tcp_rmem_max
++
++on boot
+     chown root radio /proc/cmdline
+ 
+     # Define default initial receive window size in segments.
+
+-- 
+2.47.3
