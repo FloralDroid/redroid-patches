@@ -1,0 +1,72 @@
+From 542e98fc563ec7d88c4de9818f098218ddd3529c Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: I9dab84289a8c8bdad54447216dfa67170fead395
+---
+ heapprofd.rc   | 4 ++--
+ perfetto.rc    | 4 ++--
+ traced_perf.rc | 2 +-
+ 3 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/heapprofd.rc b/heapprofd.rc
+index bf313b1..3d26236 100644
+--- a/heapprofd.rc
++++ b/heapprofd.rc
+@@ -19,7 +19,7 @@ service heapprofd /system/bin/heapprofd
+     group nobody readproc
+     # By default, this  daemon is idle. When profiling an app, we should unwind
+     # as fast as possible in the interest of the app being profiled.
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+     onrestart exec_background - nobody shell -- /system/bin/heapprofd --cleanup-after-crash
+     # DAC_READ_SEARCH is denied by SELinux on user builds because the SELinux
+     # permission is userdebug_or_eng only.
+@@ -35,7 +35,7 @@ service heapprofd_secondary /system/bin/heapprofd
+     group nobody readproc
+     # By default, this  daemon is idle. When profiling an app, we should unwind
+     # as fast as possible in the interest of the app being profiled.
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+     # DAC_READ_SEARCH is denied by SELinux on user builds because the SELinux
+     # permission is userdebug_or_eng only.
+     capabilities KILL DAC_READ_SEARCH
+diff --git a/perfetto.rc b/perfetto.rc
+index 11cc42e..24fd057 100644
+--- a/perfetto.rc
++++ b/perfetto.rc
+@@ -19,7 +19,7 @@ service traced /system/bin/traced
+     socket traced_producer stream 0666 root root
+     user nobody
+     group nobody
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+ 
+ service traced_probes /system/bin/traced_probes
+     class late_start
+@@ -28,7 +28,7 @@ service traced_probes /system/bin/traced_probes
+     # Despite the "log" group below, traced_probes is allowed to read log
+     # only on userdebug/eng via selinux (see traced_probes.te).
+     group nobody readproc log readtracefs
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     # Clean up procfs configuration even if traced_probes crashes
+     # unexpectedly.
+     onrestart exec_background - nobody shell -- /system/bin/traced_probes --cleanup-after-crash
+diff --git a/traced_perf.rc b/traced_perf.rc
+index cc8d4e8..7e1801d 100644
+--- a/traced_perf.rc
++++ b/traced_perf.rc
+@@ -27,7 +27,7 @@ service traced_perf /system/bin/traced_perf
+     user nobody
+     group nobody readproc readtracefs
+     capabilities KILL DAC_READ_SEARCH
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+ 
+ # Daemon run state:
+ # * initially off
+-- 
+2.47.3
+

@@ -1,0 +1,150 @@
+From efce8827cfc491b40e2668fe57aa807cc1ece30d Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:48 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: I2344b795aa51167909c15d22a23e1f3034a0efef
+---
+ apex/mediaswcodec.rc                                            | 2 +-
+ apex/mediatranscoding.rc                                        | 2 +-
+ drm/drmserver/drmserver.rc                                      | 2 +-
+ .../hidl/android.hardware.drm@1.2-service-lazy.clearkey.rc      | 2 +-
+ .../clearkey/hidl/android.hardware.drm@1.2-service.clearkey.rc  | 2 +-
+ .../hidl/android.hardware.drm@1.3-service-lazy.clearkey.rc      | 2 +-
+ .../clearkey/hidl/android.hardware.drm@1.3-service.clearkey.rc  | 2 +-
+ .../hidl/android.hardware.drm@1.4-service-lazy.clearkey.rc      | 2 +-
+ .../clearkey/hidl/android.hardware.drm@1.4-service.clearkey.rc  | 2 +-
+ .../services/android.hardware.media.c2@1.2-default-service.rc   | 2 +-
+ services/mediacodec/android.hardware.media.omx@1.0-service.rc   | 2 +-
+ services/mediaextractor/mediaextractor.rc                       | 2 +-
+ 12 files changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/apex/mediaswcodec.rc b/apex/mediaswcodec.rc
+index 0c9b8c8..cc8416b 100644
+--- a/apex/mediaswcodec.rc
++++ b/apex/mediaswcodec.rc
+@@ -3,4 +3,4 @@ service media.swcodec /apex/com.android.media.swcodec/bin/mediaswcodec
+     user mediacodec
+     group camera drmrpc mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/apex/mediatranscoding.rc b/apex/mediatranscoding.rc
+index ae9f8ba..f400029 100644
+--- a/apex/mediatranscoding.rc
++++ b/apex/mediatranscoding.rc
+@@ -7,6 +7,6 @@ service media.transcoding /apex/com.android.media/bin/mediatranscoding
+     group media
+     ioprio rt 4
+     # Restrict to little cores only with system-background cpuset.
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     interface aidl media.transcoding
+     disabled
+diff --git a/drm/drmserver/drmserver.rc b/drm/drmserver/drmserver.rc
+index eb176c1..69b9a55 100644
+--- a/drm/drmserver/drmserver.rc
++++ b/drm/drmserver/drmserver.rc
+@@ -3,7 +3,7 @@ service drm /system/bin/drmserver
+     class main
+     user drm
+     group drm system inet drmrpc readproc
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+ 
+ on property:drm.service.enabled=true
+     start drm
+diff --git a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service-lazy.clearkey.rc b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service-lazy.clearkey.rc
+index 9afd3d7..5690b07 100644
+--- a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service-lazy.clearkey.rc
++++ b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service-lazy.clearkey.rc
+@@ -11,4 +11,4 @@ service vendor.drm-clearkey-hal-1-2 /vendor/bin/hw/android.hardware.drm@1.2-serv
+     user media
+     group media mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service.clearkey.rc b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service.clearkey.rc
+index c1abe7f..74a81b5 100644
+--- a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service.clearkey.rc
++++ b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.2-service.clearkey.rc
+@@ -10,4 +10,4 @@ service vendor.drm-clearkey-hal-1-2 /vendor/bin/hw/android.hardware.drm@1.2-serv
+     user media
+     group media mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service-lazy.clearkey.rc b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service-lazy.clearkey.rc
+index 1e0d431..4cdf679 100644
+--- a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service-lazy.clearkey.rc
++++ b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service-lazy.clearkey.rc
+@@ -13,4 +13,4 @@ service vendor.drm-clearkey-hal-1-3 /vendor/bin/hw/android.hardware.drm@1.3-serv
+     user media
+     group media mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service.clearkey.rc b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service.clearkey.rc
+index 8130511..1262c18 100644
+--- a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service.clearkey.rc
++++ b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.3-service.clearkey.rc
+@@ -11,4 +11,4 @@ service vendor.drm-clearkey-hal-1-3 /vendor/bin/hw/android.hardware.drm@1.3-serv
+     user media
+     group media mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service-lazy.clearkey.rc b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service-lazy.clearkey.rc
+index 46aba88..eb7c501 100644
+--- a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service-lazy.clearkey.rc
++++ b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service-lazy.clearkey.rc
+@@ -15,4 +15,4 @@ service vendor.drm-clearkey-hal-1-4 /vendor/bin/hw/android.hardware.drm@1.4-serv
+     user media
+     group media mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service.clearkey.rc b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service.clearkey.rc
+index 8186933..2b10988 100644
+--- a/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service.clearkey.rc
++++ b/drm/mediadrm/plugins/clearkey/hidl/android.hardware.drm@1.4-service.clearkey.rc
+@@ -13,4 +13,4 @@ service vendor.drm-clearkey-hal-1-4 /vendor/bin/hw/android.hardware.drm@1.4-serv
+     user media
+     group media mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/media/codec2/hidl/services/android.hardware.media.c2@1.2-default-service.rc b/media/codec2/hidl/services/android.hardware.media.c2@1.2-default-service.rc
+index 03f6e3d..548e55b 100644
+--- a/media/codec2/hidl/services/android.hardware.media.c2@1.2-default-service.rc
++++ b/media/codec2/hidl/services/android.hardware.media.c2@1.2-default-service.rc
+@@ -3,5 +3,5 @@ service android-hardware-media-c2-hal-1-2 /vendor/bin/hw/android.hardware.media.
+     user mediacodec
+     group camera mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+ 
+diff --git a/services/mediacodec/android.hardware.media.omx@1.0-service.rc b/services/mediacodec/android.hardware.media.omx@1.0-service.rc
+index 3ef9a85..0cfda13 100644
+--- a/services/mediacodec/android.hardware.media.omx@1.0-service.rc
++++ b/services/mediacodec/android.hardware.media.omx@1.0-service.rc
+@@ -3,4 +3,4 @@ service vendor.media.omx /vendor/bin/hw/android.hardware.media.omx@1.0-service
+     user mediacodec
+     group camera drmrpc mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/services/mediaextractor/mediaextractor.rc b/services/mediaextractor/mediaextractor.rc
+index 5fc2941..d74f41a 100644
+--- a/services/mediaextractor/mediaextractor.rc
++++ b/services/mediaextractor/mediaextractor.rc
+@@ -3,4 +3,4 @@ service mediaextractor /system/bin/mediaextractor
+     user mediaex
+     group drmrpc mediadrm
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+-- 
+2.47.3
+

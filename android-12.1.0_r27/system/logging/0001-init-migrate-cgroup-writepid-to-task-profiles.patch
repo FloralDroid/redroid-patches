@@ -1,0 +1,46 @@
+From 0deaaf9088a474ae8a26630f7e3b05a42d274f04 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: Ibb6a4c653bfdaedab9b0a9158ad3dda46068ba52
+---
+ logcat/logcatd.rc | 2 +-
+ logd/logd.rc      | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/logcat/logcatd.rc b/logcat/logcatd.rc
+index 64d5500..e32929d 100644
+--- a/logcat/logcatd.rc
++++ b/logcat/logcatd.rc
+@@ -58,5 +58,5 @@ service logcatd /system/bin/logcatd -L -b ${logd.logpersistd.buffer:-all} -v thr
+     # logd for write to /data/misc/logd, log group for read from log daemon
+     user logd
+     group log
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     oom_score_adjust -600
+diff --git a/logd/logd.rc b/logd/logd.rc
+index 530f342..39576a6 100644
+--- a/logd/logd.rc
++++ b/logd/logd.rc
+@@ -8,14 +8,14 @@ service logd /system/bin/logd
+     group logd system package_info readproc
+     capabilities SYSLOG AUDIT_CONTROL
+     priority 10
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+ 
+ service logd-reinit /system/bin/logd --reinit
+     oneshot
+     disabled
+     user logd
+     group logd
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+ 
+ # Limit SELinux denial generation to 5/second
+ service logd-auditctl /system/bin/auditctl -r 5
+-- 
+2.47.3
+

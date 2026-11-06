@@ -1,0 +1,26 @@
+From 7eac9db5bb9337a13791d6c4238aead5ce423a6d Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: Idb6578faa95bd18150a6118d85b77fb194217dc9
+---
+ lmkd.rc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lmkd.rc b/lmkd.rc
+index 6f90bcb..a753fe5 100644
+--- a/lmkd.rc
++++ b/lmkd.rc
+@@ -5,7 +5,7 @@ service lmkd /system/bin/lmkd
+     capabilities DAC_OVERRIDE KILL IPC_LOCK SYS_NICE SYS_RESOURCE
+     critical
+     socket lmkd seqpacket+passcred 0660 system system
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+ 
+ on property:lmkd.reinit=1
+     exec_background /system/bin/lmkd --reinit
+-- 
+2.47.3
+

@@ -1,0 +1,44 @@
+From 73373f69dd932f6cb67328a19752c9c930a05195 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+---
+ .../android.hardware.graphics.allocator@3.0-service.minigbm.rc  | 2 +-
+ .../android.hardware.graphics.allocator@4.0-service.minigbm.rc  | 2 +-
+ ...droid.hardware.graphics.allocator@4.0-service.minigbm_msm.rc | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/cros_gralloc/gralloc3/android.hardware.graphics.allocator@3.0-service.minigbm.rc b/cros_gralloc/gralloc3/android.hardware.graphics.allocator@3.0-service.minigbm.rc
+index 7377cee..20332e2 100644
+--- a/cros_gralloc/gralloc3/android.hardware.graphics.allocator@3.0-service.minigbm.rc
++++ b/cros_gralloc/gralloc3/android.hardware.graphics.allocator@3.0-service.minigbm.rc
+@@ -11,4 +11,4 @@ service vendor.graphics.allocator-3-0 /vendor/bin/hw/android.hardware.graphics.a
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm.rc b/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm.rc
+index a96a6e1..e10f159 100644
+--- a/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm.rc
++++ b/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm.rc
+@@ -21,4 +21,4 @@ service vendor.graphics.allocator-4-0 /vendor/bin/hw/android.hardware.graphics.a
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm_msm.rc b/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm_msm.rc
+index dceb747..acb29e9 100644
+--- a/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm_msm.rc
++++ b/cros_gralloc/gralloc4/android.hardware.graphics.allocator@4.0-service.minigbm_msm.rc
+@@ -21,4 +21,4 @@ service vendor.graphics.allocator-4-0 /vendor/bin/hw/android.hardware.graphics.a
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+-- 
+2.47.3
+
