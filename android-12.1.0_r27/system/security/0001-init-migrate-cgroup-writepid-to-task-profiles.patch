@@ -1,0 +1,23 @@
+From 904617d91577ef2721bb268458c80b511116ce7b Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: Idbce6b8a948583abd04701b9acf3eb3652aa7485
+---
+ keystore2/keystore2.rc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/keystore2/keystore2.rc b/keystore2/keystore2.rc
+index 82bf3b8..bd7ac03 100644
+--- a/keystore2/keystore2.rc
++++ b/keystore2/keystore2.rc
+@@ -10,4 +10,4 @@ service keystore2 /system/bin/keystore2 /data/misc/keystore
+     class early_hal
+     user keystore
+     group keystore readproc log
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+-- 
+2.47.3
+

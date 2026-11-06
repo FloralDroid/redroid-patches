@@ -1,0 +1,23 @@
+From 657c882149be613a11fcea7384e5834e6435205a Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:48 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: I873635e5ede3acf19d32beba2dc96c457be09274
+---
+ apex/statsd.rc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/apex/statsd.rc b/apex/statsd.rc
+index 605da2a..885b68d 100644
+--- a/apex/statsd.rc
++++ b/apex/statsd.rc
+@@ -17,4 +17,4 @@ service statsd /apex/com.android.os.statsd/bin/statsd
+     socket statsdw dgram+passcred 0222 statsd statsd
+     user statsd
+     group statsd log
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+-- 
+2.47.3
+

@@ -1,0 +1,52 @@
+From 86a889420391c4b224472165abb23d9aa4e0b035 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:48 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: Ic5565b7e06ab96fc4a525c6c16bde00ff4701cb2
+---
+ cmds/rss_hwm_reset/rss_hwm_reset.rc      | 2 +-
+ cmds/servicemanager/servicemanager.rc    | 2 +-
+ cmds/servicemanager/vndservicemanager.rc | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/cmds/rss_hwm_reset/rss_hwm_reset.rc b/cmds/rss_hwm_reset/rss_hwm_reset.rc
+index fbbc820..83db2f3 100644
+--- a/cmds/rss_hwm_reset/rss_hwm_reset.rc
++++ b/cmds/rss_hwm_reset/rss_hwm_reset.rc
+@@ -18,7 +18,7 @@ service rss_hwm_reset /system/bin/rss_hwm_reset
+     oneshot
+     user nobody
+     group nobody readproc
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     capabilities DAC_OVERRIDE
+ 
+ on property:sys.rss_hwm_reset.on=1
+diff --git a/cmds/servicemanager/servicemanager.rc b/cmds/servicemanager/servicemanager.rc
+index 6d5070f..7ba105d 100644
+--- a/cmds/servicemanager/servicemanager.rc
++++ b/cmds/servicemanager/servicemanager.rc
+@@ -9,5 +9,5 @@ service servicemanager /system/bin/servicemanager
+     onrestart class_restart main
+     onrestart class_restart hal
+     onrestart class_restart early_hal
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     shutdown critical
+diff --git a/cmds/servicemanager/vndservicemanager.rc b/cmds/servicemanager/vndservicemanager.rc
+index 756f6c3..46af555 100644
+--- a/cmds/servicemanager/vndservicemanager.rc
++++ b/cmds/servicemanager/vndservicemanager.rc
+@@ -2,7 +2,7 @@ service vndservicemanager /vendor/bin/vndservicemanager /dev/vndbinder
+     class core
+     user system
+     group system readproc
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     onrestart class_restart main
+     onrestart class_restart hal
+     onrestart class_restart early_hal
+-- 
+2.47.3
+

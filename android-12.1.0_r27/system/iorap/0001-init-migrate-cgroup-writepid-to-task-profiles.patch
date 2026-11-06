@@ -1,0 +1,26 @@
+From d2153951d50766822915170e60d85d994d604991 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: I48d5140f49b43aa25d9f19cf3de72bdef3f615e1
+---
+ iorapd.rc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/iorapd.rc b/iorapd.rc
+index cb887ac..1f84e88 100644
+--- a/iorapd.rc
++++ b/iorapd.rc
+@@ -18,7 +18,7 @@ service iorapd /system/bin/iorapd
+     user iorapd
+     group iorapd
+     capabilities DAC_READ_SEARCH
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+ # TODO: should this be something else like performance/tasks?
+ # the main 'activity hint' thread needs to be fairly high priority to kick off
+ # tracing or prefetching asap.
+-- 
+2.47.3
+

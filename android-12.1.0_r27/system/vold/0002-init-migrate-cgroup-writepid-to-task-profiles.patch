@@ -1,0 +1,26 @@
+From 22c310a481fa7f17e5f4fbbcbf4f7359edf4c998 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: I274357253849adcb82e0584581f570503ed327cb
+---
+ vold.rc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/vold.rc b/vold.rc
+index a21d1d9..f584795 100644
+--- a/vold.rc
++++ b/vold.rc
+@@ -3,7 +3,7 @@ service vold /system/bin/vold \
+         --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0
+     class core
+     ioprio be 2
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+     shutdown critical
+     group root reserved_disk
+     reboot_on_failure reboot,vold-failed
+-- 
+2.47.3
+

@@ -1,0 +1,246 @@
+From 8f1a19fff5faa198b2e79d7b41349eb1045cdabc Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 6 Nov 2026 19:22:49 +0800
+Subject: [PATCH] init: migrate cgroup writepid to task profiles
+
+Change-Id: Ia69ef50b490913fb43a39a94b593d29f22ce5b86
+---
+ .../1.0/default/android.hardware.biometrics.face@1.0-service.rc | 2 +-
+ .../android.hardware.biometrics.fingerprint@2.1-service.rc      | 2 +-
+ cas/1.0/default/android.hardware.cas@1.0-service-lazy.rc        | 2 +-
+ cas/1.0/default/android.hardware.cas@1.0-service.rc             | 2 +-
+ cas/1.1/default/android.hardware.cas@1.1-service-lazy.rc        | 2 +-
+ cas/1.1/default/android.hardware.cas@1.1-service.rc             | 2 +-
+ cas/1.2/default/android.hardware.cas@1.2-service-lazy.rc        | 2 +-
+ cas/1.2/default/android.hardware.cas@1.2-service.rc             | 2 +-
+ drm/1.0/default/android.hardware.drm@1.0-service-lazy.rc        | 2 +-
+ drm/1.0/default/android.hardware.drm@1.0-service.rc             | 2 +-
+ .../default/android.hardware.graphics.composer@2.1-service.rc   | 2 +-
+ .../default/android.hardware.graphics.composer@2.2-service.rc   | 2 +-
+ .../default/android.hardware.graphics.composer@2.3-service.rc   | 2 +-
+ .../default/android.hardware.graphics.composer@2.4-service.rc   | 2 +-
+ .../multihal/android.hardware.sensors@2.0-service-multihal.rc   | 2 +-
+ .../multihal/android.hardware.sensors@2.1-service-multihal.rc   | 2 +-
+ .../1.0/default/android.hardware.tv.tuner@1.0-service-lazy.rc   | 2 +-
+ tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service.rc   | 2 +-
+ .../1.1/default/android.hardware.tv.tuner@1.1-service-lazy.rc   | 2 +-
+ tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service.rc   | 2 +-
+ 20 files changed, 20 insertions(+), 20 deletions(-)
+
+diff --git a/biometrics/face/1.0/default/android.hardware.biometrics.face@1.0-service.rc b/biometrics/face/1.0/default/android.hardware.biometrics.face@1.0-service.rc
+index 6c7362f..bfb69a3 100644
+--- a/biometrics/face/1.0/default/android.hardware.biometrics.face@1.0-service.rc
++++ b/biometrics/face/1.0/default/android.hardware.biometrics.face@1.0-service.rc
+@@ -5,6 +5,6 @@ service vendor.face-hal-1-0-default /vendor/bin/hw/android.hardware.biometrics.f
+     class late_start
+     user system
+     group system
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+     capabilities SYS_NICE
+     rlimit rtprio 10 10
+diff --git a/biometrics/fingerprint/2.1/default/android.hardware.biometrics.fingerprint@2.1-service.rc b/biometrics/fingerprint/2.1/default/android.hardware.biometrics.fingerprint@2.1-service.rc
+index 1667677..690ae72 100644
+--- a/biometrics/fingerprint/2.1/default/android.hardware.biometrics.fingerprint@2.1-service.rc
++++ b/biometrics/fingerprint/2.1/default/android.hardware.biometrics.fingerprint@2.1-service.rc
+@@ -5,4 +5,4 @@ service vendor.fps_hal /vendor/bin/hw/android.hardware.biometrics.fingerprint@2.
+     class late_start
+     user system
+     group system input uhid
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/cas/1.0/default/android.hardware.cas@1.0-service-lazy.rc b/cas/1.0/default/android.hardware.cas@1.0-service-lazy.rc
+index 443549a..f06c945 100644
+--- a/cas/1.0/default/android.hardware.cas@1.0-service-lazy.rc
++++ b/cas/1.0/default/android.hardware.cas@1.0-service-lazy.rc
+@@ -6,4 +6,4 @@ service vendor.cas-hal-1-0 /vendor/bin/hw/android.hardware.cas@1.0-service-lazy
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/cas/1.0/default/android.hardware.cas@1.0-service.rc b/cas/1.0/default/android.hardware.cas@1.0-service.rc
+index 74f2f96..825037b 100644
+--- a/cas/1.0/default/android.hardware.cas@1.0-service.rc
++++ b/cas/1.0/default/android.hardware.cas@1.0-service.rc
+@@ -3,4 +3,4 @@ service vendor.cas-hal-1-0 /vendor/bin/hw/android.hardware.cas@1.0-service
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/cas/1.1/default/android.hardware.cas@1.1-service-lazy.rc b/cas/1.1/default/android.hardware.cas@1.1-service-lazy.rc
+index 73c505d..33544a8 100644
+--- a/cas/1.1/default/android.hardware.cas@1.1-service-lazy.rc
++++ b/cas/1.1/default/android.hardware.cas@1.1-service-lazy.rc
+@@ -7,4 +7,4 @@ service vendor.cas-hal-1-1 /vendor/bin/hw/android.hardware.cas@1.1-service-lazy
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/cas/1.1/default/android.hardware.cas@1.1-service.rc b/cas/1.1/default/android.hardware.cas@1.1-service.rc
+index 4081fe1..d0eb3c3 100644
+--- a/cas/1.1/default/android.hardware.cas@1.1-service.rc
++++ b/cas/1.1/default/android.hardware.cas@1.1-service.rc
+@@ -3,4 +3,4 @@ service vendor.cas-hal-1-1 /vendor/bin/hw/android.hardware.cas@1.1-service
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/cas/1.2/default/android.hardware.cas@1.2-service-lazy.rc b/cas/1.2/default/android.hardware.cas@1.2-service-lazy.rc
+index 1c75100..3c6c5e6 100644
+--- a/cas/1.2/default/android.hardware.cas@1.2-service-lazy.rc
++++ b/cas/1.2/default/android.hardware.cas@1.2-service-lazy.rc
+@@ -8,4 +8,4 @@ service vendor.cas-hal-1-2 /vendor/bin/hw/android.hardware.cas@1.2-service-lazy
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/cas/1.2/default/android.hardware.cas@1.2-service.rc b/cas/1.2/default/android.hardware.cas@1.2-service.rc
+index d1c853e..bec5dcf 100644
+--- a/cas/1.2/default/android.hardware.cas@1.2-service.rc
++++ b/cas/1.2/default/android.hardware.cas@1.2-service.rc
+@@ -3,4 +3,4 @@ service vendor.cas-hal-1-2 /vendor/bin/hw/android.hardware.cas@1.2-service
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/1.0/default/android.hardware.drm@1.0-service-lazy.rc b/drm/1.0/default/android.hardware.drm@1.0-service-lazy.rc
+index 4b32f7f..d1ef5f2 100644
+--- a/drm/1.0/default/android.hardware.drm@1.0-service-lazy.rc
++++ b/drm/1.0/default/android.hardware.drm@1.0-service-lazy.rc
+@@ -7,4 +7,4 @@ service vendor.drm-hal-1-0 /vendor/bin/hw/android.hardware.drm@1.0-service-lazy
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/drm/1.0/default/android.hardware.drm@1.0-service.rc b/drm/1.0/default/android.hardware.drm@1.0-service.rc
+index 790eded..91973a6 100644
+--- a/drm/1.0/default/android.hardware.drm@1.0-service.rc
++++ b/drm/1.0/default/android.hardware.drm@1.0-service.rc
+@@ -5,4 +5,4 @@ service vendor.drm-hal-1-0 /vendor/bin/hw/android.hardware.drm@1.0-service
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+diff --git a/graphics/composer/2.1/default/android.hardware.graphics.composer@2.1-service.rc b/graphics/composer/2.1/default/android.hardware.graphics.composer@2.1-service.rc
+index cbd589a..3a908aa 100644
+--- a/graphics/composer/2.1/default/android.hardware.graphics.composer@2.1-service.rc
++++ b/graphics/composer/2.1/default/android.hardware.graphics.composer@2.1-service.rc
+@@ -5,4 +5,4 @@ service vendor.hwcomposer-2-1 /vendor/bin/hw/android.hardware.graphics.composer@
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/graphics/composer/2.2/default/android.hardware.graphics.composer@2.2-service.rc b/graphics/composer/2.2/default/android.hardware.graphics.composer@2.2-service.rc
+index efe6dad..2b2b360 100644
+--- a/graphics/composer/2.2/default/android.hardware.graphics.composer@2.2-service.rc
++++ b/graphics/composer/2.2/default/android.hardware.graphics.composer@2.2-service.rc
+@@ -4,4 +4,4 @@ service vendor.hwcomposer-2-2 /vendor/bin/hw/android.hardware.graphics.composer@
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/graphics/composer/2.3/default/android.hardware.graphics.composer@2.3-service.rc b/graphics/composer/2.3/default/android.hardware.graphics.composer@2.3-service.rc
+index 81ce890..9101908 100644
+--- a/graphics/composer/2.3/default/android.hardware.graphics.composer@2.3-service.rc
++++ b/graphics/composer/2.3/default/android.hardware.graphics.composer@2.3-service.rc
+@@ -4,4 +4,4 @@ service vendor.hwcomposer-2-3 /vendor/bin/hw/android.hardware.graphics.composer@
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/graphics/composer/2.4/default/android.hardware.graphics.composer@2.4-service.rc b/graphics/composer/2.4/default/android.hardware.graphics.composer@2.4-service.rc
+index a296b0a..2ee616d 100644
+--- a/graphics/composer/2.4/default/android.hardware.graphics.composer@2.4-service.rc
++++ b/graphics/composer/2.4/default/android.hardware.graphics.composer@2.4-service.rc
+@@ -4,4 +4,4 @@ service vendor.hwcomposer-2-4 /vendor/bin/hw/android.hardware.graphics.composer@
+     group graphics drmrpc
+     capabilities SYS_NICE
+     onrestart restart surfaceflinger
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/sensors/2.0/multihal/android.hardware.sensors@2.0-service-multihal.rc b/sensors/2.0/multihal/android.hardware.sensors@2.0-service-multihal.rc
+index 0b3d4c2..db5d4a2 100644
+--- a/sensors/2.0/multihal/android.hardware.sensors@2.0-service-multihal.rc
++++ b/sensors/2.0/multihal/android.hardware.sensors@2.0-service-multihal.rc
+@@ -2,6 +2,6 @@ service vendor.sensors-hal-2-0-multihal /vendor/bin/hw/android.hardware.sensors@
+     class hal
+     user system
+     group system wakelock context_hub
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     capabilities BLOCK_SUSPEND
+     rlimit rtprio 10 10
+diff --git a/sensors/2.1/multihal/android.hardware.sensors@2.1-service-multihal.rc b/sensors/2.1/multihal/android.hardware.sensors@2.1-service-multihal.rc
+index fc99ee7..60170e3 100644
+--- a/sensors/2.1/multihal/android.hardware.sensors@2.1-service-multihal.rc
++++ b/sensors/2.1/multihal/android.hardware.sensors@2.1-service-multihal.rc
+@@ -2,6 +2,6 @@ service vendor.sensors-hal-2-1-multihal /vendor/bin/hw/android.hardware.sensors@
+     class hal
+     user system
+     group system wakelock context_hub
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     capabilities BLOCK_SUSPEND
+     rlimit rtprio 10 10
+diff --git a/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service-lazy.rc b/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service-lazy.rc
+index ad72fae..e3b667e 100644
+--- a/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service-lazy.rc
++++ b/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service-lazy.rc
+@@ -6,4 +6,4 @@ service vendor.tuner-hal-1-0 /vendor/bin/hw/android.hardware.tv.tuner@1.0-servic
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
+\ No newline at end of file
++    task_profiles CPUSET_SP_FOREGROUND
+\ No newline at end of file
+diff --git a/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service.rc b/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service.rc
+index 6d59ed7..84ff081 100644
+--- a/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service.rc
++++ b/tv/tuner/1.0/default/android.hardware.tv.tuner@1.0-service.rc
+@@ -3,4 +3,4 @@ service vendor.tuner-hal-1-0 /vendor/bin/hw/android.hardware.tv.tuner@1.0-servic
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
+\ No newline at end of file
++    task_profiles CPUSET_SP_FOREGROUND
+\ No newline at end of file
+diff --git a/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service-lazy.rc b/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service-lazy.rc
+index abff430..1cfd82e 100644
+--- a/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service-lazy.rc
++++ b/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service-lazy.rc
+@@ -7,4 +7,4 @@ service vendor.tuner-hal-1-1 /vendor/bin/hw/android.hardware.tv.tuner@1.1-servic
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
+\ No newline at end of file
++    task_profiles CPUSET_SP_FOREGROUND
+\ No newline at end of file
+diff --git a/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service.rc b/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service.rc
+index 3718a93..15c73a7 100644
+--- a/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service.rc
++++ b/tv/tuner/1.1/default/android.hardware.tv.tuner@1.1-service.rc
+@@ -3,4 +3,4 @@ service vendor.tuner-hal-1-1 /vendor/bin/hw/android.hardware.tv.tuner@1.1-servic
+     user media
+     group mediadrm drmrpc
+     ioprio rt 4
+-    writepid /dev/cpuset/foreground/tasks
+\ No newline at end of file
++    task_profiles CPUSET_SP_FOREGROUND
+\ No newline at end of file
+-- 
+2.47.3
+
