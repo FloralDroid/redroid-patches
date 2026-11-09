@@ -1,0 +1,170 @@
+From: 5656565566 <contact@home56.top>
+Subject: [PATCH] sepolicy: Allow delegated cgroup v2 thread scheduling
+
+Permit App domains to resolve and update their existing delegated
+thread scheduling files. Keep cgroup v1 access forbidden and retain
+DAC ownership of process controls and ancestor resource budgets.
+Match the existing cgroup MLS object classification so categorized Apps
+can use those TE permissions under enforcing SELinux.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+
+diff --git a/prebuilts/api/31.0/private/app.te b/prebuilts/api/31.0/private/app.te
+index 2b3554f8805f9ee51cafed9cb8e3e25e3c586f34..9d1c95036c9bc7957595fb0680584508c6e84e24 100644
+--- a/prebuilts/api/31.0/private/app.te
++++ b/prebuilts/api/31.0/private/app.te
+@@ -1,3 +1,7 @@
++# Thread scheduling uses only files delegated by Android DAC ownership.
++allow appdomain cgroup_v2:dir getattr;
++allow appdomain cgroup_v2:file { getattr open read write };
++
+ # Allow apps to read the Test Harness Mode property. This property is used in
+ # the implementation of ActivityManager.isDeviceInTestHarnessMode()
+ get_prop(appdomain, test_harness_prop)
+diff --git a/prebuilts/api/31.0/private/app_neverallows.te b/prebuilts/api/31.0/private/app_neverallows.te
+index c7fa4e8c5081986b7cabd525b5803412a0ad069e..2d687059cf22674fc874241fca0303bbf114b83d 100644
+--- a/prebuilts/api/31.0/private/app_neverallows.te
++++ b/prebuilts/api/31.0/private/app_neverallows.te
+@@ -231,7 +231,8 @@ neverallow all_untrusted_apps proc_tty_drivers:file ~r_file_perms;
+ 
+ # Untrusted apps are not allowed to use cgroups.
+ neverallow all_untrusted_apps cgroup:file *;
+-neverallow all_untrusted_apps cgroup_v2:file *;
++# Process-local scheduling uses DAC-delegated cgroup v2 files.
++neverallow all_untrusted_apps cgroup_v2:file ~{ getattr open read write };
+ 
+ # /mnt/sdcard symlink was supposed to have been removed in Gingerbread. Apps
+ # must not use it.
+diff --git a/prebuilts/api/31.0/private/priv_app.te b/prebuilts/api/31.0/private/priv_app.te
+index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465ab999e6c 100644
+--- a/prebuilts/api/31.0/private/priv_app.te
++++ b/prebuilts/api/31.0/private/priv_app.te
+@@ -250,7 +250,8 @@ neverallow priv_app trace_data_file:file { no_w_file_perms open };
+ 
+ # Do not allow priv_app access to cgroups.
+ neverallow priv_app cgroup:file *;
+-neverallow priv_app cgroup_v2:file *;
++# Process-local scheduling uses DAC-delegated cgroup v2 files.
++neverallow priv_app cgroup_v2:file ~{ getattr open read write };
+ 
+ # Do not allow loading executable code from non-privileged
+ # application home directories. Code loading across a security boundary
+diff --git a/prebuilts/api/31.0/public/file.te b/prebuilts/api/31.0/public/file.te
+index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e099a22e6e4 100644
+--- a/prebuilts/api/31.0/public/file.te
++++ b/prebuilts/api/31.0/public/file.te
+@@ -81,7 +81,7 @@ type proc_vendor_sched, proc_type, fs_type;
+ type selinuxfs, fs_type, mlstrustedobject;
+ type fusectlfs, fs_type;
+ type cgroup, fs_type, mlstrustedobject;
+-type cgroup_v2, fs_type;
++type cgroup_v2, fs_type, mlstrustedobject;
+ type sysfs, fs_type, sysfs_type, mlstrustedobject;
+ type sysfs_android_usb, fs_type, sysfs_type;
+ type sysfs_uio, sysfs_type, fs_type;
+diff --git a/prebuilts/api/32.0/private/app.te b/prebuilts/api/32.0/private/app.te
+index 30c76d330be32ccee7c5011a6060f98aaa11707b..f77ff21afc472ed1fbf2132eb118c3dc889c05d8 100644
+--- a/prebuilts/api/32.0/private/app.te
++++ b/prebuilts/api/32.0/private/app.te
+@@ -1,3 +1,7 @@
++# Thread scheduling uses only files delegated by Android DAC ownership.
++allow appdomain cgroup_v2:dir getattr;
++allow appdomain cgroup_v2:file { getattr open read write };
++
+ # Allow apps to read the Test Harness Mode property. This property is used in
+ # the implementation of ActivityManager.isDeviceInTestHarnessMode()
+ get_prop(appdomain, test_harness_prop)
+diff --git a/prebuilts/api/32.0/private/app_neverallows.te b/prebuilts/api/32.0/private/app_neverallows.te
+index c7fa4e8c5081986b7cabd525b5803412a0ad069e..2d687059cf22674fc874241fca0303bbf114b83d 100644
+--- a/prebuilts/api/32.0/private/app_neverallows.te
++++ b/prebuilts/api/32.0/private/app_neverallows.te
+@@ -231,7 +231,8 @@ neverallow all_untrusted_apps proc_tty_drivers:file ~r_file_perms;
+ 
+ # Untrusted apps are not allowed to use cgroups.
+ neverallow all_untrusted_apps cgroup:file *;
+-neverallow all_untrusted_apps cgroup_v2:file *;
++# Process-local scheduling uses DAC-delegated cgroup v2 files.
++neverallow all_untrusted_apps cgroup_v2:file ~{ getattr open read write };
+ 
+ # /mnt/sdcard symlink was supposed to have been removed in Gingerbread. Apps
+ # must not use it.
+diff --git a/prebuilts/api/32.0/private/priv_app.te b/prebuilts/api/32.0/private/priv_app.te
+index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465ab999e6c 100644
+--- a/prebuilts/api/32.0/private/priv_app.te
++++ b/prebuilts/api/32.0/private/priv_app.te
+@@ -250,7 +250,8 @@ neverallow priv_app trace_data_file:file { no_w_file_perms open };
+ 
+ # Do not allow priv_app access to cgroups.
+ neverallow priv_app cgroup:file *;
+-neverallow priv_app cgroup_v2:file *;
++# Process-local scheduling uses DAC-delegated cgroup v2 files.
++neverallow priv_app cgroup_v2:file ~{ getattr open read write };
+ 
+ # Do not allow loading executable code from non-privileged
+ # application home directories. Code loading across a security boundary
+diff --git a/prebuilts/api/32.0/public/file.te b/prebuilts/api/32.0/public/file.te
+index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e099a22e6e4 100644
+--- a/prebuilts/api/32.0/public/file.te
++++ b/prebuilts/api/32.0/public/file.te
+@@ -81,7 +81,7 @@ type proc_vendor_sched, proc_type, fs_type;
+ type selinuxfs, fs_type, mlstrustedobject;
+ type fusectlfs, fs_type;
+ type cgroup, fs_type, mlstrustedobject;
+-type cgroup_v2, fs_type;
++type cgroup_v2, fs_type, mlstrustedobject;
+ type sysfs, fs_type, sysfs_type, mlstrustedobject;
+ type sysfs_android_usb, fs_type, sysfs_type;
+ type sysfs_uio, sysfs_type, fs_type;
+diff --git a/private/app.te b/private/app.te
+index 30c76d330be32ccee7c5011a6060f98aaa11707b..f77ff21afc472ed1fbf2132eb118c3dc889c05d8 100644
+--- a/private/app.te
++++ b/private/app.te
+@@ -1,3 +1,7 @@
++# Thread scheduling uses only files delegated by Android DAC ownership.
++allow appdomain cgroup_v2:dir getattr;
++allow appdomain cgroup_v2:file { getattr open read write };
++
+ # Allow apps to read the Test Harness Mode property. This property is used in
+ # the implementation of ActivityManager.isDeviceInTestHarnessMode()
+ get_prop(appdomain, test_harness_prop)
+diff --git a/private/app_neverallows.te b/private/app_neverallows.te
+index c7fa4e8c5081986b7cabd525b5803412a0ad069e..2d687059cf22674fc874241fca0303bbf114b83d 100644
+--- a/private/app_neverallows.te
++++ b/private/app_neverallows.te
+@@ -231,7 +231,8 @@ neverallow all_untrusted_apps proc_tty_drivers:file ~r_file_perms;
+ 
+ # Untrusted apps are not allowed to use cgroups.
+ neverallow all_untrusted_apps cgroup:file *;
+-neverallow all_untrusted_apps cgroup_v2:file *;
++# Process-local scheduling uses DAC-delegated cgroup v2 files.
++neverallow all_untrusted_apps cgroup_v2:file ~{ getattr open read write };
+ 
+ # /mnt/sdcard symlink was supposed to have been removed in Gingerbread. Apps
+ # must not use it.
+diff --git a/private/priv_app.te b/private/priv_app.te
+index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465ab999e6c 100644
+--- a/private/priv_app.te
++++ b/private/priv_app.te
+@@ -250,7 +250,8 @@ neverallow priv_app trace_data_file:file { no_w_file_perms open };
+ 
+ # Do not allow priv_app access to cgroups.
+ neverallow priv_app cgroup:file *;
+-neverallow priv_app cgroup_v2:file *;
++# Process-local scheduling uses DAC-delegated cgroup v2 files.
++neverallow priv_app cgroup_v2:file ~{ getattr open read write };
+ 
+ # Do not allow loading executable code from non-privileged
+ # application home directories. Code loading across a security boundary
+diff --git a/public/file.te b/public/file.te
+index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e099a22e6e4 100644
+--- a/public/file.te
++++ b/public/file.te
+@@ -81,7 +81,7 @@ type proc_vendor_sched, proc_type, fs_type;
+ type selinuxfs, fs_type, mlstrustedobject;
+ type fusectlfs, fs_type;
+ type cgroup, fs_type, mlstrustedobject;
+-type cgroup_v2, fs_type;
++type cgroup_v2, fs_type, mlstrustedobject;
+ type sysfs, fs_type, sysfs_type, mlstrustedobject;
+ type sysfs_android_usb, fs_type, sysfs_type;
+ type sysfs_uio, sysfs_type, fs_type;

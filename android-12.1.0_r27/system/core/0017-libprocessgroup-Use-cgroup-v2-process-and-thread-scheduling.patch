@@ -1,286 +1,36 @@
-From 758b37ff979916fc488df60d4fc9b55009234bd0 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
-Date: Fri, 6 Nov 2026 13:11:29 +0800
-Subject: [PATCH] system: configure cgroup v2 CPU scheduling
+Subject: [PATCH] libprocessgroup: use cgroup v2 process and thread scheduling
 
-Change-Id: Id96f966dc094d68fdf0b104dc7e931a25e3a78bb
+Use a unified cgroup v2 hierarchy for process groups and threaded
+scheduling profiles, including process timer slack. Delegate thread
+membership, weight and minimum utilization clamps to the process UID.
+Restore requested directory modes after creation so the creator umask
+cannot prevent access. Retain process-domain and ancestor ownership.
+
+Signed-off-by: 5656565566 <contact@home56.top>
 ---
- debuggerd/tombstoned/tombstoned.rc            |   2 +-
- gatekeeperd/gatekeeperd.rc                    |   2 +-
- init/service.cpp                              |  41 +--
- init/service.h                                |   3 -
- init/service_parser.cpp                       |  25 +-
- init/service_parser.h                         |   2 -
- init/service_utils.cpp                        |  27 --
- libprocessgroup/cgroup_map.cpp                |  52 +++-
- libprocessgroup/cgroup_map.h                  |   1 +
- .../include/processgroup/processgroup.h       |   2 -
- libprocessgroup/processgroup.cpp              | 118 ++++----
- libprocessgroup/profiles/Android.bp           |  46 ---
- libprocessgroup/profiles/cgroups.json         |  43 +--
- libprocessgroup/profiles/cgroups_28.json      |  11 -
- libprocessgroup/profiles/cgroups_29.json      |  11 -
- libprocessgroup/profiles/cgroups_30.json      |  12 -
- libprocessgroup/profiles/task_profiles.json   | 265 +++++++++---------
- .../profiles/task_profiles_28.json            | 160 -----------
- .../profiles/task_profiles_29.json            | 160 -----------
- .../profiles/task_profiles_30.json            | 160 -----------
- libprocessgroup/profiles/test.cpp             |  34 +++
- libprocessgroup/sched_policy.cpp              |  36 +--
- libprocessgroup/setup/cgroup_map_write.cpp    | 147 ++++------
- libprocessgroup/task_profiles.cpp             | 170 +++++++----
- libprocessgroup/task_profiles.h               |  10 +-
- llkd/llkd-debuggable.rc                       |   2 +-
- llkd/llkd.rc                                  |   2 +-
- rootdir/init.zygote32.rc                      |   2 +-
- rootdir/init.zygote64.rc                      |   2 +-
- storaged/storaged.rc                          |   2 +-
- 30 files changed, 502 insertions(+), 1048 deletions(-)
- delete mode 100644 libprocessgroup/profiles/cgroups_28.json
- delete mode 100644 libprocessgroup/profiles/cgroups_29.json
- delete mode 100644 libprocessgroup/profiles/cgroups_30.json
- delete mode 100644 libprocessgroup/profiles/task_profiles_28.json
- delete mode 100644 libprocessgroup/profiles/task_profiles_29.json
- delete mode 100644 libprocessgroup/profiles/task_profiles_30.json
+ libprocessgroup/cgroup_map.cpp                     |  52 +++-
+ libprocessgroup/cgroup_map.h                       |   1 +
+ .../include/processgroup/processgroup.h            |   2 -
+ libprocessgroup/processgroup.cpp                   | 126 ++++++----
+ libprocessgroup/profiles/Android.bp                |  46 ----
+ libprocessgroup/profiles/cgroups.json              |  43 +---
+ libprocessgroup/profiles/cgroups_28.json           |  11 -
+ libprocessgroup/profiles/cgroups_29.json           |  11 -
+ libprocessgroup/profiles/cgroups_30.json           |  12 -
+ libprocessgroup/profiles/task_profiles.json        | 265 +++++++++++----------
+ libprocessgroup/profiles/task_profiles_28.json     | 160 -------------
+ libprocessgroup/profiles/task_profiles_29.json     | 160 -------------
+ libprocessgroup/profiles/task_profiles_30.json     | 160 -------------
+ libprocessgroup/profiles/test.cpp                  |  34 +++
+ libprocessgroup/sched_policy.cpp                   |  36 +--
+ libprocessgroup/setup/cgroup_map_write.cpp         | 147 ++++--------
+ libprocessgroup/task_profiles.cpp                  | 175 +++++++++-----
+ libprocessgroup/task_profiles.h                    |  12 +-
+ 18 files changed, 480 insertions(+), 973 deletions(-)
 
-diff --git a/debuggerd/tombstoned/tombstoned.rc b/debuggerd/tombstoned/tombstoned.rc
-index c39f4e4..6fee7d5 100644
---- a/debuggerd/tombstoned/tombstoned.rc
-+++ b/debuggerd/tombstoned/tombstoned.rc
-@@ -5,4 +5,4 @@ service tombstoned /system/bin/tombstoned
-     socket tombstoned_crash seqpacket 0666 system system
-     socket tombstoned_intercept seqpacket 0666 system system
-     socket tombstoned_java_trace seqpacket 0666 system system
--    writepid /dev/cpuset/system-background/tasks
-+    task_profiles CPUSET_SP_SYSTEM
-diff --git a/gatekeeperd/gatekeeperd.rc b/gatekeeperd/gatekeeperd.rc
-index 8b126d5..71647cc 100644
---- a/gatekeeperd/gatekeeperd.rc
-+++ b/gatekeeperd/gatekeeperd.rc
-@@ -1,4 +1,4 @@
- service gatekeeperd /system/bin/gatekeeperd /data/misc/gatekeeper
-     class late_start
-     user system
--    writepid /dev/cpuset/system-background/tasks
-+    task_profiles CPUSET_SP_SYSTEM
-diff --git a/init/service.cpp b/init/service.cpp
-index 414eae9..132cdb5 100644
---- a/init/service.cpp
-+++ b/init/service.cpp
-@@ -506,6 +506,10 @@ Result<void> Service::Start() {
-         }
-     }
- 
-+    android::base::unique_fd cgroup_ready_read, cgroup_ready_write;
-+    if (!android::base::Pipe(&cgroup_ready_read, &cgroup_ready_write)) {
-+        return ErrnoError() << "Failed to create cgroup setup pipe";
-+    }
-     pid_t pid = -1;
-     if (namespaces_.flags) {
-         pid = clone(nullptr, nullptr, namespaces_.flags | SIGCHLD, nullptr);
-@@ -514,6 +518,12 @@ Result<void> Service::Start() {
-     }
- 
-     if (pid == 0) {
-+        cgroup_ready_write.reset();
-+        char ready;
-+        // The child must enter its process domain before applying profiles or
-+        // dropping the privileges needed to configure its scheduling groups.
-+        if (TEMP_FAILURE_RETRY(read(cgroup_ready_read.get(), &ready, 1)) != 1) _exit(127);
-+        cgroup_ready_read.reset();
-         umask(077);
- 
-         if (auto result = EnterNamespaces(namespaces_, name_, override_mount_namespace);
-@@ -534,8 +544,8 @@ Result<void> Service::Start() {
-             LOG(ERROR) << "failed to write pid to files: " << result.error();
-         }
- 
--        if (task_profiles_.size() > 0 && !SetTaskProfiles(getpid(), task_profiles_)) {
--            LOG(ERROR) << "failed to set task profiles";
-+        if (!task_profiles_.empty() && !SetProcessProfiles(proc_attr_.uid, getpid(), task_profiles_)) {
-+            LOG(FATAL) << "failed to set task profiles";
-         }
- 
-         // As requested, set our gid, supplemental gids, uid, context, and
-@@ -550,6 +560,7 @@ Result<void> Service::Start() {
-         _exit(127);
-     }
- 
-+    cgroup_ready_read.reset();
-     if (pid < 0) {
-         pid_ = 0;
-         return ErrnoError() << "Failed to fork";
-@@ -569,25 +580,12 @@ Result<void> Service::Start() {
-     start_order_ = next_start_order_++;
-     process_cgroup_empty_ = false;
- 
--    bool use_memcg = swappiness_ != -1 || soft_limit_in_bytes_ != -1 || limit_in_bytes_ != -1 ||
--                      limit_percent_ != -1 || !limit_property_.empty();
-+    bool use_memcg = limit_in_bytes_ != -1 || limit_percent_ != -1 || !limit_property_.empty();
-     errno = -createProcessGroup(proc_attr_.uid, pid_, use_memcg);
-     if (errno != 0) {
--        PLOG(ERROR) << "createProcessGroup(" << proc_attr_.uid << ", " << pid_
--                    << ") failed for service '" << name_ << "'";
-+        return ErrnoError() << "createProcessGroup(" << proc_attr_.uid << ", " << pid_
-+                            << ") failed for service '" << name_ << "'";
-     } else if (use_memcg) {
--        if (swappiness_ != -1) {
--            if (!setProcessGroupSwappiness(proc_attr_.uid, pid_, swappiness_)) {
--                PLOG(ERROR) << "setProcessGroupSwappiness failed";
--            }
--        }
--
--        if (soft_limit_in_bytes_ != -1) {
--            if (!setProcessGroupSoftLimit(proc_attr_.uid, pid_, soft_limit_in_bytes_)) {
--                PLOG(ERROR) << "setProcessGroupSoftLimit failed";
--            }
--        }
--
-         size_t computed_limit_in_bytes = limit_in_bytes_;
-         if (limit_percent_ != -1) {
-             long page_size = sysconf(_SC_PAGESIZE);
-@@ -611,11 +609,16 @@ Result<void> Service::Start() {
- 
-         if (computed_limit_in_bytes != size_t(-1)) {
-             if (!setProcessGroupLimit(proc_attr_.uid, pid_, computed_limit_in_bytes)) {
--                PLOG(ERROR) << "setProcessGroupLimit failed";
-+                return ErrnoError() << "setProcessGroupLimit failed";
-             }
-         }
-     }
- 
-+    if (TEMP_FAILURE_RETRY(write(cgroup_ready_write.get(), "1", 1)) != 1) {
-+        return ErrnoError() << "Failed to release service after cgroup setup";
-+    }
-+    cgroup_ready_write.reset();
-+
-     if (oom_score_adjust_ != DEFAULT_OOM_SCORE_ADJUST) {
-         LmkdRegister(name_, proc_attr_.uid, pid_, oom_score_adjust_);
-     }
-diff --git a/init/service.h b/init/service.h
-index 043555f..6011dfc 100644
---- a/init/service.h
-+++ b/init/service.h
-@@ -183,9 +183,6 @@ class Service {
- 
-     int oom_score_adjust_;
- 
--    int swappiness_ = -1;
--    int soft_limit_in_bytes_ = -1;
--
-     int limit_in_bytes_ = -1;
-     int limit_percent_ = -1;
-     std::string limit_property_;
-diff --git a/init/service_parser.cpp b/init/service_parser.cpp
-index 57c311a..57e95e1 100644
---- a/init/service_parser.cpp
-+++ b/init/service_parser.cpp
-@@ -308,13 +308,6 @@ Result<void> ServiceParser::ParseOverride(std::vector<std::string>&& args) {
-     return {};
- }
- 
--Result<void> ServiceParser::ParseMemcgSwappiness(std::vector<std::string>&& args) {
--    if (!ParseInt(args[1], &service_->swappiness_, 0)) {
--        return Error() << "swappiness value must be equal or greater than 0";
--    }
--    return {};
--}
--
- Result<void> ServiceParser::ParseMemcgLimitInBytes(std::vector<std::string>&& args) {
-     if (!ParseInt(args[1], &service_->limit_in_bytes_, 0)) {
-         return Error() << "limit_in_bytes value must be equal or greater than 0";
-@@ -334,13 +327,6 @@ Result<void> ServiceParser::ParseMemcgLimitProperty(std::vector<std::string>&& a
-     return {};
- }
- 
--Result<void> ServiceParser::ParseMemcgSoftLimitInBytes(std::vector<std::string>&& args) {
--    if (!ParseInt(args[1], &service_->soft_limit_in_bytes_, 0)) {
--        return Error() << "soft_limit_in_bytes value must be equal or greater than 0";
--    }
--    return {};
--}
--
- Result<void> ServiceParser::ParseProcessRlimit(std::vector<std::string>&& args) {
-     auto rlimit = ParseRlimit(args);
-     if (!rlimit.ok()) return rlimit.error();
-@@ -523,6 +509,14 @@ Result<void> ServiceParser::ParseUser(std::vector<std::string>&& args) {
- 
- Result<void> ServiceParser::ParseWritepid(std::vector<std::string>&& args) {
-     args.erase(args.begin());
-+    for (const auto& path : args) {
-+        if (android::base::EndsWith(path, "/tasks") || StartsWith(path, "/acct/") ||
-+            StartsWith(path, "/dev/cpuset/") || StartsWith(path, "/dev/cpuctl/") ||
-+            StartsWith(path, "/dev/stune/") || StartsWith(path, "/dev/memcg/") ||
-+            StartsWith(path, "/dev/blkio/")) {
-+            return Error() << "cgroup v1 writepid is unsupported; use task_profiles";
-+        }
-+    }
-     service_->writepid_files_ = std::move(args);
-     return {};
- }
-@@ -550,9 +544,6 @@ const KeywordMap<ServiceParser::OptionParser>& ServiceParser::GetParserMap() con
-         {"memcg.limit_in_bytes",    {1,     1,    &ServiceParser::ParseMemcgLimitInBytes}},
-         {"memcg.limit_percent",     {1,     1,    &ServiceParser::ParseMemcgLimitPercent}},
-         {"memcg.limit_property",    {1,     1,    &ServiceParser::ParseMemcgLimitProperty}},
--        {"memcg.soft_limit_in_bytes",
--                                    {1,     1,    &ServiceParser::ParseMemcgSoftLimitInBytes}},
--        {"memcg.swappiness",        {1,     1,    &ServiceParser::ParseMemcgSwappiness}},
-         {"namespace",               {1,     2,    &ServiceParser::ParseNamespace}},
-         {"oneshot",                 {0,     0,    &ServiceParser::ParseOneshot}},
-         {"onrestart",               {1,     kMax, &ServiceParser::ParseOnrestart}},
-diff --git a/init/service_parser.h b/init/service_parser.h
-index 0fd2da5..6a4eca5 100644
---- a/init/service_parser.h
-+++ b/init/service_parser.h
-@@ -66,8 +66,6 @@ class ServiceParser : public SectionParser {
-     Result<void> ParseMemcgLimitInBytes(std::vector<std::string>&& args);
-     Result<void> ParseMemcgLimitPercent(std::vector<std::string>&& args);
-     Result<void> ParseMemcgLimitProperty(std::vector<std::string>&& args);
--    Result<void> ParseMemcgSoftLimitInBytes(std::vector<std::string>&& args);
--    Result<void> ParseMemcgSwappiness(std::vector<std::string>&& args);
-     Result<void> ParseNamespace(std::vector<std::string>&& args);
-     Result<void> ParseProcessRlimit(std::vector<std::string>&& args);
-     Result<void> ParseRebootOnFailure(std::vector<std::string>&& args);
-diff --git a/init/service_utils.cpp b/init/service_utils.cpp
-index f2383d7..727fe88 100644
---- a/init/service_utils.cpp
-+++ b/init/service_utils.cpp
-@@ -280,33 +280,6 @@ Result<void> SetProcessAttributes(const ProcessAttributes& attr) {
- }
- 
- Result<void> WritePidToFiles(std::vector<std::string>* files) {
--    // See if there were "writepid" instructions to write to files under cpuset path.
--    std::string cpuset_path;
--    if (CgroupGetControllerPath("cpuset", &cpuset_path)) {
--        auto cpuset_predicate = [&cpuset_path](const std::string& path) {
--            return StartsWith(path, cpuset_path + "/");
--        };
--        auto iter = std::find_if(files->begin(), files->end(), cpuset_predicate);
--        if (iter == files->end()) {
--            // There were no "writepid" instructions for cpusets, check if the system default
--            // cpuset is specified to be used for the process.
--            std::string default_cpuset = GetProperty("ro.cpuset.default", "");
--            if (!default_cpuset.empty()) {
--                // Make sure the cpuset name starts and ends with '/'.
--                // A single '/' means the 'root' cpuset.
--                if (default_cpuset.front() != '/') {
--                    default_cpuset.insert(0, 1, '/');
--                }
--                if (default_cpuset.back() != '/') {
--                    default_cpuset.push_back('/');
--                }
--                files->push_back(
--                        StringPrintf("%s%stasks", cpuset_path.c_str(), default_cpuset.c_str()));
--            }
--        }
--    } else {
--        LOG(ERROR) << "cpuset cgroup controller is not mounted!";
--    }
-     std::string pid_str = std::to_string(getpid());
-     for (const auto& file : *files) {
-         if (!WriteStringToFile(pid_str, file)) {
 diff --git a/libprocessgroup/cgroup_map.cpp b/libprocessgroup/cgroup_map.cpp
-index 5ca0967..98d8192 100644
+index 5ca096787c25c1c7fce8b3360f3c717bb7446641..98d819259007f89306a5859ad9893a3484fd184f 100644
 --- a/libprocessgroup/cgroup_map.cpp
 +++ b/libprocessgroup/cgroup_map.cpp
 @@ -34,6 +34,7 @@
@@ -379,7 +129,7 @@ index 5ca0967..98d8192 100644
      if (!LoadRcFile()) {
          LOG(ERROR) << "CgroupMap::LoadRcFile called for [" << getpid() << "] failed";
 diff --git a/libprocessgroup/cgroup_map.h b/libprocessgroup/cgroup_map.h
-index 427d71b..80b7268 100644
+index 427d71b40679d42297a8e1e5206b3e1a76074cdd..80b726867c6455dddaf3eab98a4fffddd43e780c 100644
 --- a/libprocessgroup/cgroup_map.h
 +++ b/libprocessgroup/cgroup_map.h
 @@ -44,6 +44,7 @@ class CgroupController {
@@ -391,7 +141,7 @@ index 427d71b..80b7268 100644
      enum ControllerState {
          UNKNOWN = 0,
 diff --git a/libprocessgroup/include/processgroup/processgroup.h b/libprocessgroup/include/processgroup/processgroup.h
-index fa2642d..71d4dd9 100644
+index fa2642d863ab68a53caaa3c6a3554bb9f2325472..71d4dd9b276dcc4e3c9f7e48327117450d311ebc 100644
 --- a/libprocessgroup/include/processgroup/processgroup.h
 +++ b/libprocessgroup/include/processgroup/processgroup.h
 @@ -59,8 +59,6 @@ int createProcessGroup(uid_t uid, int initialPid, bool memControl = false);
@@ -404,7 +154,7 @@ index fa2642d..71d4dd9 100644
  
  void removeAllProcessGroups(void);
 diff --git a/libprocessgroup/processgroup.cpp b/libprocessgroup/processgroup.cpp
-index c824376..0108087 100644
+index c824376e5d2522efc019268b33922c8e32b8eaa3..68b1121454ecbf35ca1a2f9b3654d48b1bbf39d5 100644
 --- a/libprocessgroup/processgroup.cpp
 +++ b/libprocessgroup/processgroup.cpp
 @@ -77,11 +77,7 @@ bool CgroupGetAttributePath(const std::string& attr_name, std::string* path) {
@@ -536,15 +286,15 @@ index c824376..0108087 100644
      auto uid_pid_path = ConvertUidPidToPath(cgroup.c_str(), uid, initialPid);
  
      if (!MkdirAndChown(uid_pid_path, cgroup_mode, cgroup_uid, cgroup_gid)) {
-@@ -452,28 +466,38 @@ static int createProcessGroupInternal(uid_t uid, int initialPid, std::string cgr
+@@ -452,28 +466,46 @@ static int createProcessGroupInternal(uid_t uid, int initialPid, std::string cgr
          PLOG(ERROR) << "Failed to write '" << initialPid << "' to " << uid_pid_procs_file;
      }
  
 -    return ret;
 +    if (ret != 0) return ret;
 +    if (!TaskProfiles::GetInstance().PrepareProcessGroup(initialPid)) return -errno;
-+    // Delegate membership within this process domain to its UID. Ancestors and
-+    // resource controls remain owned by Android's system user.
++    // Delegate membership and local thread scheduling to this process UID.
++    // Process-domain budgets remain owned by Android's system user.
 +    std::vector<std::string> directories{uid_pid_path};
 +    for (size_t i = 0; i < directories.size(); ++i) {
 +        std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(directories[i].c_str()), closedir);
@@ -559,6 +309,14 @@ index c824376..0108087 100644
 +            const std::string path = directories[i] + "/" + file;
 +            if (chown(path.c_str(), uid, AID_SYSTEM) != 0 || chmod(path.c_str(), 0660) != 0) {
 +                return -errno;
++            }
++        }
++        if (directories[i] != uid_pid_path) {
++            for (const char* file : {"cpu.weight", "cpu.uclamp.min"}) {
++                const std::string path = directories[i] + "/" + file;
++                if (chown(path.c_str(), uid, AID_SYSTEM) != 0 || chmod(path.c_str(), 0660) != 0) {
++                    return -errno;
++                }
 +            }
 +        }
 +    }
@@ -593,7 +351,7 @@ index c824376..0108087 100644
  }
  
  static bool SetProcessGroupValue(int tid, const std::string& attr_name, int64_t value) {
-@@ -495,14 +519,6 @@ static bool SetProcessGroupValue(int tid, const std::string& attr_name, int64_t
+@@ -495,14 +527,6 @@ static bool SetProcessGroupValue(int tid, const std::string& attr_name, int64_t
      return true;
  }
  
@@ -609,7 +367,7 @@ index c824376..0108087 100644
      return SetProcessGroupValue(pid, "MemLimit", limit_in_bytes);
  }
 diff --git a/libprocessgroup/profiles/Android.bp b/libprocessgroup/profiles/Android.bp
-index 885971a..1ec9f7f 100644
+index 885971a7a34f97642d0a463945350b9da297f376..1ec9f7f3b3c0da18fe130b191c7d51e2dd31c6de 100644
 --- a/libprocessgroup/profiles/Android.bp
 +++ b/libprocessgroup/profiles/Android.bp
 @@ -19,11 +19,6 @@ package {
@@ -676,7 +434,7 @@ index 885971a..1ec9f7f 100644
  
  cc_defaults {
 diff --git a/libprocessgroup/profiles/cgroups.json b/libprocessgroup/profiles/cgroups.json
-index 0634220..15c3ac7 100644
+index 06342209105bbb2acbcc6454d4828e14aec0b1fa..15c3ac72b7a38331fae326e09d7efca55a3fe8f7 100644
 --- a/libprocessgroup/profiles/cgroups.json
 +++ b/libprocessgroup/profiles/cgroups.json
 @@ -1,48 +1,15 @@
@@ -735,7 +493,7 @@ index 0634220..15c3ac7 100644
  }
 diff --git a/libprocessgroup/profiles/cgroups_28.json b/libprocessgroup/profiles/cgroups_28.json
 deleted file mode 100644
-index 17d4929..0000000
+index 17d4929497d5eebdf46fd156ec66fc83194db008..0000000000000000000000000000000000000000
 --- a/libprocessgroup/profiles/cgroups_28.json
 +++ /dev/null
 @@ -1,11 +0,0 @@
@@ -752,7 +510,7 @@ index 17d4929..0000000
 -}
 diff --git a/libprocessgroup/profiles/cgroups_29.json b/libprocessgroup/profiles/cgroups_29.json
 deleted file mode 100644
-index 17d4929..0000000
+index 17d4929497d5eebdf46fd156ec66fc83194db008..0000000000000000000000000000000000000000
 --- a/libprocessgroup/profiles/cgroups_29.json
 +++ /dev/null
 @@ -1,11 +0,0 @@
@@ -769,7 +527,7 @@ index 17d4929..0000000
 -}
 diff --git a/libprocessgroup/profiles/cgroups_30.json b/libprocessgroup/profiles/cgroups_30.json
 deleted file mode 100644
-index 80a074b..0000000
+index 80a074bf1c84f3842bf5e85451bdb037b17359ec..0000000000000000000000000000000000000000
 --- a/libprocessgroup/profiles/cgroups_30.json
 +++ /dev/null
 @@ -1,12 +0,0 @@
@@ -786,7 +544,7 @@ index 80a074b..0000000
 -  ]
 -}
 diff --git a/libprocessgroup/profiles/task_profiles.json b/libprocessgroup/profiles/task_profiles.json
-index 45d3c7c..aaf26ba 100644
+index 45d3c7c04d050ce9ccdc4fde4cc64b2eef7a753d..aaf26ba2184d95b0e0cc9cffcdbe29c86ea8e8aa 100644
 --- a/libprocessgroup/profiles/task_profiles.json
 +++ b/libprocessgroup/profiles/task_profiles.json
 @@ -2,33 +2,38 @@
@@ -1223,7 +981,7 @@ index 45d3c7c..aaf26ba 100644
        "Name": "CPUSET_SP_SYSTEM",
 diff --git a/libprocessgroup/profiles/task_profiles_28.json b/libprocessgroup/profiles/task_profiles_28.json
 deleted file mode 100644
-index e7be548..0000000
+index e7be5487d1488fd310e1da1e12337489c03530b0..0000000000000000000000000000000000000000
 --- a/libprocessgroup/profiles/task_profiles_28.json
 +++ /dev/null
 @@ -1,160 +0,0 @@
@@ -1389,7 +1147,7 @@ index e7be548..0000000
 -}
 diff --git a/libprocessgroup/profiles/task_profiles_29.json b/libprocessgroup/profiles/task_profiles_29.json
 deleted file mode 100644
-index 6174c8d..0000000
+index 6174c8d0fa94f688d1bb9be2df650bbb4a3f1cae..0000000000000000000000000000000000000000
 --- a/libprocessgroup/profiles/task_profiles_29.json
 +++ /dev/null
 @@ -1,160 +0,0 @@
@@ -1555,7 +1313,7 @@ index 6174c8d..0000000
 -}
 diff --git a/libprocessgroup/profiles/task_profiles_30.json b/libprocessgroup/profiles/task_profiles_30.json
 deleted file mode 100644
-index e7be548..0000000
+index e7be5487d1488fd310e1da1e12337489c03530b0..0000000000000000000000000000000000000000
 --- a/libprocessgroup/profiles/task_profiles_30.json
 +++ /dev/null
 @@ -1,160 +0,0 @@
@@ -1720,7 +1478,7 @@ index e7be548..0000000
 -  ]
 -}
 diff --git a/libprocessgroup/profiles/test.cpp b/libprocessgroup/profiles/test.cpp
-index b37e3e6..7695063 100644
+index b37e3e625998faa52ddf135ab5782b1079982713..7695063523ef82f78a2858e193391edb44cd855b 100644
 --- a/libprocessgroup/profiles/test.cpp
 +++ b/libprocessgroup/profiles/test.cpp
 @@ -43,6 +43,40 @@ INSTANTIATE_TEST_SUITE_P(Cgroups, CgroupsTest,
@@ -1765,7 +1523,7 @@ index b37e3e6..7695063 100644
  }  // namespace android
  
 diff --git a/libprocessgroup/sched_policy.cpp b/libprocessgroup/sched_policy.cpp
-index 169b1d3..8ad4222 100644
+index 169b1d3e0ac329922d6beb9d7771a106fd48a727..8ad42220b9ce913cfd43aa1f09622edef2e9e6a3 100644
 --- a/libprocessgroup/sched_policy.cpp
 +++ b/libprocessgroup/sched_policy.cpp
 @@ -140,16 +140,8 @@ bool cpusets_enabled() {
@@ -1840,7 +1598,7 @@ index 169b1d3..8ad4222 100644
  }
  
 diff --git a/libprocessgroup/setup/cgroup_map_write.cpp b/libprocessgroup/setup/cgroup_map_write.cpp
-index 3121d24..2ed075b 100644
+index 3121d244b45550c1015c6110d5e83e2458dc19a2..2ed075bb62269c1874b87b7d8eaf6026a381233f 100644
 --- a/libprocessgroup/setup/cgroup_map_write.cpp
 +++ b/libprocessgroup/setup/cgroup_map_write.cpp
 @@ -23,18 +23,21 @@
@@ -2058,7 +1816,7 @@ index 3121d24..2ed075b 100644
      }
  
 diff --git a/libprocessgroup/task_profiles.cpp b/libprocessgroup/task_profiles.cpp
-index 3834f91..88bd2b3 100644
+index 3834f9194beba4a344aca8aaf4473fb2b218ae9a..1c98135750a656b86cfe835562491cd428b35616 100644
 --- a/libprocessgroup/task_profiles.cpp
 +++ b/libprocessgroup/task_profiles.cpp
 @@ -18,7 +18,10 @@
@@ -2114,7 +1872,18 @@ index 3834f91..88bd2b3 100644
      std::string subgroup;
      if (!controller()->GetTaskGroup(tid, &subgroup)) {
          return false;
-@@ -193,9 +203,7 @@ void CachedFdProfileAction::InitFd(const std::string& path) {
+@@ -90,6 +100,10 @@ bool SetClampsAction::ExecuteForTask(int) const {
+ // To avoid issues in sdk_mac build
+ #if defined(__ANDROID__)
+ 
++bool SetTimerSlackAction::ExecuteForProcess(uid_t, pid_t pid) const {
++    return ExecuteForTask(pid);
++}
++
+ bool SetTimerSlackAction::IsTimerSlackSupported(int tid) {
+     auto file = StringPrintf("/proc/%d/timerslack_ns", tid);
+ 
+@@ -193,9 +207,7 @@ void CachedFdProfileAction::InitFd(const std::string& path) {
  }
  
  SetCgroupAction::SetCgroupAction(const CgroupController& c, const std::string& p)
@@ -2125,7 +1894,7 @@ index 3834f91..88bd2b3 100644
  
  bool SetCgroupAction::AddTidToCgroup(int tid, int fd, const char* controller_name) {
      if (tid <= 0) {
-@@ -213,14 +221,9 @@ bool SetCgroupAction::AddTidToCgroup(int tid, int fd, const char* controller_nam
+@@ -213,14 +225,9 @@ bool SetCgroupAction::AddTidToCgroup(int tid, int fd, const char* controller_nam
          return true;
      }
  
@@ -2141,7 +1910,7 @@ index 3834f91..88bd2b3 100644
  
          LOG(ERROR) << "Failed to add task '" << value
                     << "' into cpuset because all cpus in that cpuset are offline";
-@@ -228,55 +231,83 @@ bool SetCgroupAction::AddTidToCgroup(int tid, int fd, const char* controller_nam
+@@ -228,55 +235,84 @@ bool SetCgroupAction::AddTidToCgroup(int tid, int fd, const char* controller_nam
      } else {
          PLOG(ERROR) << "AddTidToCgroup failed to write '" << value << "'; fd=" << fd;
      }
@@ -2198,6 +1967,7 @@ index 3834f91..88bd2b3 100644
 +        const bool created = stat(child.c_str(), &existing) != 0;
 +        if (created) {
 +            if (errno != ENOENT || mkdir(child.c_str(), parent.st_mode & 0777) != 0) return false;
++            if (chmod(child.c_str(), parent.st_mode & 0777) != 0) return false;
 +        }
 +        std::string type;
 +        if (!android::base::ReadFileToString(child + "/cgroup.type", &type)) return false;
@@ -2258,7 +2028,7 @@ index 3834f91..88bd2b3 100644
          LOG(ERROR) << "Failed to add task into cgroup";
          return false;
      }
-@@ -284,6 +315,15 @@ bool SetCgroupAction::ExecuteForTask(int tid) const {
+@@ -284,6 +320,15 @@ bool SetCgroupAction::ExecuteForTask(int tid) const {
      return true;
  }
  
@@ -2274,7 +2044,7 @@ index 3834f91..88bd2b3 100644
  WriteFileAction::WriteFileAction(const std::string& path, const std::string& value,
                                   bool logfailures)
      : path_(path), value_(value), logfailures_(logfailures) {
-@@ -357,6 +397,7 @@ bool ApplyProfileAction::ExecuteForProcess(uid_t uid, pid_t pid) const {
+@@ -357,6 +402,7 @@ bool ApplyProfileAction::ExecuteForProcess(uid_t uid, pid_t pid) const {
      for (const auto& profile : profiles_) {
          if (!profile->ExecuteForProcess(uid, pid)) {
              PLOG(WARNING) << "ExecuteForProcess failed for aggregate profile";
@@ -2282,7 +2052,7 @@ index 3834f91..88bd2b3 100644
          }
      }
      return true;
-@@ -364,7 +405,7 @@ bool ApplyProfileAction::ExecuteForProcess(uid_t uid, pid_t pid) const {
+@@ -364,7 +410,7 @@ bool ApplyProfileAction::ExecuteForProcess(uid_t uid, pid_t pid) const {
  
  bool ApplyProfileAction::ExecuteForTask(int tid) const {
      for (const auto& profile : profiles_) {
@@ -2291,7 +2061,7 @@ index 3834f91..88bd2b3 100644
      }
      return true;
  }
-@@ -450,19 +491,6 @@ TaskProfiles::TaskProfiles() {
+@@ -450,19 +496,6 @@ TaskProfiles::TaskProfiles() {
          LOG(ERROR) << "Loading " << TASK_PROFILE_DB_FILE << " for [" << getpid() << "] failed";
      }
  
@@ -2311,7 +2081,7 @@ index 3834f91..88bd2b3 100644
      // load vendor task profiles if the file exists
      if (!access(TASK_PROFILE_DB_VENDOR_FILE, F_OK) &&
          !Load(CgroupMap::GetInstance(), TASK_PROFILE_DB_VENDOR_FILE)) {
-@@ -525,6 +553,9 @@ bool TaskProfiles::Load(const CgroupMap& cg_map, const std::string& file_name) {
+@@ -525,6 +558,9 @@ bool TaskProfiles::Load(const CgroupMap& cg_map, const std::string& file_name) {
  
                  auto controller = cg_map.FindController(controller_name);
                  if (controller.HasValue()) {
@@ -2321,7 +2091,7 @@ index 3834f91..88bd2b3 100644
                      profile->Add(std::make_unique<SetCgroupAction>(controller, path));
                  } else {
                      LOG(WARNING) << "JoinCgroup: controller " << controller_name << " is not found";
-@@ -650,6 +681,21 @@ const ProfileAttribute* TaskProfiles::GetAttribute(const std::string& name) cons
+@@ -650,6 +686,21 @@ const ProfileAttribute* TaskProfiles::GetAttribute(const std::string& name) cons
      return nullptr;
  }
  
@@ -2343,7 +2113,7 @@ index 3834f91..88bd2b3 100644
  bool TaskProfiles::SetProcessProfiles(uid_t uid, pid_t pid,
                                        const std::vector<std::string>& profiles) {
      for (const auto& name : profiles) {
-@@ -657,9 +703,11 @@ bool TaskProfiles::SetProcessProfiles(uid_t uid, pid_t pid,
+@@ -657,9 +708,11 @@ bool TaskProfiles::SetProcessProfiles(uid_t uid, pid_t pid,
          if (profile != nullptr) {
              if (!profile->ExecuteForProcess(uid, pid)) {
                  PLOG(WARNING) << "Failed to apply " << name << " process profile";
@@ -2355,7 +2125,7 @@ index 3834f91..88bd2b3 100644
          }
      }
      return true;
-@@ -675,9 +723,11 @@ bool TaskProfiles::SetTaskProfiles(int tid, const std::vector<std::string>& prof
+@@ -675,9 +728,11 @@ bool TaskProfiles::SetTaskProfiles(int tid, const std::vector<std::string>& prof
              }
              if (!profile->ExecuteForTask(tid)) {
                  PLOG(WARNING) << "Failed to apply " << name << " task profile";
@@ -2368,7 +2138,7 @@ index 3834f91..88bd2b3 100644
      }
      return true;
 diff --git a/libprocessgroup/task_profiles.h b/libprocessgroup/task_profiles.h
-index 278892d..d1fedb6 100644
+index 278892dd55f634033214a409abae62d34720bf7b..24e4660aa386fab000787d15944fafdf98670713 100644
 --- a/libprocessgroup/task_profiles.h
 +++ b/libprocessgroup/task_profiles.h
 @@ -20,6 +20,7 @@
@@ -2379,7 +2149,23 @@ index 278892d..d1fedb6 100644
  #include <string>
  #include <vector>
  
-@@ -133,7 +134,7 @@ class CachedFdProfileAction : public ProfileAction {
+@@ -75,6 +76,7 @@ class SetTimerSlackAction : public ProfileAction {
+   public:
+     SetTimerSlackAction(unsigned long slack) noexcept : slack_(slack) {}
+ 
++    virtual bool ExecuteForProcess(uid_t uid, pid_t pid) const;
+     virtual bool ExecuteForTask(int tid) const;
+ 
+   private:
+@@ -89,6 +91,7 @@ class SetTimerSlackAction : public ProfileAction {
+   public:
+     SetTimerSlackAction(unsigned long) noexcept {}
+ 
++    virtual bool ExecuteForProcess(uid_t, pid_t) const { return true; }
+     virtual bool ExecuteForTask(int) const { return true; }
+ };
+ 
+@@ -133,7 +136,7 @@ class CachedFdProfileAction : public ProfileAction {
  };
  
  // Set cgroup profile element
@@ -2388,7 +2174,7 @@ index 278892d..d1fedb6 100644
    public:
      SetCgroupAction(const CgroupController& c, const std::string& p);
  
-@@ -142,14 +143,13 @@ class SetCgroupAction : public CachedFdProfileAction {
+@@ -142,14 +145,13 @@ class SetCgroupAction : public CachedFdProfileAction {
  
      const CgroupController* controller() const { return &controller_; }
  
@@ -2405,7 +2191,7 @@ index 278892d..d1fedb6 100644
  };
  
  // Write to file action
-@@ -211,10 +211,12 @@ class TaskProfiles {
+@@ -211,10 +213,12 @@ class TaskProfiles {
      TaskProfile* GetProfile(const std::string& name) const;
      const ProfileAttribute* GetAttribute(const std::string& name) const;
      void DropResourceCaching() const;
@@ -2418,60 +2204,3 @@ index 278892d..d1fedb6 100644
      std::map<std::string, std::shared_ptr<TaskProfile>> profiles_;
      std::map<std::string, std::unique_ptr<ProfileAttribute>> attributes_;
  
-diff --git a/llkd/llkd-debuggable.rc b/llkd/llkd-debuggable.rc
-index c075609..61b2502 100644
---- a/llkd/llkd-debuggable.rc
-+++ b/llkd/llkd-debuggable.rc
-@@ -16,4 +16,4 @@ service llkd-1 /system/bin/llkd
-     capabilities KILL IPC_LOCK SYS_PTRACE DAC_OVERRIDE SYS_ADMIN
-     file /dev/kmsg w
-     file /proc/sysrq-trigger w
--    writepid /dev/cpuset/system-background/tasks
-+    task_profiles CPUSET_SP_SYSTEM
-diff --git a/llkd/llkd.rc b/llkd/llkd.rc
-index b1f96a8..c05debf 100644
---- a/llkd/llkd.rc
-+++ b/llkd/llkd.rc
-@@ -42,4 +42,4 @@ service llkd-0 /system/bin/llkd
-     capabilities KILL IPC_LOCK
-     file /dev/kmsg w
-     file /proc/sysrq-trigger w
--    writepid /dev/cpuset/system-background/tasks
-+    task_profiles CPUSET_SP_SYSTEM
-diff --git a/rootdir/init.zygote32.rc b/rootdir/init.zygote32.rc
-index 9469a48..6d8bcb8 100644
---- a/rootdir/init.zygote32.rc
-+++ b/rootdir/init.zygote32.rc
-@@ -12,5 +12,5 @@ service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-sys
-     onrestart restart media
-     onrestart restart netd
-     onrestart restart wificond
--    writepid /dev/cpuset/foreground/tasks
-+    task_profiles CPUSET_SP_FOREGROUND
-     critical window=${zygote.critical_window.minute:-off} target=zygote-fatal
-diff --git a/rootdir/init.zygote64.rc b/rootdir/init.zygote64.rc
-index 98dc088..2d7aa46 100644
---- a/rootdir/init.zygote64.rc
-+++ b/rootdir/init.zygote64.rc
-@@ -12,5 +12,5 @@ service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote --start-s
-     onrestart restart media
-     onrestart restart netd
-     onrestart restart wificond
--    writepid /dev/cpuset/foreground/tasks
-+    task_profiles CPUSET_SP_FOREGROUND
-     critical window=${zygote.critical_window.minute:-off} target=zygote-fatal
-diff --git a/storaged/storaged.rc b/storaged/storaged.rc
-index 0614fad..62f61dc 100644
---- a/storaged/storaged.rc
-+++ b/storaged/storaged.rc
-@@ -3,6 +3,6 @@ service storaged /system/bin/storaged
-     capabilities DAC_READ_SEARCH
-     priority 10
-     file /d/mmc0/mmc0:0001/ext_csd r
--    writepid /dev/cpuset/system-background/tasks
-+    task_profiles CPUSET_SP_SYSTEM
-     user root
-     group package_info
--- 
-2.47.3
-

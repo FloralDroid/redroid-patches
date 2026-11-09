@@ -1,0 +1,339 @@
+From: 5656565566 <contact@home56.top>
+Subject: [PATCH] init: use cgroup v2 service profiles
+
+Initialize the delegated hierarchy before vendor init is forked.
+Place services in their process domains before applying profiles or
+dropping privileges. Remove unsupported v1 memory controls and use
+task profiles instead of v1 writepid paths in service definitions.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ debuggerd/tombstoned/tombstoned.rc |  2 +-
+ gatekeeperd/gatekeeperd.rc         |  2 +-
+ init/init.cpp                      |  6 +++++-
+ init/service.cpp                   | 41 ++++++++++++++++++++------------------
+ init/service.h                     |  3 ---
+ init/service_parser.cpp            | 25 ++++++++---------------
+ init/service_parser.h              |  2 --
+ init/service_utils.cpp             | 27 -------------------------
+ llkd/llkd-debuggable.rc            |  2 +-
+ llkd/llkd.rc                       |  2 +-
+ rootdir/init.zygote32.rc           |  2 +-
+ rootdir/init.zygote64.rc           |  2 +-
+ storaged/storaged.rc               |  2 +-
+ 13 files changed, 42 insertions(+), 76 deletions(-)
+
+diff --git a/debuggerd/tombstoned/tombstoned.rc b/debuggerd/tombstoned/tombstoned.rc
+index c39f4e4f24230a9cdc2471cca3e195e76fed1ad7..6fee7d556997d249d908df1617b7e63de28f2701 100644
+--- a/debuggerd/tombstoned/tombstoned.rc
++++ b/debuggerd/tombstoned/tombstoned.rc
+@@ -5,4 +5,4 @@ service tombstoned /system/bin/tombstoned
+     socket tombstoned_crash seqpacket 0666 system system
+     socket tombstoned_intercept seqpacket 0666 system system
+     socket tombstoned_java_trace seqpacket 0666 system system
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/gatekeeperd/gatekeeperd.rc b/gatekeeperd/gatekeeperd.rc
+index 8b126d588a256ee3e5280218ddd644430010f3e1..71647cc7d8ea4e641d795a1c4eb407a0bd975ed6 100644
+--- a/gatekeeperd/gatekeeperd.rc
++++ b/gatekeeperd/gatekeeperd.rc
+@@ -1,4 +1,4 @@
+ service gatekeeperd /system/bin/gatekeeperd /data/misc/gatekeeper
+     class late_start
+     user system
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/init/init.cpp b/init/init.cpp
+index 972548048a7371143e60d910cb32155abc045184..b41407dfea9e5ebd3ce1eca730dfd25a7948bb7d 100755
+--- a/init/init.cpp
++++ b/init/init.cpp
+@@ -877,6 +877,11 @@ int SecondStageMain(int argc, char** argv) {
+         PLOG(FATAL) << "SetupMountNamespaces failed";
+     }
+ 
++    // The delegated v2 root must be empty before enabling its controllers.
++    if (auto result = SetupCgroupsAction(BuiltinArguments(kInitContext)); !result.ok()) {
++        LOG(FATAL) << "Failed to setup cgroups before starting subcontexts: " << result.error();
++    }
++
+     InitializeSubcontext();
+ 
+     ActionManager& am = ActionManager::GetInstance();
+@@ -894,7 +899,6 @@ int SecondStageMain(int argc, char** argv) {
+     auto is_installed = android::gsi::IsGsiInstalled() ? "1" : "0";
+     SetProperty(gsi::kGsiInstalledProp, is_installed);
+ 
+-    am.QueueBuiltinAction(SetupCgroupsAction, "SetupCgroups");
+     am.QueueBuiltinAction(SetKptrRestrictAction, "SetKptrRestrict");
+     am.QueueBuiltinAction(TestPerfEventSelinuxAction, "TestPerfEventSelinux");
+     am.QueueEventTrigger("early-init");
+diff --git a/init/service.cpp b/init/service.cpp
+index 414eae95a894d62929f94989529f80e4944b996a..132cdb51f303fea8c8cd07fcc5b9fbd87271836f 100644
+--- a/init/service.cpp
++++ b/init/service.cpp
+@@ -506,6 +506,10 @@ Result<void> Service::Start() {
+         }
+     }
+ 
++    android::base::unique_fd cgroup_ready_read, cgroup_ready_write;
++    if (!android::base::Pipe(&cgroup_ready_read, &cgroup_ready_write)) {
++        return ErrnoError() << "Failed to create cgroup setup pipe";
++    }
+     pid_t pid = -1;
+     if (namespaces_.flags) {
+         pid = clone(nullptr, nullptr, namespaces_.flags | SIGCHLD, nullptr);
+@@ -514,6 +518,12 @@ Result<void> Service::Start() {
+     }
+ 
+     if (pid == 0) {
++        cgroup_ready_write.reset();
++        char ready;
++        // The child must enter its process domain before applying profiles or
++        // dropping the privileges needed to configure its scheduling groups.
++        if (TEMP_FAILURE_RETRY(read(cgroup_ready_read.get(), &ready, 1)) != 1) _exit(127);
++        cgroup_ready_read.reset();
+         umask(077);
+ 
+         if (auto result = EnterNamespaces(namespaces_, name_, override_mount_namespace);
+@@ -534,8 +544,8 @@ Result<void> Service::Start() {
+             LOG(ERROR) << "failed to write pid to files: " << result.error();
+         }
+ 
+-        if (task_profiles_.size() > 0 && !SetTaskProfiles(getpid(), task_profiles_)) {
+-            LOG(ERROR) << "failed to set task profiles";
++        if (!task_profiles_.empty() && !SetProcessProfiles(proc_attr_.uid, getpid(), task_profiles_)) {
++            LOG(FATAL) << "failed to set task profiles";
+         }
+ 
+         // As requested, set our gid, supplemental gids, uid, context, and
+@@ -550,6 +560,7 @@ Result<void> Service::Start() {
+         _exit(127);
+     }
+ 
++    cgroup_ready_read.reset();
+     if (pid < 0) {
+         pid_ = 0;
+         return ErrnoError() << "Failed to fork";
+@@ -569,25 +580,12 @@ Result<void> Service::Start() {
+     start_order_ = next_start_order_++;
+     process_cgroup_empty_ = false;
+ 
+-    bool use_memcg = swappiness_ != -1 || soft_limit_in_bytes_ != -1 || limit_in_bytes_ != -1 ||
+-                      limit_percent_ != -1 || !limit_property_.empty();
++    bool use_memcg = limit_in_bytes_ != -1 || limit_percent_ != -1 || !limit_property_.empty();
+     errno = -createProcessGroup(proc_attr_.uid, pid_, use_memcg);
+     if (errno != 0) {
+-        PLOG(ERROR) << "createProcessGroup(" << proc_attr_.uid << ", " << pid_
+-                    << ") failed for service '" << name_ << "'";
++        return ErrnoError() << "createProcessGroup(" << proc_attr_.uid << ", " << pid_
++                            << ") failed for service '" << name_ << "'";
+     } else if (use_memcg) {
+-        if (swappiness_ != -1) {
+-            if (!setProcessGroupSwappiness(proc_attr_.uid, pid_, swappiness_)) {
+-                PLOG(ERROR) << "setProcessGroupSwappiness failed";
+-            }
+-        }
+-
+-        if (soft_limit_in_bytes_ != -1) {
+-            if (!setProcessGroupSoftLimit(proc_attr_.uid, pid_, soft_limit_in_bytes_)) {
+-                PLOG(ERROR) << "setProcessGroupSoftLimit failed";
+-            }
+-        }
+-
+         size_t computed_limit_in_bytes = limit_in_bytes_;
+         if (limit_percent_ != -1) {
+             long page_size = sysconf(_SC_PAGESIZE);
+@@ -611,11 +609,16 @@ Result<void> Service::Start() {
+ 
+         if (computed_limit_in_bytes != size_t(-1)) {
+             if (!setProcessGroupLimit(proc_attr_.uid, pid_, computed_limit_in_bytes)) {
+-                PLOG(ERROR) << "setProcessGroupLimit failed";
++                return ErrnoError() << "setProcessGroupLimit failed";
+             }
+         }
+     }
+ 
++    if (TEMP_FAILURE_RETRY(write(cgroup_ready_write.get(), "1", 1)) != 1) {
++        return ErrnoError() << "Failed to release service after cgroup setup";
++    }
++    cgroup_ready_write.reset();
++
+     if (oom_score_adjust_ != DEFAULT_OOM_SCORE_ADJUST) {
+         LmkdRegister(name_, proc_attr_.uid, pid_, oom_score_adjust_);
+     }
+diff --git a/init/service.h b/init/service.h
+index 043555fa47d7094efae53ae17a5791c49feb22fe..6011dfc186d64a7375d071b37390c46d287f4bd2 100644
+--- a/init/service.h
++++ b/init/service.h
+@@ -183,9 +183,6 @@ class Service {
+ 
+     int oom_score_adjust_;
+ 
+-    int swappiness_ = -1;
+-    int soft_limit_in_bytes_ = -1;
+-
+     int limit_in_bytes_ = -1;
+     int limit_percent_ = -1;
+     std::string limit_property_;
+diff --git a/init/service_parser.cpp b/init/service_parser.cpp
+index 57c311a5223abe79f5f4be850dce62811ab0423d..57e95e1b76065d8e6e060587664525f8f465489d 100644
+--- a/init/service_parser.cpp
++++ b/init/service_parser.cpp
+@@ -308,13 +308,6 @@ Result<void> ServiceParser::ParseOverride(std::vector<std::string>&& args) {
+     return {};
+ }
+ 
+-Result<void> ServiceParser::ParseMemcgSwappiness(std::vector<std::string>&& args) {
+-    if (!ParseInt(args[1], &service_->swappiness_, 0)) {
+-        return Error() << "swappiness value must be equal or greater than 0";
+-    }
+-    return {};
+-}
+-
+ Result<void> ServiceParser::ParseMemcgLimitInBytes(std::vector<std::string>&& args) {
+     if (!ParseInt(args[1], &service_->limit_in_bytes_, 0)) {
+         return Error() << "limit_in_bytes value must be equal or greater than 0";
+@@ -334,13 +327,6 @@ Result<void> ServiceParser::ParseMemcgLimitProperty(std::vector<std::string>&& a
+     return {};
+ }
+ 
+-Result<void> ServiceParser::ParseMemcgSoftLimitInBytes(std::vector<std::string>&& args) {
+-    if (!ParseInt(args[1], &service_->soft_limit_in_bytes_, 0)) {
+-        return Error() << "soft_limit_in_bytes value must be equal or greater than 0";
+-    }
+-    return {};
+-}
+-
+ Result<void> ServiceParser::ParseProcessRlimit(std::vector<std::string>&& args) {
+     auto rlimit = ParseRlimit(args);
+     if (!rlimit.ok()) return rlimit.error();
+@@ -523,6 +509,14 @@ Result<void> ServiceParser::ParseUser(std::vector<std::string>&& args) {
+ 
+ Result<void> ServiceParser::ParseWritepid(std::vector<std::string>&& args) {
+     args.erase(args.begin());
++    for (const auto& path : args) {
++        if (android::base::EndsWith(path, "/tasks") || StartsWith(path, "/acct/") ||
++            StartsWith(path, "/dev/cpuset/") || StartsWith(path, "/dev/cpuctl/") ||
++            StartsWith(path, "/dev/stune/") || StartsWith(path, "/dev/memcg/") ||
++            StartsWith(path, "/dev/blkio/")) {
++            return Error() << "cgroup v1 writepid is unsupported; use task_profiles";
++        }
++    }
+     service_->writepid_files_ = std::move(args);
+     return {};
+ }
+@@ -550,9 +544,6 @@ const KeywordMap<ServiceParser::OptionParser>& ServiceParser::GetParserMap() con
+         {"memcg.limit_in_bytes",    {1,     1,    &ServiceParser::ParseMemcgLimitInBytes}},
+         {"memcg.limit_percent",     {1,     1,    &ServiceParser::ParseMemcgLimitPercent}},
+         {"memcg.limit_property",    {1,     1,    &ServiceParser::ParseMemcgLimitProperty}},
+-        {"memcg.soft_limit_in_bytes",
+-                                    {1,     1,    &ServiceParser::ParseMemcgSoftLimitInBytes}},
+-        {"memcg.swappiness",        {1,     1,    &ServiceParser::ParseMemcgSwappiness}},
+         {"namespace",               {1,     2,    &ServiceParser::ParseNamespace}},
+         {"oneshot",                 {0,     0,    &ServiceParser::ParseOneshot}},
+         {"onrestart",               {1,     kMax, &ServiceParser::ParseOnrestart}},
+diff --git a/init/service_parser.h b/init/service_parser.h
+index 0fd2da588177c1071294455916f51374b7503466..6a4eca5191a4d2364cf139421112c90544e7394c 100644
+--- a/init/service_parser.h
++++ b/init/service_parser.h
+@@ -66,8 +66,6 @@ class ServiceParser : public SectionParser {
+     Result<void> ParseMemcgLimitInBytes(std::vector<std::string>&& args);
+     Result<void> ParseMemcgLimitPercent(std::vector<std::string>&& args);
+     Result<void> ParseMemcgLimitProperty(std::vector<std::string>&& args);
+-    Result<void> ParseMemcgSoftLimitInBytes(std::vector<std::string>&& args);
+-    Result<void> ParseMemcgSwappiness(std::vector<std::string>&& args);
+     Result<void> ParseNamespace(std::vector<std::string>&& args);
+     Result<void> ParseProcessRlimit(std::vector<std::string>&& args);
+     Result<void> ParseRebootOnFailure(std::vector<std::string>&& args);
+diff --git a/init/service_utils.cpp b/init/service_utils.cpp
+index f2383d7a6e40f1532c33af7505da132da37a9203..727fe887bf1c26ffa80821cd8fc1ab3f56adc627 100644
+--- a/init/service_utils.cpp
++++ b/init/service_utils.cpp
+@@ -280,33 +280,6 @@ Result<void> SetProcessAttributes(const ProcessAttributes& attr) {
+ }
+ 
+ Result<void> WritePidToFiles(std::vector<std::string>* files) {
+-    // See if there were "writepid" instructions to write to files under cpuset path.
+-    std::string cpuset_path;
+-    if (CgroupGetControllerPath("cpuset", &cpuset_path)) {
+-        auto cpuset_predicate = [&cpuset_path](const std::string& path) {
+-            return StartsWith(path, cpuset_path + "/");
+-        };
+-        auto iter = std::find_if(files->begin(), files->end(), cpuset_predicate);
+-        if (iter == files->end()) {
+-            // There were no "writepid" instructions for cpusets, check if the system default
+-            // cpuset is specified to be used for the process.
+-            std::string default_cpuset = GetProperty("ro.cpuset.default", "");
+-            if (!default_cpuset.empty()) {
+-                // Make sure the cpuset name starts and ends with '/'.
+-                // A single '/' means the 'root' cpuset.
+-                if (default_cpuset.front() != '/') {
+-                    default_cpuset.insert(0, 1, '/');
+-                }
+-                if (default_cpuset.back() != '/') {
+-                    default_cpuset.push_back('/');
+-                }
+-                files->push_back(
+-                        StringPrintf("%s%stasks", cpuset_path.c_str(), default_cpuset.c_str()));
+-            }
+-        }
+-    } else {
+-        LOG(ERROR) << "cpuset cgroup controller is not mounted!";
+-    }
+     std::string pid_str = std::to_string(getpid());
+     for (const auto& file : *files) {
+         if (!WriteStringToFile(pid_str, file)) {
+diff --git a/llkd/llkd-debuggable.rc b/llkd/llkd-debuggable.rc
+index c07560910e12b6d6c773a31c71789a72052b7803..61b250239047f0c589528c806ff08902b0cbd4c8 100644
+--- a/llkd/llkd-debuggable.rc
++++ b/llkd/llkd-debuggable.rc
+@@ -16,4 +16,4 @@ service llkd-1 /system/bin/llkd
+     capabilities KILL IPC_LOCK SYS_PTRACE DAC_OVERRIDE SYS_ADMIN
+     file /dev/kmsg w
+     file /proc/sysrq-trigger w
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/llkd/llkd.rc b/llkd/llkd.rc
+index b1f96a8f3e38f7a0d7f7384d4dd6561a6485d857..c05debff8d09b46ecc0a1336b665cdcdc7ddafb4 100644
+--- a/llkd/llkd.rc
++++ b/llkd/llkd.rc
+@@ -42,4 +42,4 @@ service llkd-0 /system/bin/llkd
+     capabilities KILL IPC_LOCK
+     file /dev/kmsg w
+     file /proc/sysrq-trigger w
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+diff --git a/rootdir/init.zygote32.rc b/rootdir/init.zygote32.rc
+index 9469a48731455bb82f21848d98a0a1754bd0b5a9..6d8bcb87d3f71658a5a33e6da70daa8c8a902c3b 100644
+--- a/rootdir/init.zygote32.rc
++++ b/rootdir/init.zygote32.rc
+@@ -12,5 +12,5 @@ service zygote /system/bin/app_process -Xzygote /system/bin --zygote --start-sys
+     onrestart restart media
+     onrestart restart netd
+     onrestart restart wificond
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+     critical window=${zygote.critical_window.minute:-off} target=zygote-fatal
+diff --git a/rootdir/init.zygote64.rc b/rootdir/init.zygote64.rc
+index 98dc0881f9e9298b8469b4ac2bcf36456084c596..2d7aa465bde5c4ee0fe4a16c561f0c9b5624c790 100644
+--- a/rootdir/init.zygote64.rc
++++ b/rootdir/init.zygote64.rc
+@@ -12,5 +12,5 @@ service zygote /system/bin/app_process64 -Xzygote /system/bin --zygote --start-s
+     onrestart restart media
+     onrestart restart netd
+     onrestart restart wificond
+-    writepid /dev/cpuset/foreground/tasks
++    task_profiles CPUSET_SP_FOREGROUND
+     critical window=${zygote.critical_window.minute:-off} target=zygote-fatal
+diff --git a/storaged/storaged.rc b/storaged/storaged.rc
+index 0614fadd1e4b9e255c5d6fa752e22a920033e6d1..62f61dc432f0d6978ebe0e2c1a86ed1a1368b07c 100644
+--- a/storaged/storaged.rc
++++ b/storaged/storaged.rc
+@@ -3,6 +3,6 @@ service storaged /system/bin/storaged
+     capabilities DAC_READ_SEARCH
+     priority 10
+     file /d/mmc0/mmc0:0001/ext_csd r
+-    writepid /dev/cpuset/system-background/tasks
++    task_profiles CPUSET_SP_SYSTEM
+     user root
+     group package_info
