@@ -1,0 +1,84 @@
+From 2ad73290ea2654a9544191b009fed96dc3a4c98e Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 11 Nov 2026 14:33:34 +0800
+Subject: [PATCH] mediaextractor: Allow memfd-backed shared memory
+
+When sys.use_memfd is enabled, libcutils probes memfd support and creates
+shared media buffers through memfd_create, fcntl and ftruncate. The
+extractor's seccomp policy omits those calls, so the support probe kills
+the service before MediaExtractor can read the source.
+
+Allow the existing libcutils allocation path in each supported ABI.
+Keep the media process sandbox and all unrelated syscall rules intact.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ .../mediaextractor/seccomp_policy/mediaextractor-arm.policy  | 5 +++++
+ .../seccomp_policy/mediaextractor-arm64.policy               | 5 +++++
+ .../mediaextractor/seccomp_policy/mediaextractor-x86.policy  | 5 +++++
+ .../seccomp_policy/mediaextractor-x86_64.policy              | 5 +++++
+ 4 files changed, 20 insertions(+)
+
+diff --git a/services/mediaextractor/seccomp_policy/mediaextractor-arm.policy b/services/mediaextractor/seccomp_policy/mediaextractor-arm.policy
+index e1f7fe726515f088e6d21880a6a4d907eb3a7046..9b834fb4e6a16df84c6cb661ab4c2e9cb08c7f81 100644
+--- a/services/mediaextractor/seccomp_policy/mediaextractor-arm.policy
++++ b/services/mediaextractor/seccomp_policy/mediaextractor-arm.policy
+@@ -60,5 +60,10 @@ mremap: arg3 == 3 || arg3 == MREMAP_MAYMOVE
+ readlinkat: 1
+ _llseek: 1
+ 
++# libcutils shared memory uses memfd when sys.use_memfd is enabled.
++memfd_create: 1
++fcntl64: 1
++ftruncate64: 1
++
+ @include /apex/com.android.media/etc/seccomp_policy/crash_dump.arm.policy
+ @include /apex/com.android.media/etc/seccomp_policy/code_coverage.arm.policy
+diff --git a/services/mediaextractor/seccomp_policy/mediaextractor-arm64.policy b/services/mediaextractor/seccomp_policy/mediaextractor-arm64.policy
+index 9bbd53b5e26a5a3250f4aceedbf26ef294baf10b..c7cc358e670bbdafa972b6b1bed9668a4fd5b5cd 100644
+--- a/services/mediaextractor/seccomp_policy/mediaextractor-arm64.policy
++++ b/services/mediaextractor/seccomp_policy/mediaextractor-arm64.policy
+@@ -46,5 +46,10 @@ mremap: 1
+ # Required by Sanitizers
+ sched_yield: 1
+ 
++# libcutils shared memory uses memfd when sys.use_memfd is enabled.
++memfd_create: 1
++fcntl: 1
++ftruncate: 1
++
+ @include /apex/com.android.media/etc/seccomp_policy/crash_dump.arm64.policy
+ @include /apex/com.android.media/etc/seccomp_policy/code_coverage.arm64.policy
+diff --git a/services/mediaextractor/seccomp_policy/mediaextractor-x86.policy b/services/mediaextractor/seccomp_policy/mediaextractor-x86.policy
+index 5b3762712d49e57d36aa59e04613e89e2dbc5e01..a5d017ca61bab4b020ddbc9b25acde65d983ba40 100644
+--- a/services/mediaextractor/seccomp_policy/mediaextractor-x86.policy
++++ b/services/mediaextractor/seccomp_policy/mediaextractor-x86.policy
+@@ -59,5 +59,10 @@ sched_yield: 1
+ getpid: 1
+ gettid: 1
+ 
++# libcutils shared memory uses memfd when sys.use_memfd is enabled.
++memfd_create: 1
++fcntl64: 1
++ftruncate64: 1
++
+ @include /apex/com.android.media/etc/seccomp_policy/crash_dump.x86.policy
+ @include /apex/com.android.media/etc/seccomp_policy/code_coverage.x86.policy
+diff --git a/services/mediaextractor/seccomp_policy/mediaextractor-x86_64.policy b/services/mediaextractor/seccomp_policy/mediaextractor-x86_64.policy
+index 51df1a238d4a070612b97dea0e70ff7b0c4ae80e..89c476fe2943d338bd8df1e20f2a1ab91b2812f9 100644
+--- a/services/mediaextractor/seccomp_policy/mediaextractor-x86_64.policy
++++ b/services/mediaextractor/seccomp_policy/mediaextractor-x86_64.policy
+@@ -53,5 +53,10 @@ sched_yield: 1
+ getpid: 1
+ gettid: 1
+ 
++# libcutils shared memory uses memfd when sys.use_memfd is enabled.
++memfd_create: 1
++fcntl: 1
++ftruncate: 1
++
+ @include /apex/com.android.media/etc/seccomp_policy/crash_dump.x86_64.policy
+ @include /apex/com.android.media/etc/seccomp_policy/code_coverage.x86_64.policy
+-- 
+2.47.3
+

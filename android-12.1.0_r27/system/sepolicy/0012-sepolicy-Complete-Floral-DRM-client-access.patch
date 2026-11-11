@@ -1,0 +1,89 @@
+From f5b1e51e0d6294f72889fcef3d491d78720c9471 Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 11 Nov 2026 14:33:34 +0800
+Subject: [PATCH] sepolicy: Complete Floral DRM client access
+
+Permit the default graphics composer and camera provider to traverse
+/dev/dri before opening their already-authorized DRM device nodes.
+Allow the camera provider to open the existing GPU nodes required by
+its in-process mapper, and let it find the graphics mapper service.
+Allow cameraserver to open, read, write and issue ioctls on the existing
+GPU nodes used by Floral gralloc when importing camera buffers. Keep
+API 31/32 snapshots aligned and leave device passthrough to the container
+manager.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ prebuilts/api/31.0/private/cameraserver.te | 3 +++
+ prebuilts/api/32.0/private/cameraserver.te | 3 +++
+ private/cameraserver.te                    | 3 +++
+ vendor/hal_camera_default.te               | 5 +++++
+ vendor/hal_graphics_composer_default.te    | 3 +++
+ 5 files changed, 17 insertions(+)
+
+diff --git a/prebuilts/api/31.0/private/cameraserver.te b/prebuilts/api/31.0/private/cameraserver.te
+index 2be3c9ea3..5faf2d44c 100644
+--- a/prebuilts/api/31.0/private/cameraserver.te
++++ b/prebuilts/api/31.0/private/cameraserver.te
+@@ -4,3 +4,6 @@ typeattribute cameraserver camera_service_server;
+ 
+ init_daemon_domain(cameraserver)
+ tmpfs_domain(cameraserver)
++
++# Floral gralloc imports buffers through the existing DRM nodes.
++allow cameraserver gpu_device:chr_file { open read write ioctl };
+diff --git a/prebuilts/api/32.0/private/cameraserver.te b/prebuilts/api/32.0/private/cameraserver.te
+index 2be3c9ea3..5faf2d44c 100644
+--- a/prebuilts/api/32.0/private/cameraserver.te
++++ b/prebuilts/api/32.0/private/cameraserver.te
+@@ -4,3 +4,6 @@ typeattribute cameraserver camera_service_server;
+ 
+ init_daemon_domain(cameraserver)
+ tmpfs_domain(cameraserver)
++
++# Floral gralloc imports buffers through the existing DRM nodes.
++allow cameraserver gpu_device:chr_file { open read write ioctl };
+diff --git a/private/cameraserver.te b/private/cameraserver.te
+index 2be3c9ea3..5faf2d44c 100644
+--- a/private/cameraserver.te
++++ b/private/cameraserver.te
+@@ -4,3 +4,6 @@ typeattribute cameraserver camera_service_server;
+ 
+ init_daemon_domain(cameraserver)
+ tmpfs_domain(cameraserver)
++
++# Floral gralloc imports buffers through the existing DRM nodes.
++allow cameraserver gpu_device:chr_file { open read write ioctl };
+diff --git a/vendor/hal_camera_default.te b/vendor/hal_camera_default.te
+index 5bc4a6191..268cc8974 100644
+--- a/vendor/hal_camera_default.te
++++ b/vendor/hal_camera_default.te
+@@ -6,6 +6,11 @@ init_daemon_domain(hal_camera_default)
+ 
+ allow hal_camera_default fwk_sensor_hwservice:hwservice_manager find;
+ 
++# Camera buffers use the in-process graphics mapper and existing DRM nodes.
++allow hal_camera_default gpu_device:dir search;
++allow hal_camera_default gpu_device:chr_file open;
++allow hal_camera_default hal_graphics_mapper_hwservice:hwservice_manager find;
++
+ # For collecting bugreports.
+ allow hal_camera_default dumpstate:fd use;
+ allow hal_camera_default dumpstate:fifo_file write;
+diff --git a/vendor/hal_graphics_composer_default.te b/vendor/hal_graphics_composer_default.te
+index 7dcd2b2e0..c56e84fcd 100644
+--- a/vendor/hal_graphics_composer_default.te
++++ b/vendor/hal_graphics_composer_default.te
+@@ -3,6 +3,9 @@ hal_server_domain(hal_graphics_composer_default, hal_graphics_composer)
+ 
+ type hal_graphics_composer_default_exec, exec_type, vendor_file_type, file_type;
+ init_daemon_domain(hal_graphics_composer_default)
++
++# DRM nodes are children of /dev/dri.
++allow hal_graphics_composer_default gpu_device:dir search;
+ type_transition hal_graphics_composer_default tmpfs:file hal_graphics_composer_server_tmpfs;
+ allow hal_graphics_composer_default hal_graphics_composer_server_tmpfs:file { getattr map read write };
+ 
+-- 
+2.47.3
+

@@ -1,0 +1,33 @@
+From 481487e36ba12f1d2065f6d262124bee4e55428b Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 12 Nov 2026 02:44:11 +0800
+Subject: [PATCH] sepolicy: Label the lazy ClearKey DRM service
+
+The product installs the 1.4 lazy ClearKey service, while the default
+file contexts only cover the legacy 1.0 DRM service names. The binary
+therefore inherits vendor_file and init refuses to start it even in
+permissive mode, leaving MediaDrm clients waiting for registration.
+
+Assign the exact installed ClearKey path to the existing DRM HAL exec
+type and reuse its domain transition without adding any allow rules.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ vendor/file_contexts | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/vendor/file_contexts b/vendor/file_contexts
+index 12e5d9f9798e1f7974e5948eea0898b0d20c99b2..653736fde6f84647197b2d19967d74796a4881ac 100644
+--- a/vendor/file_contexts
++++ b/vendor/file_contexts
+@@ -29,6 +29,7 @@
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.contexthub@1\.[0-9]+-service     u:object_r:hal_contexthub_default_exec:s0
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.drm@1\.0-service            u:object_r:hal_drm_default_exec:s0
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.drm@1\.0-service-lazy       u:object_r:hal_drm_default_exec:s0
++/(vendor|system/vendor)/bin/hw/android\.hardware\.drm@1\.4-service-lazy\.clearkey u:object_r:hal_drm_default_exec:s0
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.cas@1\.[0-2]-service            u:object_r:hal_cas_default_exec:s0
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.cas@1\.[0-2]-service-lazy       u:object_r:hal_cas_default_exec:s0
+ /(vendor|system/vendor)/bin/hw/android\.hardware\.dumpstate@1\.[0-1]-service\.example      u:object_r:hal_dumpstate_default_exec:s0
+-- 
+2.47.3
+

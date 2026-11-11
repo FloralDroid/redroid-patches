@@ -1,0 +1,212 @@
+From 253c797662fa1eba38e2fcb99bde49ed97f41f1a Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 12 Nov 2026 02:13:52 +0800
+Subject: [PATCH] sepolicy: Allow media memfd buffer exchange
+
+When libcutils uses memfd instead of ashmem, media buffers carry
+the producer's tmpfs label rather than the shared ashmem device label.
+Permit App clients to use extractor buffers, the software Codec2
+service to use mediaserver queues, and mediaserver to use AudioFlinger
+buffers already passed through Binder. Classify extractor shared buffers
+like the original ashmem objects so categorized Apps can update them.
+Also retain the native playback path: mediaserver consumes extractor
+sample buffers, and the hardware codec service consumes mediaserver
+queues. Both edges already work with the original ashmem objects.
+Do not grant pathname open, buffer creation or unrelated file access.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ prebuilts/api/31.0/private/mediaserver.te   | 5 +++++
+ prebuilts/api/31.0/private/mediaswcodec.te  | 3 +++
+ prebuilts/api/31.0/public/app.te            | 1 +
+ prebuilts/api/31.0/public/mediaextractor.te | 3 ++-
+ prebuilts/api/32.0/private/mediaserver.te   | 5 +++++
+ prebuilts/api/32.0/private/mediaswcodec.te  | 3 +++
+ prebuilts/api/32.0/public/app.te            | 1 +
+ prebuilts/api/32.0/public/mediaextractor.te | 3 ++-
+ private/mediaserver.te                      | 5 +++++
+ private/mediaswcodec.te                     | 3 +++
+ public/app.te                               | 1 +
+ public/mediaextractor.te                    | 3 ++-
+ vendor/mediacodec.te                        | 3 +++
+ 13 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/prebuilts/api/31.0/private/mediaserver.te b/prebuilts/api/31.0/private/mediaserver.te
+index 6fe460ca5021fbd975081938465cb0372b088ae3..0d6d8869183aaaa972fc59a2dce2c00e7619a3fe 100644
+--- a/prebuilts/api/31.0/private/mediaserver.te
++++ b/prebuilts/api/31.0/private/mediaserver.te
+@@ -1,6 +1,11 @@
+ typeattribute mediaserver coredomain;
+ 
+ init_daemon_domain(mediaserver)
++
++# Playback receives AudioFlinger shared client buffers through Binder.
++allow mediaserver audioserver_tmpfs:file { getattr map read write };
++# MediaExtractor sends shared sample buffers through Binder.
++allow mediaserver mediaextractor_tmpfs:file { getattr map read write };
+ tmpfs_domain(mediaserver)
+ allow mediaserver appdomain_tmpfs:file { getattr map read write };
+ 
+diff --git a/prebuilts/api/31.0/private/mediaswcodec.te b/prebuilts/api/31.0/private/mediaswcodec.te
+index 02079c1131dd6a6b2d479f8a2d92ce055dbcfbf0..cfd6877355e6d511a42b2a3cc6e082f72e472eac 100644
+--- a/prebuilts/api/31.0/private/mediaswcodec.te
++++ b/prebuilts/api/31.0/private/mediaswcodec.te
+@@ -2,5 +2,8 @@ typeattribute mediaswcodec coredomain;
+ 
+ init_daemon_domain(mediaswcodec)
+ 
++# Codec2 receives shared queues from mediaserver through Binder.
++allow mediaswcodec mediaserver_tmpfs:file { getattr map read write };
++
+ get_prop(mediaswcodec, device_config_media_native_prop)
+ get_prop(mediaswcodec, device_config_swcodec_native_prop)
+diff --git a/prebuilts/api/31.0/public/app.te b/prebuilts/api/31.0/public/app.te
+index 5527f9994137d506b4e265ac6631087677ddbd0e..8f64f1e87ff23d54fdd00fb1172692aa5b26083b 100644
+--- a/prebuilts/api/31.0/public/app.te
++++ b/prebuilts/api/31.0/public/app.te
+@@ -374,6 +374,7 @@ allow appdomain dropbox_data_file:file { getattr read };
+ 
+ # Read tmpfs types from these processes.
+ allow appdomain audioserver_tmpfs:file { getattr map read write };
++allow appdomain mediaextractor_tmpfs:file { getattr map read write };
+ allow appdomain system_server_tmpfs:file { getattr map read write };
+ allow appdomain zygote_tmpfs:file { map read };
+ 
+diff --git a/prebuilts/api/31.0/public/mediaextractor.te b/prebuilts/api/31.0/public/mediaextractor.te
+index 06f7928f1211888238791844409d6be2d3afde18..2cee080a2bbfefc41dfc61609a5808b32e0ef297 100644
+--- a/prebuilts/api/31.0/public/mediaextractor.te
++++ b/prebuilts/api/31.0/public/mediaextractor.te
+@@ -1,7 +1,8 @@
+ # mediaextractor - multimedia daemon
+ type mediaextractor, domain;
+ type mediaextractor_exec, system_file_type, exec_type, file_type;
+-type mediaextractor_tmpfs, file_type;
++# Shared memfd buffers retain the cross-category ashmem contract.
++type mediaextractor_tmpfs, file_type, mlstrustedobject;
+ 
+ typeattribute mediaextractor mlstrustedsubject;
+ 
+diff --git a/prebuilts/api/32.0/private/mediaserver.te b/prebuilts/api/32.0/private/mediaserver.te
+index 6fe460ca5021fbd975081938465cb0372b088ae3..0d6d8869183aaaa972fc59a2dce2c00e7619a3fe 100644
+--- a/prebuilts/api/32.0/private/mediaserver.te
++++ b/prebuilts/api/32.0/private/mediaserver.te
+@@ -1,6 +1,11 @@
+ typeattribute mediaserver coredomain;
+ 
+ init_daemon_domain(mediaserver)
++
++# Playback receives AudioFlinger shared client buffers through Binder.
++allow mediaserver audioserver_tmpfs:file { getattr map read write };
++# MediaExtractor sends shared sample buffers through Binder.
++allow mediaserver mediaextractor_tmpfs:file { getattr map read write };
+ tmpfs_domain(mediaserver)
+ allow mediaserver appdomain_tmpfs:file { getattr map read write };
+ 
+diff --git a/prebuilts/api/32.0/private/mediaswcodec.te b/prebuilts/api/32.0/private/mediaswcodec.te
+index 02079c1131dd6a6b2d479f8a2d92ce055dbcfbf0..cfd6877355e6d511a42b2a3cc6e082f72e472eac 100644
+--- a/prebuilts/api/32.0/private/mediaswcodec.te
++++ b/prebuilts/api/32.0/private/mediaswcodec.te
+@@ -2,5 +2,8 @@ typeattribute mediaswcodec coredomain;
+ 
+ init_daemon_domain(mediaswcodec)
+ 
++# Codec2 receives shared queues from mediaserver through Binder.
++allow mediaswcodec mediaserver_tmpfs:file { getattr map read write };
++
+ get_prop(mediaswcodec, device_config_media_native_prop)
+ get_prop(mediaswcodec, device_config_swcodec_native_prop)
+diff --git a/prebuilts/api/32.0/public/app.te b/prebuilts/api/32.0/public/app.te
+index 5527f9994137d506b4e265ac6631087677ddbd0e..8f64f1e87ff23d54fdd00fb1172692aa5b26083b 100644
+--- a/prebuilts/api/32.0/public/app.te
++++ b/prebuilts/api/32.0/public/app.te
+@@ -374,6 +374,7 @@ allow appdomain dropbox_data_file:file { getattr read };
+ 
+ # Read tmpfs types from these processes.
+ allow appdomain audioserver_tmpfs:file { getattr map read write };
++allow appdomain mediaextractor_tmpfs:file { getattr map read write };
+ allow appdomain system_server_tmpfs:file { getattr map read write };
+ allow appdomain zygote_tmpfs:file { map read };
+ 
+diff --git a/prebuilts/api/32.0/public/mediaextractor.te b/prebuilts/api/32.0/public/mediaextractor.te
+index 06f7928f1211888238791844409d6be2d3afde18..2cee080a2bbfefc41dfc61609a5808b32e0ef297 100644
+--- a/prebuilts/api/32.0/public/mediaextractor.te
++++ b/prebuilts/api/32.0/public/mediaextractor.te
+@@ -1,7 +1,8 @@
+ # mediaextractor - multimedia daemon
+ type mediaextractor, domain;
+ type mediaextractor_exec, system_file_type, exec_type, file_type;
+-type mediaextractor_tmpfs, file_type;
++# Shared memfd buffers retain the cross-category ashmem contract.
++type mediaextractor_tmpfs, file_type, mlstrustedobject;
+ 
+ typeattribute mediaextractor mlstrustedsubject;
+ 
+diff --git a/private/mediaserver.te b/private/mediaserver.te
+index 6fe460ca5021fbd975081938465cb0372b088ae3..0d6d8869183aaaa972fc59a2dce2c00e7619a3fe 100644
+--- a/private/mediaserver.te
++++ b/private/mediaserver.te
+@@ -1,6 +1,11 @@
+ typeattribute mediaserver coredomain;
+ 
+ init_daemon_domain(mediaserver)
++
++# Playback receives AudioFlinger shared client buffers through Binder.
++allow mediaserver audioserver_tmpfs:file { getattr map read write };
++# MediaExtractor sends shared sample buffers through Binder.
++allow mediaserver mediaextractor_tmpfs:file { getattr map read write };
+ tmpfs_domain(mediaserver)
+ allow mediaserver appdomain_tmpfs:file { getattr map read write };
+ 
+diff --git a/private/mediaswcodec.te b/private/mediaswcodec.te
+index 02079c1131dd6a6b2d479f8a2d92ce055dbcfbf0..cfd6877355e6d511a42b2a3cc6e082f72e472eac 100644
+--- a/private/mediaswcodec.te
++++ b/private/mediaswcodec.te
+@@ -2,5 +2,8 @@ typeattribute mediaswcodec coredomain;
+ 
+ init_daemon_domain(mediaswcodec)
+ 
++# Codec2 receives shared queues from mediaserver through Binder.
++allow mediaswcodec mediaserver_tmpfs:file { getattr map read write };
++
+ get_prop(mediaswcodec, device_config_media_native_prop)
+ get_prop(mediaswcodec, device_config_swcodec_native_prop)
+diff --git a/public/app.te b/public/app.te
+index 5527f9994137d506b4e265ac6631087677ddbd0e..8f64f1e87ff23d54fdd00fb1172692aa5b26083b 100644
+--- a/public/app.te
++++ b/public/app.te
+@@ -374,6 +374,7 @@ allow appdomain dropbox_data_file:file { getattr read };
+ 
+ # Read tmpfs types from these processes.
+ allow appdomain audioserver_tmpfs:file { getattr map read write };
++allow appdomain mediaextractor_tmpfs:file { getattr map read write };
+ allow appdomain system_server_tmpfs:file { getattr map read write };
+ allow appdomain zygote_tmpfs:file { map read };
+ 
+diff --git a/public/mediaextractor.te b/public/mediaextractor.te
+index 06f7928f1211888238791844409d6be2d3afde18..2cee080a2bbfefc41dfc61609a5808b32e0ef297 100644
+--- a/public/mediaextractor.te
++++ b/public/mediaextractor.te
+@@ -1,7 +1,8 @@
+ # mediaextractor - multimedia daemon
+ type mediaextractor, domain;
+ type mediaextractor_exec, system_file_type, exec_type, file_type;
+-type mediaextractor_tmpfs, file_type;
++# Shared memfd buffers retain the cross-category ashmem contract.
++type mediaextractor_tmpfs, file_type, mlstrustedobject;
+ 
+ typeattribute mediaextractor mlstrustedsubject;
+ 
+diff --git a/vendor/mediacodec.te b/vendor/mediacodec.te
+index f78b58f2854568552b903fb8035d54d09cdecd02..1756f47171ce256942b92fc8c2177a5292351f0a 100644
+--- a/vendor/mediacodec.te
++++ b/vendor/mediacodec.te
+@@ -3,6 +3,9 @@ type mediacodec_exec, exec_type, vendor_file_type, file_type;
+ 
+ init_daemon_domain(mediacodec)
+ 
++# Codec2 receives mediaserver shared input and surface buffers through Binder.
++allow mediacodec mediaserver_tmpfs:file { getattr map read write };
++
+ # can route /dev/binder traffic to /dev/vndbinder
+ vndbinder_use(mediacodec)
+ 

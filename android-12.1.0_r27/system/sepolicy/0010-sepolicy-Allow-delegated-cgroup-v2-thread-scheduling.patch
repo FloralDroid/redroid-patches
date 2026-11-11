@@ -1,13 +1,51 @@
+From 1b078102159f4e73b5b47bb117ded8f75998cb48 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
+Date: Wed, 11 Nov 2026 14:33:34 +0800
 Subject: [PATCH] sepolicy: Allow delegated cgroup v2 thread scheduling
 
-Permit App domains to resolve and update their existing delegated
-thread scheduling files. Keep cgroup v1 access forbidden and retain
-DAC ownership of process controls and ancestor resource budgets.
+Permit App domains and the WebView zygote's pre-transition child
+to use their existing delegated thread scheduling files. Keep cgroup v1
+access forbidden for Apps and retain DAC ownership of process controls
+and ancestor resource budgets.
 Match the existing cgroup MLS object classification so categorized Apps
-can use those TE permissions under enforcing SELinux.
+can use those TE permissions under enforcing SELinux. Allow only the
+child zygotes' self-created startup pipes and system_server's FD use and
+write, so cgroup delegation can finish before specialization continues.
+Let the root zygote inspect its waiting descendants before delegating their
+scheduling files, and let App zygote children read that scheduling metadata.
+Keep system_server's original capability set. Permit installd to read
+the cgroup v2 metadata needed to apply its dex2oat scheduling profile.
 
 Signed-off-by: 5656565566 <contact@home56.top>
+---
+ prebuilts/api/31.0/private/app.te             | 4 ++++
+ prebuilts/api/31.0/private/app_neverallows.te | 3 ++-
+ prebuilts/api/31.0/private/app_zygote.te      | 7 +++++++
+ prebuilts/api/31.0/private/priv_app.te        | 3 ++-
+ prebuilts/api/31.0/private/system_server.te   | 4 ++++
+ prebuilts/api/31.0/private/webview_zygote.te  | 7 +++++++
+ prebuilts/api/31.0/private/zygote.te          | 5 +++++
+ prebuilts/api/31.0/public/file.te             | 2 +-
+ prebuilts/api/31.0/public/installd.te         | 3 +++
+ prebuilts/api/32.0/private/app.te             | 4 ++++
+ prebuilts/api/32.0/private/app_neverallows.te | 3 ++-
+ prebuilts/api/32.0/private/app_zygote.te      | 7 +++++++
+ prebuilts/api/32.0/private/priv_app.te        | 3 ++-
+ prebuilts/api/32.0/private/system_server.te   | 4 ++++
+ prebuilts/api/32.0/private/webview_zygote.te  | 7 +++++++
+ prebuilts/api/32.0/private/zygote.te          | 5 +++++
+ prebuilts/api/32.0/public/file.te             | 2 +-
+ prebuilts/api/32.0/public/installd.te         | 3 +++
+ private/app.te                                | 4 ++++
+ private/app_neverallows.te                    | 3 ++-
+ private/app_zygote.te                         | 7 +++++++
+ private/priv_app.te                           | 3 ++-
+ private/system_server.te                      | 4 ++++
+ private/webview_zygote.te                     | 7 +++++++
+ private/zygote.te                             | 5 +++++
+ public/file.te                                | 2 +-
+ public/installd.te                            | 3 +++
+ 27 files changed, 105 insertions(+), 9 deletions(-)
 
 diff --git a/prebuilts/api/31.0/private/app.te b/prebuilts/api/31.0/private/app.te
 index 2b3554f8805f9ee51cafed9cb8e3e25e3c586f34..9d1c95036c9bc7957595fb0680584508c6e84e24 100644
@@ -35,6 +73,24 @@ index c7fa4e8c5081986b7cabd525b5803412a0ad069e..2d687059cf22674fc874241fca0303bb
  
  # /mnt/sdcard symlink was supposed to have been removed in Gingerbread. Apps
  # must not use it.
+diff --git a/prebuilts/api/31.0/private/app_zygote.te b/prebuilts/api/31.0/private/app_zygote.te
+index 004c10844d8935d67174038f6082a179dded8898..b5a5263f957f0bb92b48a76c377d8d5c3e1f6d3f 100644
+--- a/prebuilts/api/31.0/private/app_zygote.te
++++ b/prebuilts/api/31.0/private/app_zygote.te
+@@ -8,6 +8,13 @@ typeattribute app_zygote coredomain;
+ # a domain macro.
+ tmpfs_domain(app_zygote);
+ 
++# Resolve the delegated scheduling domain before the App transition.
++allow app_zygote cgroup_v2:dir getattr;
++allow app_zygote cgroup_v2:file { getattr read };
++
++# One-shot gate for system_server to finish the child cgroup.
++allow app_zygote self:fifo_file create;
++
+ # Set the UID/GID of the process.
+ # This will be further limited to a range of isolated UIDs with seccomp.
+ allow app_zygote self:global_capability_class_set { setgid setuid };
 diff --git a/prebuilts/api/31.0/private/priv_app.te b/prebuilts/api/31.0/private/priv_app.te
 index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465ab999e6c 100644
 --- a/prebuilts/api/31.0/private/priv_app.te
@@ -49,6 +105,55 @@ index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465
  
  # Do not allow loading executable code from non-privileged
  # application home directories. Code loading across a security boundary
+diff --git a/prebuilts/api/31.0/private/system_server.te b/prebuilts/api/31.0/private/system_server.te
+index 82b2a1f0669eb59e455478f09ac31efba171f9fa..55626d9868e20e2f5636872b2ea6f465bbceba96 100644
+--- a/prebuilts/api/31.0/private/system_server.te
++++ b/prebuilts/api/31.0/private/system_server.te
+@@ -12,6 +12,10 @@ typeattribute system_server stats_service_server;
+ # Define a type for tmpfs-backed ashmem regions.
+ tmpfs_domain(system_server)
+ 
++# Release non-root zygote children only after cgroup delegation.
++allow system_server { webview_zygote app_zygote }:fd use;
++allow system_server { webview_zygote app_zygote }:fifo_file write;
++
+ userfaultfd_use(system_server)
+ 
+ # Create a socket for connections from crash_dump.
+diff --git a/prebuilts/api/31.0/private/webview_zygote.te b/prebuilts/api/31.0/private/webview_zygote.te
+index 3473ecaee77923e5080c2b4e8b176b97fcf4ce31..d04bfb46123a88076ea520eed4e7db59fc7704b8 100644
+--- a/prebuilts/api/31.0/private/webview_zygote.te
++++ b/prebuilts/api/31.0/private/webview_zygote.te
+@@ -10,6 +10,13 @@ typeattribute webview_zygote mlstrustedsubject;
+ # a domain macro.
+ tmpfs_domain(webview_zygote);
+ 
++# One-shot gate for system_server to finish the child cgroup.
++allow webview_zygote self:fifo_file create;
++
++# Set child scheduling groups before transitioning to isolated_app.
++allow webview_zygote cgroup_v2:dir { getattr search };
++allow webview_zygote cgroup_v2:file { getattr open read write };
++
+ userfaultfd_use(webview_zygote)
+ 
+ # Allow reading/executing installed binaries to enable preloading the
+diff --git a/prebuilts/api/31.0/private/zygote.te b/prebuilts/api/31.0/private/zygote.te
+index 090e1214221363e2329eab22512e093e58abc141..d8cc44ea4de7f50da1018a11ce7bf223a2a5af3d 100644
+--- a/prebuilts/api/31.0/private/zygote.te
++++ b/prebuilts/api/31.0/private/zygote.te
+@@ -5,6 +5,11 @@ typeattribute zygote mlstrustedsubject;
+ init_daemon_domain(zygote)
+ tmpfs_domain(zygote)
+ 
++# Authenticate waiting descendants before creating their process cgroup.
++allow zygote { app_zygote webview_zygote }:dir { getattr search };
++allow zygote { app_zygote webview_zygote }:file { getattr open read };
++allow zygote { app_zygote webview_zygote }:process getattr;
++
+ read_runtime_log_tags(zygote)
+ 
+ # Override DAC on files and switch uid/gid.
 diff --git a/prebuilts/api/31.0/public/file.te b/prebuilts/api/31.0/public/file.te
 index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e099a22e6e4 100644
 --- a/prebuilts/api/31.0/public/file.te
@@ -62,6 +167,20 @@ index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e09
  type sysfs, fs_type, sysfs_type, mlstrustedobject;
  type sysfs_android_usb, fs_type, sysfs_type;
  type sysfs_uio, sysfs_type, fs_type;
+diff --git a/prebuilts/api/31.0/public/installd.te b/prebuilts/api/31.0/public/installd.te
+index 08060e30d309f2eb33e52fd52abbed6ab7a2932a..fe78e34916ea6b773952120e364ae578625711fe 100644
+--- a/prebuilts/api/31.0/public/installd.te
++++ b/prebuilts/api/31.0/public/installd.te
+@@ -27,6 +27,9 @@ allow installd oemfs:dir r_dir_perms;
+ allow installd oemfs:file r_file_perms;
+ allow installd cgroup:dir create_dir_perms;
+ allow installd cgroup_v2:dir create_dir_perms;
++
++# Resolve the delegated process and thread scheduling metadata.
++allow installd cgroup_v2:file { getattr read };
+ allow installd mnt_expand_file:dir { search getattr };
+ # Check validity of SELinux context before use.
+ selinux_check_context(installd)
 diff --git a/prebuilts/api/32.0/private/app.te b/prebuilts/api/32.0/private/app.te
 index 30c76d330be32ccee7c5011a6060f98aaa11707b..f77ff21afc472ed1fbf2132eb118c3dc889c05d8 100644
 --- a/prebuilts/api/32.0/private/app.te
@@ -88,6 +207,24 @@ index c7fa4e8c5081986b7cabd525b5803412a0ad069e..2d687059cf22674fc874241fca0303bb
  
  # /mnt/sdcard symlink was supposed to have been removed in Gingerbread. Apps
  # must not use it.
+diff --git a/prebuilts/api/32.0/private/app_zygote.te b/prebuilts/api/32.0/private/app_zygote.te
+index 004c10844d8935d67174038f6082a179dded8898..b5a5263f957f0bb92b48a76c377d8d5c3e1f6d3f 100644
+--- a/prebuilts/api/32.0/private/app_zygote.te
++++ b/prebuilts/api/32.0/private/app_zygote.te
+@@ -8,6 +8,13 @@ typeattribute app_zygote coredomain;
+ # a domain macro.
+ tmpfs_domain(app_zygote);
+ 
++# Resolve the delegated scheduling domain before the App transition.
++allow app_zygote cgroup_v2:dir getattr;
++allow app_zygote cgroup_v2:file { getattr read };
++
++# One-shot gate for system_server to finish the child cgroup.
++allow app_zygote self:fifo_file create;
++
+ # Set the UID/GID of the process.
+ # This will be further limited to a range of isolated UIDs with seccomp.
+ allow app_zygote self:global_capability_class_set { setgid setuid };
 diff --git a/prebuilts/api/32.0/private/priv_app.te b/prebuilts/api/32.0/private/priv_app.te
 index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465ab999e6c 100644
 --- a/prebuilts/api/32.0/private/priv_app.te
@@ -102,6 +239,55 @@ index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465
  
  # Do not allow loading executable code from non-privileged
  # application home directories. Code loading across a security boundary
+diff --git a/prebuilts/api/32.0/private/system_server.te b/prebuilts/api/32.0/private/system_server.te
+index 82b2a1f0669eb59e455478f09ac31efba171f9fa..55626d9868e20e2f5636872b2ea6f465bbceba96 100644
+--- a/prebuilts/api/32.0/private/system_server.te
++++ b/prebuilts/api/32.0/private/system_server.te
+@@ -12,6 +12,10 @@ typeattribute system_server stats_service_server;
+ # Define a type for tmpfs-backed ashmem regions.
+ tmpfs_domain(system_server)
+ 
++# Release non-root zygote children only after cgroup delegation.
++allow system_server { webview_zygote app_zygote }:fd use;
++allow system_server { webview_zygote app_zygote }:fifo_file write;
++
+ userfaultfd_use(system_server)
+ 
+ # Create a socket for connections from crash_dump.
+diff --git a/prebuilts/api/32.0/private/webview_zygote.te b/prebuilts/api/32.0/private/webview_zygote.te
+index 3473ecaee77923e5080c2b4e8b176b97fcf4ce31..d04bfb46123a88076ea520eed4e7db59fc7704b8 100644
+--- a/prebuilts/api/32.0/private/webview_zygote.te
++++ b/prebuilts/api/32.0/private/webview_zygote.te
+@@ -10,6 +10,13 @@ typeattribute webview_zygote mlstrustedsubject;
+ # a domain macro.
+ tmpfs_domain(webview_zygote);
+ 
++# One-shot gate for system_server to finish the child cgroup.
++allow webview_zygote self:fifo_file create;
++
++# Set child scheduling groups before transitioning to isolated_app.
++allow webview_zygote cgroup_v2:dir { getattr search };
++allow webview_zygote cgroup_v2:file { getattr open read write };
++
+ userfaultfd_use(webview_zygote)
+ 
+ # Allow reading/executing installed binaries to enable preloading the
+diff --git a/prebuilts/api/32.0/private/zygote.te b/prebuilts/api/32.0/private/zygote.te
+index 743647ec7a1c3b13a3178351ceb5a09bd0d17d24..06d46553e824d6c5824bc25d3472f3e7e5c2db19 100644
+--- a/prebuilts/api/32.0/private/zygote.te
++++ b/prebuilts/api/32.0/private/zygote.te
+@@ -5,6 +5,11 @@ typeattribute zygote mlstrustedsubject;
+ init_daemon_domain(zygote)
+ tmpfs_domain(zygote)
+ 
++# Authenticate waiting descendants before creating their process cgroup.
++allow zygote { app_zygote webview_zygote }:dir { getattr search };
++allow zygote { app_zygote webview_zygote }:file { getattr open read };
++allow zygote { app_zygote webview_zygote }:process getattr;
++
+ read_runtime_log_tags(zygote)
+ 
+ # Override DAC on files and switch uid/gid.
 diff --git a/prebuilts/api/32.0/public/file.te b/prebuilts/api/32.0/public/file.te
 index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e099a22e6e4 100644
 --- a/prebuilts/api/32.0/public/file.te
@@ -115,6 +301,20 @@ index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e09
  type sysfs, fs_type, sysfs_type, mlstrustedobject;
  type sysfs_android_usb, fs_type, sysfs_type;
  type sysfs_uio, sysfs_type, fs_type;
+diff --git a/prebuilts/api/32.0/public/installd.te b/prebuilts/api/32.0/public/installd.te
+index 08060e30d309f2eb33e52fd52abbed6ab7a2932a..fe78e34916ea6b773952120e364ae578625711fe 100644
+--- a/prebuilts/api/32.0/public/installd.te
++++ b/prebuilts/api/32.0/public/installd.te
+@@ -27,6 +27,9 @@ allow installd oemfs:dir r_dir_perms;
+ allow installd oemfs:file r_file_perms;
+ allow installd cgroup:dir create_dir_perms;
+ allow installd cgroup_v2:dir create_dir_perms;
++
++# Resolve the delegated process and thread scheduling metadata.
++allow installd cgroup_v2:file { getattr read };
+ allow installd mnt_expand_file:dir { search getattr };
+ # Check validity of SELinux context before use.
+ selinux_check_context(installd)
 diff --git a/private/app.te b/private/app.te
 index 30c76d330be32ccee7c5011a6060f98aaa11707b..f77ff21afc472ed1fbf2132eb118c3dc889c05d8 100644
 --- a/private/app.te
@@ -141,6 +341,24 @@ index c7fa4e8c5081986b7cabd525b5803412a0ad069e..2d687059cf22674fc874241fca0303bb
  
  # /mnt/sdcard symlink was supposed to have been removed in Gingerbread. Apps
  # must not use it.
+diff --git a/private/app_zygote.te b/private/app_zygote.te
+index 004c10844d8935d67174038f6082a179dded8898..b5a5263f957f0bb92b48a76c377d8d5c3e1f6d3f 100644
+--- a/private/app_zygote.te
++++ b/private/app_zygote.te
+@@ -8,6 +8,13 @@ typeattribute app_zygote coredomain;
+ # a domain macro.
+ tmpfs_domain(app_zygote);
+ 
++# Resolve the delegated scheduling domain before the App transition.
++allow app_zygote cgroup_v2:dir getattr;
++allow app_zygote cgroup_v2:file { getattr read };
++
++# One-shot gate for system_server to finish the child cgroup.
++allow app_zygote self:fifo_file create;
++
+ # Set the UID/GID of the process.
+ # This will be further limited to a range of isolated UIDs with seccomp.
+ allow app_zygote self:global_capability_class_set { setgid setuid };
 diff --git a/private/priv_app.te b/private/priv_app.te
 index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465ab999e6c 100644
 --- a/private/priv_app.te
@@ -155,6 +373,55 @@ index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465
  
  # Do not allow loading executable code from non-privileged
  # application home directories. Code loading across a security boundary
+diff --git a/private/system_server.te b/private/system_server.te
+index 82b2a1f0669eb59e455478f09ac31efba171f9fa..55626d9868e20e2f5636872b2ea6f465bbceba96 100644
+--- a/private/system_server.te
++++ b/private/system_server.te
+@@ -12,6 +12,10 @@ typeattribute system_server stats_service_server;
+ # Define a type for tmpfs-backed ashmem regions.
+ tmpfs_domain(system_server)
+ 
++# Release non-root zygote children only after cgroup delegation.
++allow system_server { webview_zygote app_zygote }:fd use;
++allow system_server { webview_zygote app_zygote }:fifo_file write;
++
+ userfaultfd_use(system_server)
+ 
+ # Create a socket for connections from crash_dump.
+diff --git a/private/webview_zygote.te b/private/webview_zygote.te
+index 3473ecaee77923e5080c2b4e8b176b97fcf4ce31..d04bfb46123a88076ea520eed4e7db59fc7704b8 100644
+--- a/private/webview_zygote.te
++++ b/private/webview_zygote.te
+@@ -10,6 +10,13 @@ typeattribute webview_zygote mlstrustedsubject;
+ # a domain macro.
+ tmpfs_domain(webview_zygote);
+ 
++# One-shot gate for system_server to finish the child cgroup.
++allow webview_zygote self:fifo_file create;
++
++# Set child scheduling groups before transitioning to isolated_app.
++allow webview_zygote cgroup_v2:dir { getattr search };
++allow webview_zygote cgroup_v2:file { getattr open read write };
++
+ userfaultfd_use(webview_zygote)
+ 
+ # Allow reading/executing installed binaries to enable preloading the
+diff --git a/private/zygote.te b/private/zygote.te
+index 743647ec7a1c3b13a3178351ceb5a09bd0d17d24..06d46553e824d6c5824bc25d3472f3e7e5c2db19 100644
+--- a/private/zygote.te
++++ b/private/zygote.te
+@@ -5,6 +5,11 @@ typeattribute zygote mlstrustedsubject;
+ init_daemon_domain(zygote)
+ tmpfs_domain(zygote)
+ 
++# Authenticate waiting descendants before creating their process cgroup.
++allow zygote { app_zygote webview_zygote }:dir { getattr search };
++allow zygote { app_zygote webview_zygote }:file { getattr open read };
++allow zygote { app_zygote webview_zygote }:process getattr;
++
+ read_runtime_log_tags(zygote)
+ 
+ # Override DAC on files and switch uid/gid.
 diff --git a/public/file.te b/public/file.te
 index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e099a22e6e4 100644
 --- a/public/file.te
@@ -168,3 +435,20 @@ index dc788ac6a39631fe5096a3ab271df52f48aa5149..986960c239d0a6a0a25b368de65e9e09
  type sysfs, fs_type, sysfs_type, mlstrustedobject;
  type sysfs_android_usb, fs_type, sysfs_type;
  type sysfs_uio, sysfs_type, fs_type;
+diff --git a/public/installd.te b/public/installd.te
+index 08060e30d309f2eb33e52fd52abbed6ab7a2932a..fe78e34916ea6b773952120e364ae578625711fe 100644
+--- a/public/installd.te
++++ b/public/installd.te
+@@ -27,6 +27,9 @@ allow installd oemfs:dir r_dir_perms;
+ allow installd oemfs:file r_file_perms;
+ allow installd cgroup:dir create_dir_perms;
+ allow installd cgroup_v2:dir create_dir_perms;
++
++# Resolve the delegated process and thread scheduling metadata.
++allow installd cgroup_v2:file { getattr read };
+ allow installd mnt_expand_file:dir { search getattr };
+ # Check validity of SELinux context before use.
+ selinux_check_context(installd)
+-- 
+2.47.3
+

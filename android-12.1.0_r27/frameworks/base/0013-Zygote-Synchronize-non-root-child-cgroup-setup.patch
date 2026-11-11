@@ -1,0 +1,735 @@
+From bdec50840399e26dd10d90f78f6eb7073450f37d Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Thu, 12 Nov 2026 02:00:40 +0800
+Subject: [PATCH] Zygote: Synchronize non-root child cgroup setup
+
+WebView and App zygotes cannot prepare their children's process cgroups.
+Their child specialization races system_server's creation and delegation
+of the target UID's scheduling files, and may abort with EACCES while
+still running as the zygote UID.
+
+Return a one-shot pipe with the PID for explicit child-zygote requests.
+Wait at the target UID until system_server acknowledges completed setup,
+then apply the existing scheduler profile. Have the matching root zygote
+perform creation and ownership delegation: system_server retains its
+original capabilities and cannot chown scheduling files to another UID.
+Authenticate its socket SID and restrict the target to an isolated UID
+in a still-specializing descendant of that zygote.
+
+Have the child acknowledge its target UID to its parent before the PID
+is returned. Otherwise delegation can race setresuid and reject a valid
+child before it reaches the existing setup gate. Bound this first phase
+by the existing child-start timeout and keep every identity check.
+
+Close both ends on every exit; EOF, invalid acknowledgements and failed
+setup cannot launch the child. Keep regular zygote, USAP and system_server
+specialization ordering intact.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ core/java/android/os/Process.java             |   5 +
+ core/java/android/os/ZygoteProcess.java       |  70 +++++++++-
+ core/java/com/android/internal/os/Zygote.java |  33 ++++-
+ .../android/internal/os/ZygoteArguments.java  |  21 +++
+ .../android/internal/os/ZygoteConnection.java | 119 ++++++++++++++--
+ core/jni/com_android_internal_os_Zygote.cpp   | 131 +++++++++++++++++-
+ .../com/android/server/am/ProcessList.java    |  32 ++++-
+ 7 files changed, 380 insertions(+), 31 deletions(-)
+
+diff --git a/core/java/android/os/Process.java b/core/java/android/os/Process.java
+index 9f37c4877199dfa07be7d7c01dc0270cfa0b84c1..70f93b96439448c0c871d7f51c17b3f68a3f477f 100644
+--- a/core/java/android/os/Process.java
++++ b/core/java/android/os/Process.java
+@@ -1309,6 +1309,11 @@ public class Process {
+          * True if the process was started with a wrapper attached.
+          */
+         public boolean usingWrapper;
++
++        /**
++         * Child-zygote startup gate. The caller closes it after preparing the process cgroup.
++         */
++        public FileDescriptor cgroupSetupPipe;
+     }
+ 
+     /**
+diff --git a/core/java/android/os/ZygoteProcess.java b/core/java/android/os/ZygoteProcess.java
+index bf28981379672fdbc3abdf68f53632552c595548..2c65ac3c648df5de7f1fc6e7c5b61431068dc381 100644
+--- a/core/java/android/os/ZygoteProcess.java
++++ b/core/java/android/os/ZygoteProcess.java
+@@ -25,6 +25,9 @@ import android.compat.annotation.UnsupportedAppUsage;
+ import android.content.pm.ApplicationInfo;
+ import android.net.LocalSocket;
+ import android.net.LocalSocketAddress;
++import android.system.ErrnoException;
++import android.system.Os;
++import android.system.OsConstants;
+ import android.util.Log;
+ import android.util.Pair;
+ import android.util.Slog;
+@@ -33,8 +36,11 @@ import com.android.internal.annotations.GuardedBy;
+ import com.android.internal.os.Zygote;
+ import com.android.internal.os.ZygoteConfig;
+ 
++import libcore.io.IoUtils;
++
+ import java.io.BufferedWriter;
+ import java.io.DataInputStream;
++import java.io.FileDescriptor;
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
+ import java.nio.charset.StandardCharsets;
+@@ -294,6 +300,29 @@ public class ZygoteProcess {
+      */
+     private boolean mUsapPoolEnabled = false;
+ 
++    /** Prepare a waiting non-root zygote child through its privileged ancestor. */
++    public int createChildProcessGroup(int uid, int pid, String abi) {
++        synchronized (mLock) {
++            ZygoteState state = null;
++            try {
++                state = openZygoteSocketIfNeeded(abi);
++                state.mZygoteOutputWriter.write("1\n" + Zygote.CREATE_CHILD_CGROUP_ARG
++                        + uid + "," + pid + "\n");
++                state.mZygoteOutputWriter.flush();
++                int result = state.mZygoteInputStream.readInt();
++                FileDescriptor[] fds = state.mZygoteSessionSocket.getAncillaryFileDescriptors();
++                if (fds != null) {
++                    for (FileDescriptor fd : fds) IoUtils.closeQuietly(fd);
++                    throw new IOException("Unexpected FD in cgroup setup response");
++                }
++                return result;
++            } catch (IOException | ZygoteStartFailedEx ex) {
++                if (state != null) state.close();
++                throw new IllegalStateException("Unable to prepare child process cgroup", ex);
++            }
++        }
++    }
++
+     /**
+      * Start a new process.
+      *
+@@ -446,7 +475,8 @@ public class ZygoteProcess {
+          */
+         String msgStr = args.size() + "\n" + String.join("\n", args) + "\n";
+ 
+-        if (shouldAttemptUsapLaunch(zygotePolicyFlags, args)) {
++        final boolean cgroupSetup = this instanceof ChildZygoteProcess;
++        if (!cgroupSetup && shouldAttemptUsapLaunch(zygotePolicyFlags, args)) {
+             try {
+                 return attemptUsapSendArgsAndGetResult(zygoteState, msgStr);
+             } catch (IOException ex) {
+@@ -457,11 +487,13 @@ public class ZygoteProcess {
+             }
+         }
+ 
+-        return attemptZygoteSendArgsAndGetResult(zygoteState, msgStr);
++        return attemptZygoteSendArgsAndGetResult(zygoteState, msgStr, cgroupSetup);
+     }
+ 
+     private Process.ProcessStartResult attemptZygoteSendArgsAndGetResult(
+-            ZygoteState zygoteState, String msgStr) throws ZygoteStartFailedEx {
++            ZygoteState zygoteState, String msgStr, boolean cgroupSetup)
++            throws ZygoteStartFailedEx {
++        FileDescriptor[] receivedFds = null;
+         try {
+             final BufferedWriter zygoteWriter = zygoteState.mZygoteOutputWriter;
+             final DataInputStream zygoteInputStream = zygoteState.mZygoteInputStream;
+@@ -473,19 +505,44 @@ public class ZygoteProcess {
+             // bytes in the stream for future process starts to accidentally stumble
+             // upon.
+             Process.ProcessStartResult result = new Process.ProcessStartResult();
+-            result.pid = zygoteInputStream.readInt();
+-            result.usingWrapper = zygoteInputStream.readBoolean();
++            try {
++                result.pid = zygoteInputStream.readInt();
++                result.usingWrapper = zygoteInputStream.readBoolean();
++            } finally {
++                receivedFds = zygoteState.mZygoteSessionSocket.getAncillaryFileDescriptors();
++            }
++
++            final int expectedFds = cgroupSetup && result.pid >= 0 ? 1 : 0;
++            if ((receivedFds == null ? 0 : receivedFds.length) != expectedFds
++                    || (cgroupSetup && result.usingWrapper)) {
++                throw new IOException("Invalid child-zygote cgroup setup response");
++            }
+ 
+             if (result.pid < 0) {
+                 throw new ZygoteStartFailedEx("fork() failed");
+             }
+ 
++            if (cgroupSetup) {
++                // SCM_RIGHTS does not preserve the sender's close-on-exec flag.
++                Os.fcntlInt(receivedFds[0], OsConstants.F_SETFD, OsConstants.FD_CLOEXEC);
++                result.cgroupSetupPipe = receivedFds[0];
++                receivedFds = null;
++            }
+             return result;
++        } catch (ErrnoException ex) {
++            zygoteState.close();
++            throw new ZygoteStartFailedEx(ex);
+         } catch (IOException ex) {
+             zygoteState.close();
+             Log.e(LOG_TAG, "IO Exception while communicating with Zygote - "
+                     + ex.toString());
+             throw new ZygoteStartFailedEx(ex);
++        } finally {
++            if (receivedFds != null) {
++                for (FileDescriptor fd : receivedFds) {
++                    IoUtils.closeQuietly(fd);
++                }
++            }
+         }
+     }
+ 
+@@ -775,6 +832,9 @@ public class ZygoteProcess {
+             argsForZygote.add(sb.toString());
+         }
+ 
++        if (this instanceof ChildZygoteProcess) {
++            argsForZygote.add(Zygote.CGROUP_SETUP_ARG);
++        }
+         argsForZygote.add(processClass);
+ 
+         if (extraArgs != null) {
+diff --git a/core/java/com/android/internal/os/Zygote.java b/core/java/com/android/internal/os/Zygote.java
+index e4e28a926ed6d03df12981eff2a5ab518a149423..e6c7c4fb3050cd03179edf3e800972b1f6f666e0 100644
+--- a/core/java/com/android/internal/os/Zygote.java
++++ b/core/java/com/android/internal/os/Zygote.java
+@@ -215,6 +215,14 @@ public final class Zygote {
+     /** Bind mount app storage dirs to lower fs not via fuse */
+     public static final String BIND_MOUNT_APP_DATA_DIRS = "--bind-mount-data-dirs";
+ 
++    /** Wait for system_server to finish a child zygote's process cgroup. */
++    public static final String CGROUP_SETUP_ARG = "--cgroup-setup";
++
++    /** Ask the root zygote to prepare a waiting descendant's process cgroup. */
++    public static final String CREATE_CHILD_CGROUP_ARG = "--create-child-cgroup=";
++
++    static native int nativeCreateChildProcessGroup(int uid, int pid, int socketFd);
++
+     /**
+      * An extraArg passed when a zygote process is forking a child-zygote, specifying a name
+      * in the abstract socket namespace. This socket name is what the new child zygote
+@@ -332,6 +340,10 @@ public final class Zygote {
+      * @param allowlistedDataInfoList Like pkgDataInfoList, but it's for allowlisted apps.
+      * @param bindMountAppDataDirs  True if the zygote needs to mount data dirs.
+      * @param bindMountAppStorageDirs  True if the zygote needs to mount storage dirs.
++     * @param cgroupReadPipe child-zygote startup gate, or null for the regular zygote.
++     * @param cgroupWritePipe peer end to close in the child before waiting.
++     * @param cgroupReadyReadPipe parent end of the target UID acknowledgement.
++     * @param cgroupReadyWritePipe child end used after changing UID.
+      *
+      * @return 0 if this is the child, pid of the child
+      * if this is the parent, or -1 on error.
+@@ -340,15 +352,29 @@ public final class Zygote {
+             int[][] rlimits, int mountExternal, String seInfo, String niceName, int[] fdsToClose,
+             int[] fdsToIgnore, boolean startChildZygote, String instructionSet, String appDataDir,
+             boolean isTopApp, String[] pkgDataInfoList, String[] allowlistedDataInfoList,
+-            boolean bindMountAppDataDirs, boolean bindMountAppStorageDirs) {
++            boolean bindMountAppDataDirs, boolean bindMountAppStorageDirs,
++            FileDescriptor cgroupReadPipe, FileDescriptor cgroupWritePipe,
++            FileDescriptor cgroupReadyReadPipe, FileDescriptor cgroupReadyWritePipe) {
+         ZygoteHooks.preFork();
+ 
+         int pid = nativeForkAndSpecialize(
+                 uid, gid, gids, runtimeFlags, rlimits, mountExternal, seInfo, niceName, fdsToClose,
+                 fdsToIgnore, startChildZygote, instructionSet, appDataDir, isTopApp,
+                 pkgDataInfoList, allowlistedDataInfoList, bindMountAppDataDirs,
+-                bindMountAppStorageDirs);
++                bindMountAppStorageDirs,
++                cgroupReadPipe == null ? -1 : cgroupReadPipe.getInt$(),
++                cgroupWritePipe == null ? -1 : cgroupWritePipe.getInt$(),
++                cgroupReadyReadPipe == null ? -1 : cgroupReadyReadPipe.getInt$(),
++                cgroupReadyWritePipe == null ? -1 : cgroupReadyWritePipe.getInt$());
+         if (pid == 0) {
++            // Native specialization consumed these before returning to Java. Do not close a
++            // reused descriptor when ZygoteConnection releases its copies in the child.
++            if (cgroupReadPipe != null) {
++                cgroupReadPipe.setInt$(-1);
++                cgroupWritePipe.setInt$(-1);
++                cgroupReadyReadPipe.setInt$(-1);
++                cgroupReadyWritePipe.setInt$(-1);
++            }
+             // Note that this event ends at the end of handleChildProc,
+             Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "PostFork");
+ 
+@@ -370,7 +396,8 @@ public final class Zygote {
+             int[] fdsToClose, int[] fdsToIgnore, boolean startChildZygote, String instructionSet,
+             String appDataDir, boolean isTopApp, String[] pkgDataInfoList,
+             String[] allowlistedDataInfoList, boolean bindMountAppDataDirs,
+-            boolean bindMountAppStorageDirs);
++            boolean bindMountAppStorageDirs, int cgroupReadPipe, int cgroupWritePipe,
++            int cgroupReadyReadPipe, int cgroupReadyWritePipe);
+ 
+     /**
+      * Specialize an unspecialized app process.  The current VM must have been started
+diff --git a/core/java/com/android/internal/os/ZygoteArguments.java b/core/java/com/android/internal/os/ZygoteArguments.java
+index ef8398294c5b158c4ba08684f363550ceea46942..7a5005bed6db5c149c12986c13c642b48e612ead 100644
+--- a/core/java/com/android/internal/os/ZygoteArguments.java
++++ b/core/java/com/android/internal/os/ZygoteArguments.java
+@@ -181,6 +181,12 @@ class ZygoteArguments {
+      */
+     boolean mStartChildZygote;
+ 
++    /** Whether specialization must wait for system_server's cgroup setup. */
++    boolean mCgroupSetup;
++
++    /** Standalone cgroup request for a waiting descendant of the root zygote. */
++    int[] mChildCgroup;
++
+     /**
+      * Whether the current arguments constitute a request for the zygote's PID.
+      */
+@@ -425,6 +431,21 @@ class ZygoteArguments {
+                 expectRuntimeArgs = false;
+             } else if (arg.equals("--start-child-zygote")) {
+                 mStartChildZygote = true;
++            } else if (arg.equals(Zygote.CGROUP_SETUP_ARG)) {
++                if (mCgroupSetup) {
++                    throw new IllegalArgumentException("Duplicate cgroup setup argument");
++                }
++                mCgroupSetup = true;
++            } else if (arg.startsWith(Zygote.CREATE_CHILD_CGROUP_ARG)) {
++                if (argCount != 1) {
++                    throw new IllegalArgumentException("Cgroup setup must be a standalone request");
++                }
++                String[] target = getAssignmentValue(arg).split(",", -1);
++                if (target.length != 2) {
++                    throw new IllegalArgumentException("Invalid cgroup target");
++                }
++                mChildCgroup = new int[]{Integer.parseInt(target[0]), Integer.parseInt(target[1])};
++                expectRuntimeArgs = false;
+             } else if (arg.equals("--set-api-denylist-exemptions")) {
+                 // consume all remaining args; this is a stand-alone command, never included
+                 // with the regular fork command.
+diff --git a/core/java/com/android/internal/os/ZygoteConnection.java b/core/java/com/android/internal/os/ZygoteConnection.java
+index 993e4e7b4b3d0bb39f0afe8e60947fd3d03baded..7d133c7f2b8be623dd7b70f91c7203d562079771 100644
+--- a/core/java/com/android/internal/os/ZygoteConnection.java
++++ b/core/java/com/android/internal/os/ZygoteConnection.java
+@@ -32,6 +32,7 @@ import android.os.Process;
+ import android.os.Trace;
+ import android.system.ErrnoException;
+ import android.system.Os;
++import android.system.OsConstants;
+ import android.system.StructPollfd;
+ import android.util.Log;
+ 
+@@ -134,6 +135,21 @@ class ZygoteConnection {
+                 FileDescriptor childPipeFd = null;
+                 FileDescriptor serverPipeFd = null;
+ 
++                if (parsedArgs.mChildCgroup != null) {
++                    if (Process.myUid() != Process.ROOT_UID
++                            || peer.getUid() != Process.SYSTEM_UID) {
++                        throw new ZygoteSecurityException("Cgroup setup requires system_server");
++                    }
++                    int result = Zygote.nativeCreateChildProcessGroup(parsedArgs.mChildCgroup[0],
++                            parsedArgs.mChildCgroup[1], mSocket.getFileDescriptor().getInt$());
++                    try {
++                        mSocketOutStream.writeInt(result);
++                    } catch (IOException ex) {
++                        throw new IllegalStateException("Unable to return cgroup setup result", ex);
++                    }
++                    return null;
++                }
++
+                 if (parsedArgs.mBootCompleted) {
+                     handleBootCompleted();
+                     return null;
+@@ -200,6 +216,12 @@ class ZygoteConnection {
+                 Zygote.applyDebuggerSystemProperty(parsedArgs);
+                 Zygote.applyInvokeWithSystemProperty(parsedArgs);
+ 
++                if (parsedArgs.mCgroupSetup != (Process.myUid() != Process.ROOT_UID)
++                        || (parsedArgs.mCgroupSetup && (peer.getUid() != Process.SYSTEM_UID
++                                || parsedArgs.mStartChildZygote || parsedArgs.mInvokeWith != null))) {
++                    throw new ZygoteSecurityException("Invalid child-zygote cgroup setup request");
++                }
++
+                 int[][] rlimits = null;
+ 
+                 if (parsedArgs.mRLimits != null) {
+@@ -248,18 +270,35 @@ class ZygoteConnection {
+                 }
+ 
+                 if (parsedArgs.mInvokeWith != null || parsedArgs.mStartChildZygote
+-                        || !multipleOK || peer.getUid() != Process.SYSTEM_UID) {
++                        || parsedArgs.mCgroupSetup || !multipleOK
++                        || peer.getUid() != Process.SYSTEM_UID) {
+                     // Continue using old code for now. TODO: Handle these cases in the other path.
+-                    pid = Zygote.forkAndSpecialize(parsedArgs.mUid, parsedArgs.mGid,
+-                            parsedArgs.mGids, parsedArgs.mRuntimeFlags, rlimits,
+-                            parsedArgs.mMountExternal, parsedArgs.mSeInfo, parsedArgs.mNiceName,
+-                            fdsToClose, fdsToIgnore, parsedArgs.mStartChildZygote,
+-                            parsedArgs.mInstructionSet, parsedArgs.mAppDataDir,
+-                            parsedArgs.mIsTopApp, parsedArgs.mPkgDataInfoList,
+-                            parsedArgs.mAllowlistedDataInfoList, parsedArgs.mBindMountAppDataDirs,
+-                            parsedArgs.mBindMountAppStorageDirs);
+-
++                    FileDescriptor cgroupReadPipe = null;
++                    FileDescriptor cgroupWritePipe = null;
++                    FileDescriptor cgroupReadyReadPipe = null;
++                    FileDescriptor cgroupReadyWritePipe = null;
+                     try {
++                        if (parsedArgs.mCgroupSetup) {
++                            FileDescriptor[] pipeFds = Os.pipe2(O_CLOEXEC);
++                            cgroupReadPipe = pipeFds[0];
++                            cgroupWritePipe = pipeFds[1];
++                            FileDescriptor[] readyFds = Os.pipe2(O_CLOEXEC);
++                            cgroupReadyReadPipe = readyFds[0];
++                            cgroupReadyWritePipe = readyFds[1];
++                            fdsToIgnore = new int[]{cgroupReadPipe.getInt$(),
++                                    cgroupWritePipe.getInt$(), cgroupReadyReadPipe.getInt$(),
++                                    cgroupReadyWritePipe.getInt$()};
++                        }
++                        pid = Zygote.forkAndSpecialize(parsedArgs.mUid, parsedArgs.mGid,
++                                parsedArgs.mGids, parsedArgs.mRuntimeFlags, rlimits,
++                                parsedArgs.mMountExternal, parsedArgs.mSeInfo, parsedArgs.mNiceName,
++                                fdsToClose, fdsToIgnore, parsedArgs.mStartChildZygote,
++                                parsedArgs.mInstructionSet, parsedArgs.mAppDataDir,
++                                parsedArgs.mIsTopApp, parsedArgs.mPkgDataInfoList,
++                                parsedArgs.mAllowlistedDataInfoList, parsedArgs.mBindMountAppDataDirs,
++                                parsedArgs.mBindMountAppStorageDirs,
++                                cgroupReadPipe, cgroupWritePipe,
++                                cgroupReadyReadPipe, cgroupReadyWritePipe);
+                         if (pid == 0) {
+                             // in child
+                             zygoteServer.setForkChild();
+@@ -275,12 +314,25 @@ class ZygoteConnection {
+                             // handleParentProc.
+                             IoUtils.closeQuietly(childPipeFd);
+                             childPipeFd = null;
+-                            handleParentProc(pid, serverPipeFd);
++                            IoUtils.closeQuietly(cgroupReadyWritePipe);
++                            cgroupReadyWritePipe = null;
++                            if (pid > 0 && cgroupReadyReadPipe != null
++                                    && !waitForCgroupChild(cgroupReadyReadPipe)) {
++                                Process.killProcess(pid);
++                                pid = -1;
++                            }
++                            handleParentProc(pid, serverPipeFd, cgroupWritePipe);
+                             return null;
+                         }
++                    } catch (ErrnoException ex) {
++                        throw new IllegalStateException("Unable to create cgroup setup pipe", ex);
+                     } finally {
+                         IoUtils.closeQuietly(childPipeFd);
+                         IoUtils.closeQuietly(serverPipeFd);
++                        IoUtils.closeQuietly(cgroupReadPipe);
++                        IoUtils.closeQuietly(cgroupWritePipe);
++                        IoUtils.closeQuietly(cgroupReadyReadPipe);
++                        IoUtils.closeQuietly(cgroupReadyWritePipe);
+                     }
+                 } else {
+                     ZygoteHooks.preFork();
+@@ -545,6 +597,38 @@ class ZygoteConnection {
+         }
+     }
+ 
++    private static boolean waitForCgroupChild(FileDescriptor pipe) {
++        StructPollfd pollFd = new StructPollfd();
++        pollFd.fd = pipe;
++        pollFd.events = (short) POLLIN;
++        StructPollfd[] fds = new StructPollfd[]{pollFd};
++        byte[] ready = new byte[1];
++        long startTime = System.nanoTime();
++        while (true) {
++            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime);
++            if (elapsed >= WRAPPED_PID_TIMEOUT_MILLIS) {
++                Log.w(TAG, "Timed out waiting for child cgroup identity");
++                return false;
++            }
++            try {
++                pollFd.revents = 0;
++                if (Os.poll(fds, WRAPPED_PID_TIMEOUT_MILLIS - (int) elapsed) == 0
++                        || (pollFd.revents & POLLIN) == 0) {
++                    return false;
++                }
++                return Os.read(pipe, ready, 0, 1) == 1 && ready[0] == 1;
++            } catch (ErrnoException ex) {
++                if (ex.errno != OsConstants.EINTR) {
++                    Log.w(TAG, "Unable to read child cgroup identity acknowledgement", ex);
++                    return false;
++                }
++            } catch (IOException ex) {
++                Log.w(TAG, "Unable to read child cgroup identity acknowledgement", ex);
++                return false;
++            }
++        }
++    }
++
+     /**
+      * Handles post-fork cleanup of parent proc
+      *
+@@ -552,7 +636,7 @@ class ZygoteConnection {
+      * if &lt; 0;
+      * @param pipeFd null-ok; pipe for communication with child.
+      */
+-    private void handleParentProc(int pid, FileDescriptor pipeFd) {
++    private void handleParentProc(int pid, FileDescriptor pipeFd, FileDescriptor cgroupWritePipe) {
+         if (pid > 0) {
+             setChildPgid(pid);
+         }
+@@ -638,7 +722,16 @@ class ZygoteConnection {
+         }
+ 
+         try {
+-            mSocketOutStream.writeInt(pid);
++            // LocalSocket retains outbound FDs across writes. Attach the gate only to the PID.
++            if (pid > 0 && cgroupWritePipe != null) {
++                mSocket.setFileDescriptorsForSend(new FileDescriptor[]{cgroupWritePipe});
++            }
++            try {
++                mSocketOutStream.write(new byte[]{(byte) (pid >>> 24), (byte) (pid >>> 16),
++                        (byte) (pid >>> 8), (byte) pid});
++            } finally {
++                mSocket.setFileDescriptorsForSend(null);
++            }
+             mSocketOutStream.writeBoolean(usingWrapper);
+         } catch (IOException ex) {
+             throw new IllegalStateException("Error writing to command socket", ex);
+diff --git a/core/jni/com_android_internal_os_Zygote.cpp b/core/jni/com_android_internal_os_Zygote.cpp
+index bed0aae074a4c274bea18d4491322cd77d22639f..6aed9b6e7dacf38c81567f2cfc577f5c58f3a019 100644
+--- a/core/jni/com_android_internal_os_Zygote.cpp
++++ b/core/jni/com_android_internal_os_Zygote.cpp
+@@ -1552,6 +1552,90 @@ static void BindMountStorageDirs(JNIEnv* env, jobjectArray pkg_data_info_list,
+   }
+ }
+ 
++static bool WaitForCgroupSetup(int fd) {
++    uint8_t result;
++    return TEMP_FAILURE_RETRY(read(fd, &result, sizeof(result))) == 1 && result == 1;
++}
++
++static bool ReadCgroupChildIdentity(pid_t pid, uid_t* uid, pid_t* parent) {
++    std::string status;
++    if (!ReadFileToString(StringPrintf("/proc/%d/status", pid), &status)) {
++        PLOG(WARNING) << "Unable to read cgroup child identity for pid " << pid;
++        return false;
++    }
++    size_t uid_offset = status.find("\nUid:");
++    size_t parent_offset = status.find("\nPPid:");
++    unsigned int real, effective, saved, filesystem;
++    int parent_pid;
++    if (uid_offset == std::string::npos || parent_offset == std::string::npos ||
++        sscanf(status.c_str() + uid_offset, "\nUid: %u %u %u %u", &real, &effective,
++               &saved, &filesystem) != 4 ||
++        sscanf(status.c_str() + parent_offset, "\nPPid: %d", &parent_pid) != 1 ||
++        real != effective || real != saved || real != filesystem || parent_pid <= 0) {
++        ALOGW("Invalid cgroup child identity for pid %d", pid);
++        return false;
++    }
++    *uid = real;
++    *parent = parent_pid;
++    return true;
++}
++
++static jint com_android_internal_os_Zygote_nativeCreateChildProcessGroup(
++        JNIEnv*, jclass, jint uid, jint pid, jint socket_fd) {
++    const uid_t app_id = multiuser_get_app_id(uid);
++    struct ucred peer;
++    socklen_t peer_size = sizeof(peer);
++    char* peer_label = nullptr;
++    if (getuid() != 0 || uid < 0 || pid <= 1 || app_id < AID_ISOLATED_START ||
++        app_id > AID_ISOLATED_END ||
++        getsockopt(socket_fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) != 0 ||
++        peer_size != sizeof(peer) || peer.uid != AID_SYSTEM ||
++        getpeercon(socket_fd, &peer_label) != 0) {
++        return -EPERM;
++    }
++    std::unique_ptr<char, decltype(&freecon)> peer_context(peer_label, freecon);
++    if (strcmp(peer_context.get(), "u:r:system_server:s0") != 0) return -EPERM;
++
++    uid_t child_uid, parent_uid;
++    pid_t parent, ancestor;
++    if (!ReadCgroupChildIdentity(pid, &child_uid, &parent) || child_uid != uid ||
++        !ReadCgroupChildIdentity(parent, &parent_uid, &ancestor) || ancestor != getpid() ||
++        parent_uid == 0) {
++        ALOGW("Cgroup child ancestry or UID rejected for pid %d, expected UID %d", pid, uid);
++        return -EPERM;
++    }
++    char* child_label = nullptr;
++    if (getpidcon(pid, &child_label) != 0) {
++        PLOG(WARNING) << "Unable to read cgroup child context for pid " << pid;
++        return -EPERM;
++    }
++    std::unique_ptr<char, decltype(&freecon)> child_context(child_label, freecon);
++    char* parent_label = nullptr;
++    if (getpidcon(parent, &parent_label) != 0) {
++        PLOG(WARNING) << "Unable to read cgroup parent context for pid " << parent;
++        return -EPERM;
++    }
++    std::unique_ptr<char, decltype(&freecon)> parent_context(parent_label, freecon);
++    if (strcmp(child_context.get(), parent_context.get()) != 0 ||
++        (strncmp(parent_context.get(), "u:r:webview_zygote:", sizeof("u:r:webview_zygote:") - 1) != 0 &&
++         strncmp(parent_context.get(), "u:r:app_zygote:", sizeof("u:r:app_zygote:") - 1) != 0)) {
++        ALOGW("Cgroup child context rejected for pid %d", pid);
++        return -EPERM;
++    }
++
++    int result = createProcessGroup(uid, pid);
++    if (result != 0) {
++        ALOGW("Unable to create cgroup for child pid %d, uid %d: %d", pid, uid, result);
++    }
++    uid_t current_uid;
++    pid_t current_parent;
++    if (result == 0 && (!ReadCgroupChildIdentity(pid, &current_uid, &current_parent) ||
++                       current_uid != child_uid || current_parent != parent)) {
++        return -ESRCH;
++    }
++    return result;
++}
++
+ // Utility routine to specialize a zygote child process.
+ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids, jint runtime_flags,
+                              jobjectArray rlimits, jlong permitted_capabilities,
+@@ -1561,7 +1645,10 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+                              jstring managed_instruction_set, jstring managed_app_data_dir,
+                              bool is_top_app, jobjectArray pkg_data_info_list,
+                              jobjectArray allowlisted_data_info_list, bool mount_data_dirs,
+-                             bool mount_storage_dirs) {
++                             bool mount_storage_dirs, int cgroup_pipe = -1,
++                             int cgroup_ready_pipe = -1) {
++    android::base::unique_fd cgroup_read_pipe(cgroup_pipe);
++    android::base::unique_fd cgroup_ready_write_pipe(cgroup_ready_pipe);
+     const char* process_name = is_system_server ? "system_server" : "zygote";
+     auto fail_fn = std::bind(ZygoteFailure, env, process_name, managed_nice_name, _1);
+     auto extract_fn = std::bind(ExtractJString, env, process_name, managed_nice_name, _1);
+@@ -1651,13 +1738,30 @@ static void SpecializeCommon(JNIEnv* env, uid_t uid, gid_t gid, jintArray gids,
+     // privileged syscalls used below still need to be accessible in app process.
+     SetUpSeccompFilter(uid, is_child_zygote);
+ 
+-    // Must be called before losing the permission to set scheduler policy.
+-    SetSchedulerPolicy(fail_fn, is_top_app);
++    // Regular zygote children set policy before dropping privileges. Non-root zygotes
++    // need the target UID and system_server's completed delegation instead.
++    if (cgroup_read_pipe.get() == -1) {
++        SetSchedulerPolicy(fail_fn, is_top_app);
++    }
+ 
+     if (setresuid(uid, uid, uid) == -1) {
+         fail_fn(CREATE_ERROR("setresuid(%d) failed: %s", uid, strerror(errno)));
+     }
+ 
++    if (cgroup_read_pipe.get() != -1) {
++        // Let the parent report the PID only after identity validation can succeed.
++        const uint8_t ready = 1;
++        if (TEMP_FAILURE_RETRY(write(cgroup_ready_write_pipe.get(), &ready, sizeof(ready))) != 1) {
++            fail_fn("Unable to acknowledge child cgroup identity");
++        }
++        cgroup_ready_write_pipe.reset();
++        if (!WaitForCgroupSetup(cgroup_read_pipe.get())) {
++            fail_fn("Process cgroup setup failed");
++        }
++        cgroup_read_pipe.reset();
++        SetSchedulerPolicy(fail_fn, is_top_app);
++    }
++
+     // The "dumpable" flag of a process, which controls core dump generation, is
+     // overwritten by the value in /proc/sys/fs/suid_dumpable when the effective
+     // user or group ID changes. See proc(5) for possible values. In most cases,
+@@ -2132,7 +2236,15 @@ static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
+         jintArray managed_fds_to_close, jintArray managed_fds_to_ignore, jboolean is_child_zygote,
+         jstring instruction_set, jstring app_data_dir, jboolean is_top_app,
+         jobjectArray pkg_data_info_list, jobjectArray allowlisted_data_info_list,
+-        jboolean mount_data_dirs, jboolean mount_storage_dirs) {
++        jboolean mount_data_dirs, jboolean mount_storage_dirs,
++        jint cgroup_read_pipe, jint cgroup_write_pipe,
++        jint cgroup_ready_read_pipe, jint cgroup_ready_write_pipe) {
++    if ((cgroup_read_pipe >= 0) != (cgroup_write_pipe >= 0)
++            || (cgroup_read_pipe >= 0) != (cgroup_ready_read_pipe >= 0)
++            || (cgroup_read_pipe >= 0) != (cgroup_ready_write_pipe >= 0)
++            || (cgroup_read_pipe >= 0) != (getuid() != 0)) {
++        zygote::ZygoteFailure(env, "zygote", nice_name, "Invalid cgroup setup pipe");
++    }
+     jlong capabilities = CalculateCapabilities(env, uid, gid, gids, is_child_zygote);
+ 
+     if (UNLIKELY(managed_fds_to_close == nullptr)) {
+@@ -2171,11 +2283,16 @@ static jint com_android_internal_os_Zygote_nativeForkAndSpecialize(
+                                    true);
+ 
+     if (pid == 0) {
++        // Keeping a writer here would hide EOF when system_server fails before setup.
++        android::base::unique_fd cgroup_writer(cgroup_write_pipe);
++        cgroup_writer.reset();
++        android::base::unique_fd cgroup_ready_reader(cgroup_ready_read_pipe);
++        cgroup_ready_reader.reset();
+         SpecializeCommon(env, uid, gid, gids, runtime_flags, rlimits, capabilities, capabilities,
+                          mount_external, se_info, nice_name, false, is_child_zygote == JNI_TRUE,
+                          instruction_set, app_data_dir, is_top_app == JNI_TRUE, pkg_data_info_list,
+                          allowlisted_data_info_list, mount_data_dirs == JNI_TRUE,
+-                         mount_storage_dirs == JNI_TRUE);
++                         mount_storage_dirs == JNI_TRUE, cgroup_read_pipe, cgroup_ready_write_pipe);
+     }
+     return pid;
+ }
+@@ -2643,9 +2760,11 @@ static void com_android_internal_os_Zygote_nativeAllowFilesOpenedByPreload(JNIEn
+ }
+ 
+ static const JNINativeMethod gMethods[] = {
++        {"nativeCreateChildProcessGroup", "(III)I",
++         (void*)com_android_internal_os_Zygote_nativeCreateChildProcessGroup},
+         {"nativeForkAndSpecialize",
+          "(II[II[[IILjava/lang/String;Ljava/lang/String;[I[IZLjava/lang/String;Ljava/lang/"
+-         "String;Z[Ljava/lang/String;[Ljava/lang/String;ZZ)I",
++         "String;Z[Ljava/lang/String;[Ljava/lang/String;ZZIIII)I",
+          (void*)com_android_internal_os_Zygote_nativeForkAndSpecialize},
+         {"nativeForkSystemServer", "(II[II[[IJJ)I",
+          (void*)com_android_internal_os_Zygote_nativeForkSystemServer},
+diff --git a/services/core/java/com/android/server/am/ProcessList.java b/services/core/java/com/android/server/am/ProcessList.java
+index 1e66ed42ff96133328fbfedf96516a829bee87fa..25601bb6011984cbcd91e7134f7c5e49dbdfcc82 100644
+--- a/services/core/java/com/android/server/am/ProcessList.java
++++ b/services/core/java/com/android/server/am/ProcessList.java
+@@ -103,6 +103,7 @@ import android.os.SystemProperties;
+ import android.os.Trace;
+ import android.os.UserHandle;
+ import android.os.storage.StorageManagerInternal;
++import android.system.ErrnoException;
+ import android.system.Os;
+ import android.text.TextUtils;
+ import android.util.ArrayMap;
+@@ -140,6 +141,8 @@ import com.android.server.wm.WindowProcessController;
+ 
+ import dalvik.system.VMRuntime;
+ 
++import libcore.io.IoUtils;
++
+ import java.io.DataInputStream;
+ import java.io.File;
+ import java.io.FileDescriptor;
+@@ -2424,10 +2427,31 @@ public final class ProcessList {
+             }
+ 
+             if (!regularZygote) {
+-                // webview and app zygote don't have the permission to create the nodes
+-                if (Process.createProcessGroup(uid, startResult.pid) < 0) {
+-                    Slog.e(ActivityManagerService.TAG, "Unable to create process group for "
+-                            + app.processName + " (" + startResult.pid + ")");
++                // Non-root zygotes wait at their target UID until every scheduling file
++                // is ready. Closing without an acknowledgement makes specialization fail.
++                boolean released = false;
++                try {
++                    if (startResult.cgroupSetupPipe == null) {
++                        throw new IllegalStateException("Missing child-zygote startup gate");
++                    }
++                    final int groupResult = Process.ZYGOTE_PROCESS.createChildProcessGroup(
++                            uid, startResult.pid, requiredAbi);
++                    if (groupResult < 0) {
++                        throw new IllegalStateException("Unable to create process group for "
++                                + app.processName + " (" + startResult.pid + "): " + groupResult);
++                    }
++                    if (Os.write(startResult.cgroupSetupPipe, new byte[]{1}, 0, 1) != 1) {
++                        throw new IllegalStateException("Unable to release child zygote process");
++                    }
++                    released = true;
++                } catch (ErrnoException | IOException ex) {
++                    throw new IllegalStateException("Unable to release child zygote process", ex);
++                } finally {
++                    IoUtils.closeQuietly(startResult.cgroupSetupPipe);
++                    startResult.cgroupSetupPipe = null;
++                    if (!released) {
++                        ProcessList.killProcessGroup(uid, startResult.pid);
++                    }
+                 }
+             }
+ 

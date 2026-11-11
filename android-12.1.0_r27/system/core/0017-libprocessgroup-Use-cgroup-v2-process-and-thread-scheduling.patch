@@ -1,4 +1,6 @@
+From 35dd5fcbc63146365d9ad737c27cbbeebeed0430 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
+Date: Wed, 11 Nov 2026 14:33:34 +0800
 Subject: [PATCH] libprocessgroup: use cgroup v2 process and thread scheduling
 
 Use a unified cgroup v2 hierarchy for process groups and threaded
@@ -6,28 +8,36 @@ scheduling profiles, including process timer slack. Delegate thread
 membership, weight and minimum utilization clamps to the process UID.
 Restore requested directory modes after creation so the creator umask
 cannot prevent access. Retain process-domain and ancestor ownership.
+Keep the dex2oat aggregate consistent with the removed v1 I/O profiles
+and resolve task ID zero to the current thread before applying actions.
 
 Signed-off-by: 5656565566 <contact@home56.top>
 ---
- libprocessgroup/cgroup_map.cpp                     |  52 +++-
- libprocessgroup/cgroup_map.h                       |   1 +
- .../include/processgroup/processgroup.h            |   2 -
- libprocessgroup/processgroup.cpp                   | 126 ++++++----
- libprocessgroup/profiles/Android.bp                |  46 ----
- libprocessgroup/profiles/cgroups.json              |  43 +---
- libprocessgroup/profiles/cgroups_28.json           |  11 -
- libprocessgroup/profiles/cgroups_29.json           |  11 -
- libprocessgroup/profiles/cgroups_30.json           |  12 -
- libprocessgroup/profiles/task_profiles.json        | 265 +++++++++++----------
- libprocessgroup/profiles/task_profiles_28.json     | 160 -------------
- libprocessgroup/profiles/task_profiles_29.json     | 160 -------------
- libprocessgroup/profiles/task_profiles_30.json     | 160 -------------
- libprocessgroup/profiles/test.cpp                  |  34 +++
- libprocessgroup/sched_policy.cpp                   |  36 +--
- libprocessgroup/setup/cgroup_map_write.cpp         | 147 ++++--------
- libprocessgroup/task_profiles.cpp                  | 175 +++++++++-----
- libprocessgroup/task_profiles.h                    |  12 +-
- 18 files changed, 480 insertions(+), 973 deletions(-)
+ libprocessgroup/cgroup_map.cpp                |  52 +++-
+ libprocessgroup/cgroup_map.h                  |   1 +
+ .../include/processgroup/processgroup.h       |   2 -
+ libprocessgroup/processgroup.cpp              | 126 +++++----
+ libprocessgroup/profiles/Android.bp           |  46 ---
+ libprocessgroup/profiles/cgroups.json         |  43 +--
+ libprocessgroup/profiles/cgroups_28.json      |  11 -
+ libprocessgroup/profiles/cgroups_29.json      |  11 -
+ libprocessgroup/profiles/cgroups_30.json      |  12 -
+ libprocessgroup/profiles/task_profiles.json   | 267 +++++++++---------
+ .../profiles/task_profiles_28.json            | 160 -----------
+ .../profiles/task_profiles_29.json            | 160 -----------
+ .../profiles/task_profiles_30.json            | 160 -----------
+ libprocessgroup/profiles/test.cpp             |  56 ++++
+ libprocessgroup/sched_policy.cpp              |  36 +--
+ libprocessgroup/setup/cgroup_map_write.cpp    | 147 ++++------
+ libprocessgroup/task_profiles.cpp             | 179 ++++++++----
+ libprocessgroup/task_profiles.h               |  12 +-
+ 18 files changed, 507 insertions(+), 974 deletions(-)
+ delete mode 100644 libprocessgroup/profiles/cgroups_28.json
+ delete mode 100644 libprocessgroup/profiles/cgroups_29.json
+ delete mode 100644 libprocessgroup/profiles/cgroups_30.json
+ delete mode 100644 libprocessgroup/profiles/task_profiles_28.json
+ delete mode 100644 libprocessgroup/profiles/task_profiles_29.json
+ delete mode 100644 libprocessgroup/profiles/task_profiles_30.json
 
 diff --git a/libprocessgroup/cgroup_map.cpp b/libprocessgroup/cgroup_map.cpp
 index 5ca096787c25c1c7fce8b3360f3c717bb7446641..98d819259007f89306a5859ad9893a3484fd184f 100644
@@ -544,7 +554,7 @@ index 80a074bf1c84f3842bf5e85451bdb037b17359ec..00000000000000000000000000000000
 -  ]
 -}
 diff --git a/libprocessgroup/profiles/task_profiles.json b/libprocessgroup/profiles/task_profiles.json
-index 45d3c7c04d050ce9ccdc4fde4cc64b2eef7a753d..aaf26ba2184d95b0e0cc9cffcdbe29c86ea8e8aa 100644
+index 45d3c7c04d050ce9ccdc4fde4cc64b2eef7a753d..427c8d3b03369329e152fa25027526b21802738e 100644
 --- a/libprocessgroup/profiles/task_profiles.json
 +++ b/libprocessgroup/profiles/task_profiles.json
 @@ -2,33 +2,38 @@
@@ -979,6 +989,15 @@ index 45d3c7c04d050ce9ccdc4fde4cc64b2eef7a753d..aaf26ba2184d95b0e0cc9cffcdbe29c8
      },
      {
        "Name": "CPUSET_SP_SYSTEM",
+@@ -650,7 +657,7 @@
+     },
+     {
+       "Name": "Dex2OatBootComplete",
+-      "Profiles": [ "Dex2oatPerformance", "LowIoPriority", "TimerSlackHigh" ]
++      "Profiles": [ "Dex2oatPerformance", "TimerSlackHigh" ]
+     }
+   ]
+ }
 diff --git a/libprocessgroup/profiles/task_profiles_28.json b/libprocessgroup/profiles/task_profiles_28.json
 deleted file mode 100644
 index e7be5487d1488fd310e1da1e12337489c03530b0..0000000000000000000000000000000000000000
@@ -1478,10 +1497,20 @@ index e7be5487d1488fd310e1da1e12337489c03530b0..00000000000000000000000000000000
 -  ]
 -}
 diff --git a/libprocessgroup/profiles/test.cpp b/libprocessgroup/profiles/test.cpp
-index b37e3e625998faa52ddf135ab5782b1079982713..7695063523ef82f78a2858e193391edb44cd855b 100644
+index b37e3e625998faa52ddf135ab5782b1079982713..d2880a8e01f4a05f39ccca33a61c4fd151490df4 100644
 --- a/libprocessgroup/profiles/test.cpp
 +++ b/libprocessgroup/profiles/test.cpp
-@@ -43,6 +43,40 @@ INSTANTIATE_TEST_SUITE_P(Cgroups, CgroupsTest,
+@@ -14,6 +14,9 @@
+  * limitations under the License.
+  */
+ 
++#include <set>
++#include <string>
++
+ #include <android-base/file.h>
+ #include <gtest/gtest.h>
+ #include <jsonpb/json_schema_test.h>
+@@ -43,6 +46,59 @@ INSTANTIATE_TEST_SUITE_P(Cgroups, CgroupsTest,
  INSTANTIATE_TEST_SUITE_P(TaskProfiles, TaskProfilesTest,
                           ::testing::Values(MakeTestParam<TaskProfiles>("/task_profiles.json")));
  
@@ -1517,6 +1546,25 @@ index b37e3e625998faa52ddf135ab5782b1079982713..7695063523ef82f78a2858e193391edb
 +
 +    ASSERT_NE(top_app, nullptr);
 +    EXPECT_THAT(top_app->profiles(), ::testing::Contains("MaxPerformance"));
++}
++
++TEST(TaskProfilesConfigTest, AggregateReferencesResolveInLoadOrder) {
++    std::string json;
++    ASSERT_TRUE(android::base::ReadFileToString(GetExecutableDirectory() + "/task_profiles.json",
++                                                &json));
++    auto parsed = jsonpb::JsonStringToMessage<TaskProfiles>(json);
++    ASSERT_TRUE(parsed.ok()) << parsed.error();
++
++    std::set<std::string> defined;
++    for (const auto& profile : parsed->profiles()) {
++        defined.insert(profile.name());
++    }
++    for (const auto& aggregate : parsed->aggregateprofiles()) {
++        for (const auto& name : aggregate.profiles()) {
++            ASSERT_NE(defined.count(name), 0u) << aggregate.name() << " references " << name;
++        }
++        defined.insert(aggregate.name());
++    }
 +}
 +
  }  // namespace profiles
@@ -1816,7 +1864,7 @@ index 3121d244b45550c1015c6110d5e83e2458dc19a2..2ed075bb62269c1874b87b7d8eaf6026
      }
  
 diff --git a/libprocessgroup/task_profiles.cpp b/libprocessgroup/task_profiles.cpp
-index 3834f9194beba4a344aca8aaf4473fb2b218ae9a..1c98135750a656b86cfe835562491cd428b35616 100644
+index 3834f9194beba4a344aca8aaf4473fb2b218ae9a..a5c8c304da30eea96fc8d74628cbbf0828cadeb8 100644
 --- a/libprocessgroup/task_profiles.cpp
 +++ b/libprocessgroup/task_profiles.cpp
 @@ -18,7 +18,10 @@
@@ -2125,7 +2173,18 @@ index 3834f9194beba4a344aca8aaf4473fb2b218ae9a..1c98135750a656b86cfe835562491cd4
          }
      }
      return true;
-@@ -675,9 +728,11 @@ bool TaskProfiles::SetTaskProfiles(int tid, const std::vector<std::string>& prof
+@@ -667,6 +720,10 @@ bool TaskProfiles::SetProcessProfiles(uid_t uid, pid_t pid,
+ 
+ bool TaskProfiles::SetTaskProfiles(int tid, const std::vector<std::string>& profiles,
+                                    bool use_fd_cache) {
++    if (tid == 0) {
++        tid = GetThreadId();
++    }
++
+     for (const auto& name : profiles) {
+         TaskProfile* profile = GetProfile(name);
+         if (profile != nullptr) {
+@@ -675,9 +732,11 @@ bool TaskProfiles::SetTaskProfiles(int tid, const std::vector<std::string>& prof
              }
              if (!profile->ExecuteForTask(tid)) {
                  PLOG(WARNING) << "Failed to apply " << name << " task profile";
@@ -2204,3 +2263,6 @@ index 278892dd55f634033214a409abae62d34720bf7b..24e4660aa386fab000787d15944fafdf
      std::map<std::string, std::shared_ptr<TaskProfile>> profiles_;
      std::map<std::string, std::unique_ptr<ProfileAttribute>> attributes_;
  
+-- 
+2.47.3
+
