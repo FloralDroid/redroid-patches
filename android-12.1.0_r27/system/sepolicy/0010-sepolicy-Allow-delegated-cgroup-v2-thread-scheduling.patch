@@ -1,4 +1,4 @@
-From 1b078102159f4e73b5b47bb117ded8f75998cb48 Mon Sep 17 00:00:00 2001
+From b6910542aaccc78b59d210c18153a7d2c773f87b Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Wed, 11 Nov 2026 14:33:34 +0800
 Subject: [PATCH] sepolicy: Allow delegated cgroup v2 thread scheduling
@@ -22,7 +22,7 @@ Signed-off-by: 5656565566 <contact@home56.top>
  prebuilts/api/31.0/private/app_neverallows.te | 3 ++-
  prebuilts/api/31.0/private/app_zygote.te      | 7 +++++++
  prebuilts/api/31.0/private/priv_app.te        | 3 ++-
- prebuilts/api/31.0/private/system_server.te   | 4 ++++
+ prebuilts/api/31.0/private/system_server.te   | 5 +++++
  prebuilts/api/31.0/private/webview_zygote.te  | 7 +++++++
  prebuilts/api/31.0/private/zygote.te          | 5 +++++
  prebuilts/api/31.0/public/file.te             | 2 +-
@@ -31,7 +31,7 @@ Signed-off-by: 5656565566 <contact@home56.top>
  prebuilts/api/32.0/private/app_neverallows.te | 3 ++-
  prebuilts/api/32.0/private/app_zygote.te      | 7 +++++++
  prebuilts/api/32.0/private/priv_app.te        | 3 ++-
- prebuilts/api/32.0/private/system_server.te   | 4 ++++
+ prebuilts/api/32.0/private/system_server.te   | 5 +++++
  prebuilts/api/32.0/private/webview_zygote.te  | 7 +++++++
  prebuilts/api/32.0/private/zygote.te          | 5 +++++
  prebuilts/api/32.0/public/file.te             | 2 +-
@@ -40,12 +40,12 @@ Signed-off-by: 5656565566 <contact@home56.top>
  private/app_neverallows.te                    | 3 ++-
  private/app_zygote.te                         | 7 +++++++
  private/priv_app.te                           | 3 ++-
- private/system_server.te                      | 4 ++++
+ private/system_server.te                      | 5 +++++
  private/webview_zygote.te                     | 7 +++++++
  private/zygote.te                             | 5 +++++
  public/file.te                                | 2 +-
  public/installd.te                            | 3 +++
- 27 files changed, 105 insertions(+), 9 deletions(-)
+ 27 files changed, 108 insertions(+), 9 deletions(-)
 
 diff --git a/prebuilts/api/31.0/private/app.te b/prebuilts/api/31.0/private/app.te
 index 2b3554f8805f9ee51cafed9cb8e3e25e3c586f34..9d1c95036c9bc7957595fb0680584508c6e84e24 100644
@@ -106,16 +106,17 @@ index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465
  # Do not allow loading executable code from non-privileged
  # application home directories. Code loading across a security boundary
 diff --git a/prebuilts/api/31.0/private/system_server.te b/prebuilts/api/31.0/private/system_server.te
-index 82b2a1f0669eb59e455478f09ac31efba171f9fa..55626d9868e20e2f5636872b2ea6f465bbceba96 100644
+index 82b2a1f0669eb59e455478f09ac31efba171f9fa..20add2920bcaaffaad76484cb00f65df3588f5bf 100644
 --- a/prebuilts/api/31.0/private/system_server.te
 +++ b/prebuilts/api/31.0/private/system_server.te
-@@ -12,6 +12,10 @@ typeattribute system_server stats_service_server;
+@@ -12,6 +12,11 @@ typeattribute system_server stats_service_server;
  # Define a type for tmpfs-backed ashmem regions.
  tmpfs_domain(system_server)
  
 +# Release non-root zygote children only after cgroup delegation.
 +allow system_server { webview_zygote app_zygote }:fd use;
 +allow system_server { webview_zygote app_zygote }:fifo_file write;
++allow system_server app_zygote:process getpgid;
 +
  userfaultfd_use(system_server)
  
@@ -240,16 +241,17 @@ index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465
  # Do not allow loading executable code from non-privileged
  # application home directories. Code loading across a security boundary
 diff --git a/prebuilts/api/32.0/private/system_server.te b/prebuilts/api/32.0/private/system_server.te
-index 82b2a1f0669eb59e455478f09ac31efba171f9fa..55626d9868e20e2f5636872b2ea6f465bbceba96 100644
+index 82b2a1f0669eb59e455478f09ac31efba171f9fa..20add2920bcaaffaad76484cb00f65df3588f5bf 100644
 --- a/prebuilts/api/32.0/private/system_server.te
 +++ b/prebuilts/api/32.0/private/system_server.te
-@@ -12,6 +12,10 @@ typeattribute system_server stats_service_server;
+@@ -12,6 +12,11 @@ typeattribute system_server stats_service_server;
  # Define a type for tmpfs-backed ashmem regions.
  tmpfs_domain(system_server)
  
 +# Release non-root zygote children only after cgroup delegation.
 +allow system_server { webview_zygote app_zygote }:fd use;
 +allow system_server { webview_zygote app_zygote }:fifo_file write;
++allow system_server app_zygote:process getpgid;
 +
  userfaultfd_use(system_server)
  
@@ -374,16 +376,17 @@ index 3ceb7a3058be3664788660e6d2a2ab126caec27d..5a3c3bb86b9946d841e19f019a2e3465
  # Do not allow loading executable code from non-privileged
  # application home directories. Code loading across a security boundary
 diff --git a/private/system_server.te b/private/system_server.te
-index 82b2a1f0669eb59e455478f09ac31efba171f9fa..55626d9868e20e2f5636872b2ea6f465bbceba96 100644
+index 82b2a1f0669eb59e455478f09ac31efba171f9fa..20add2920bcaaffaad76484cb00f65df3588f5bf 100644
 --- a/private/system_server.te
 +++ b/private/system_server.te
-@@ -12,6 +12,10 @@ typeattribute system_server stats_service_server;
+@@ -12,6 +12,11 @@ typeattribute system_server stats_service_server;
  # Define a type for tmpfs-backed ashmem regions.
  tmpfs_domain(system_server)
  
 +# Release non-root zygote children only after cgroup delegation.
 +allow system_server { webview_zygote app_zygote }:fd use;
 +allow system_server { webview_zygote app_zygote }:fifo_file write;
++allow system_server app_zygote:process getpgid;
 +
  userfaultfd_use(system_server)
  

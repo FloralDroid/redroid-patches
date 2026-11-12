@@ -1,4 +1,4 @@
-From 253c797662fa1eba38e2fcb99bde49ed97f41f1a Mon Sep 17 00:00:00 2001
+From d610e43504c3a9d1b6c66f5d890d0ef22ea3f159 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Thu, 12 Nov 2026 02:13:52 +0800
 Subject: [PATCH] sepolicy: Allow media memfd buffer exchange
@@ -16,21 +16,38 @@ Do not grant pathname open, buffer creation or unrelated file access.
 
 Signed-off-by: 5656565566 <contact@home56.top>
 ---
+ prebuilts/api/31.0/private/audioserver.te   | 3 +++
  prebuilts/api/31.0/private/mediaserver.te   | 5 +++++
  prebuilts/api/31.0/private/mediaswcodec.te  | 3 +++
  prebuilts/api/31.0/public/app.te            | 1 +
  prebuilts/api/31.0/public/mediaextractor.te | 3 ++-
+ prebuilts/api/32.0/private/audioserver.te   | 3 +++
  prebuilts/api/32.0/private/mediaserver.te   | 5 +++++
  prebuilts/api/32.0/private/mediaswcodec.te  | 3 +++
  prebuilts/api/32.0/public/app.te            | 1 +
  prebuilts/api/32.0/public/mediaextractor.te | 3 ++-
+ private/audioserver.te                      | 3 +++
  private/mediaserver.te                      | 5 +++++
  private/mediaswcodec.te                     | 3 +++
  public/app.te                               | 1 +
  public/mediaextractor.te                    | 3 ++-
  vendor/mediacodec.te                        | 3 +++
- 13 files changed, 36 insertions(+), 3 deletions(-)
+ 16 files changed, 45 insertions(+), 3 deletions(-)
 
+diff --git a/prebuilts/api/31.0/private/audioserver.te b/prebuilts/api/31.0/private/audioserver.te
+index 2d0b46d7fd3c3729e5616ed48e8c00bbaf72afb8..3d49d378cea9137a274b941bafbf03c88e085567 100644
+--- a/prebuilts/api/31.0/private/audioserver.te
++++ b/prebuilts/api/31.0/private/audioserver.te
+@@ -4,6 +4,9 @@ typeattribute audioserver coredomain;
+ 
+ type audioserver_exec, exec_type, file_type, system_file_type;
+ init_daemon_domain(audioserver)
++
++# Audio clients send memfd buffers through Binder.
++allow audioserver appdomain_tmpfs:file { getattr map read write };
+ tmpfs_domain(audioserver)
+ 
+ r_dir_file(audioserver, sdcard_type)
 diff --git a/prebuilts/api/31.0/private/mediaserver.te b/prebuilts/api/31.0/private/mediaserver.te
 index 6fe460ca5021fbd975081938465cb0372b088ae3..0d6d8869183aaaa972fc59a2dce2c00e7619a3fe 100644
 --- a/prebuilts/api/31.0/private/mediaserver.te
@@ -86,6 +103,20 @@ index 06f7928f1211888238791844409d6be2d3afde18..2cee080a2bbfefc41dfc61609a5808b3
  
  typeattribute mediaextractor mlstrustedsubject;
  
+diff --git a/prebuilts/api/32.0/private/audioserver.te b/prebuilts/api/32.0/private/audioserver.te
+index 2d0b46d7fd3c3729e5616ed48e8c00bbaf72afb8..3d49d378cea9137a274b941bafbf03c88e085567 100644
+--- a/prebuilts/api/32.0/private/audioserver.te
++++ b/prebuilts/api/32.0/private/audioserver.te
+@@ -4,6 +4,9 @@ typeattribute audioserver coredomain;
+ 
+ type audioserver_exec, exec_type, file_type, system_file_type;
+ init_daemon_domain(audioserver)
++
++# Audio clients send memfd buffers through Binder.
++allow audioserver appdomain_tmpfs:file { getattr map read write };
+ tmpfs_domain(audioserver)
+ 
+ r_dir_file(audioserver, sdcard_type)
 diff --git a/prebuilts/api/32.0/private/mediaserver.te b/prebuilts/api/32.0/private/mediaserver.te
 index 6fe460ca5021fbd975081938465cb0372b088ae3..0d6d8869183aaaa972fc59a2dce2c00e7619a3fe 100644
 --- a/prebuilts/api/32.0/private/mediaserver.te
@@ -141,6 +172,20 @@ index 06f7928f1211888238791844409d6be2d3afde18..2cee080a2bbfefc41dfc61609a5808b3
  
  typeattribute mediaextractor mlstrustedsubject;
  
+diff --git a/private/audioserver.te b/private/audioserver.te
+index 2d0b46d7fd3c3729e5616ed48e8c00bbaf72afb8..3d49d378cea9137a274b941bafbf03c88e085567 100644
+--- a/private/audioserver.te
++++ b/private/audioserver.te
+@@ -4,6 +4,9 @@ typeattribute audioserver coredomain;
+ 
+ type audioserver_exec, exec_type, file_type, system_file_type;
+ init_daemon_domain(audioserver)
++
++# Audio clients send memfd buffers through Binder.
++allow audioserver appdomain_tmpfs:file { getattr map read write };
+ tmpfs_domain(audioserver)
+ 
+ r_dir_file(audioserver, sdcard_type)
 diff --git a/private/mediaserver.te b/private/mediaserver.te
 index 6fe460ca5021fbd975081938465cb0372b088ae3..0d6d8869183aaaa972fc59a2dce2c00e7619a3fe 100644
 --- a/private/mediaserver.te
@@ -210,3 +255,6 @@ index f78b58f2854568552b903fb8035d54d09cdecd02..1756f47171ce256942b92fc8c2177a52
  # can route /dev/binder traffic to /dev/vndbinder
  vndbinder_use(mediacodec)
  
+-- 
+2.47.3
+
