@@ -1,0 +1,45 @@
+From 959672034f6c8bb3560d8b18d4c0f68e9051d4fc Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 13 Nov 2026 00:47:40 +0800
+Subject: [PATCH] Camera2: Retain legacy storage for direct media paths
+
+Keep the existing DCIM and external-cache implementation usable on Android 12L by targeting API 29, opting into legacy storage and requesting standard external-storage permissions. Runtime grants remain managed by Android; no all-files access or SELinux exception is added.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ AndroidManifest.xml | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/AndroidManifest.xml b/AndroidManifest.xml
+index e4b175a..1bf79bb 100644
+--- a/AndroidManifest.xml
++++ b/AndroidManifest.xml
+@@ -6,7 +6,7 @@
+ 
+     <uses-sdk
+         android:minSdkVersion="19"
+-        android:targetSdkVersion="1000" />
++        android:targetSdkVersion="29" />
+ 
+     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+@@ -20,6 +20,8 @@
+     <uses-permission android:name="android.permission.READ_SYNC_SETTINGS" />
+     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+     <uses-permission android:name="android.permission.RECORD_AUDIO" />
++    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
++    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+     <uses-permission android:name="android.permission.SET_WALLPAPER" />
+     <uses-permission android:name="android.permission.SUBSCRIBED_FEEDS_READ" />
+     <uses-permission android:name="android.permission.SUBSCRIBED_FEEDS_WRITE" />
+@@ -37,6 +39,7 @@
+ 
+     <application
+         android:name="com.android.camera.app.CameraApp"
++        android:requestLegacyExternalStorage="true"
+         android:hardwareAccelerated="true"
+         android:icon="@mipmap/logo_camera_color"
+         android:label="@string/app_name"
+-- 
+2.47.3
+

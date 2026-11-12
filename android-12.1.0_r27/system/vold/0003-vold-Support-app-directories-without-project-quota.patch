@@ -1,0 +1,30 @@
+From 24c15e672d7889e27cc789ccd5ffd4bc4d190f8d Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Fri, 13 Nov 2026 00:47:40 +0800
+Subject: [PATCH] vold: Support app directories without project quota
+
+Continue preparing external app directories when the filesystem does not support project-ID inheritance. Keep permission and I/O errors fatal. This complements the existing project-ID compatibility patch without changing its upstream provenance.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ Utils.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/Utils.cpp b/Utils.cpp
+index 7e9130e..b30f1ca 100644
+--- a/Utils.cpp
++++ b/Utils.cpp
+@@ -217,6 +217,10 @@ int SetQuotaInherit(const std::string& path) {
+ 
+     ret = ioctl(fd, FS_IOC_SETFLAGS, &flags);
+     if (ret == -1) {
++        if (errno == EINVAL || errno == ENOTTY || errno == EOPNOTSUPP) {
++            PLOG(WARNING) << "Project quota inheritance is unavailable on " << path;
++            return 0;
++        }
+         PLOG(ERROR) << "Failed to set flags for " << path << " to set project id inheritance.";
+         return ret;
+     }
+-- 
+2.47.3
+
