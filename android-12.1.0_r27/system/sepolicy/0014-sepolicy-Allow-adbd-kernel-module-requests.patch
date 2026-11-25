@@ -1,0 +1,65 @@
+From 419747e435faed46ae754c388950da739d299c1f Mon Sep 17 00:00:00 2001
+From: 5656565566 <contact@home56.top>
+Date: Wed, 25 Nov 2026 20:45:22 +0800
+Subject: [PATCH] sepolicy: Allow adbd kernel module requests
+
+adbd probes VSOCK when starting its TCP listener. The policy permits
+VSOCK socket creation, but the kernel module request for net-pf-40 is
+denied before socket creation when the address family is not registered.
+
+Allow module requests from the adbd domain and synchronize the API 31
+and 32 policy snapshots. This permission is not scoped to a module name;
+it does not grant module_load.
+
+Signed-off-by: 5656565566 <contact@home56.top>
+---
+ prebuilts/api/31.0/private/adbd.te | 3 +++
+ prebuilts/api/32.0/private/adbd.te | 3 +++
+ private/adbd.te                    | 3 +++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/prebuilts/api/31.0/private/adbd.te b/prebuilts/api/31.0/private/adbd.te
+index 4273995..a1700e0 100644
+--- a/prebuilts/api/31.0/private/adbd.te
++++ b/prebuilts/api/31.0/private/adbd.te
+@@ -47,6 +47,9 @@ dontaudit adbd self:{ socket vsock_socket } create;
+ # Allow adbd inside vm to forward vm's vsock.
+ allow adbd self:vsock_socket { create_socket_perms_no_ioctl listen accept };
+ 
++# Allow the kernel to request the VSOCK module when adbd probes for support.
++allow adbd kernel:system module_request;
++
+ # Create and use network sockets.
+ net_domain(adbd)
+ 
+diff --git a/prebuilts/api/32.0/private/adbd.te b/prebuilts/api/32.0/private/adbd.te
+index 4273995..a1700e0 100644
+--- a/prebuilts/api/32.0/private/adbd.te
++++ b/prebuilts/api/32.0/private/adbd.te
+@@ -47,6 +47,9 @@ dontaudit adbd self:{ socket vsock_socket } create;
+ # Allow adbd inside vm to forward vm's vsock.
+ allow adbd self:vsock_socket { create_socket_perms_no_ioctl listen accept };
+ 
++# Allow the kernel to request the VSOCK module when adbd probes for support.
++allow adbd kernel:system module_request;
++
+ # Create and use network sockets.
+ net_domain(adbd)
+ 
+diff --git a/private/adbd.te b/private/adbd.te
+index 4273995..a1700e0 100644
+--- a/private/adbd.te
++++ b/private/adbd.te
+@@ -47,6 +47,9 @@ dontaudit adbd self:{ socket vsock_socket } create;
+ # Allow adbd inside vm to forward vm's vsock.
+ allow adbd self:vsock_socket { create_socket_perms_no_ioctl listen accept };
+ 
++# Allow the kernel to request the VSOCK module when adbd probes for support.
++allow adbd kernel:system module_request;
++
+ # Create and use network sockets.
+ net_domain(adbd)
+ 
+-- 
+2.47.3
+
