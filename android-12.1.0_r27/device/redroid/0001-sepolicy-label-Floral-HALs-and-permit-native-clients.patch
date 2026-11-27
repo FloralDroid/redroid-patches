@@ -1,4 +1,4 @@
-From 0e33076aa063460dc88926d909b97ddb623ca814 Mon Sep 17 00:00:00 2001
+From 82029f574628db56207d230fa982b9e5a0ac7104 Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Thu, 15 Oct 2026 14:07:03 +0800
 Subject: [PATCH] sepolicy: label Floral HALs and permit native graphics and
@@ -44,11 +44,11 @@ Subject: [PATCH] sepolicy: label Floral HALs and permit native graphics and
  create mode 100644 sepolicy/vendor/surfaceflinger.te
 
 diff --git a/redroid_arm64/BoardConfig.mk b/redroid_arm64/BoardConfig.mk
-index 2ba0af5..db90e80 100644
+index 508898a..8de437f 100644
 --- a/redroid_arm64/BoardConfig.mk
 +++ b/redroid_arm64/BoardConfig.mk
 @@ -25,6 +25,7 @@ BOARD_GPU_DRIVERS := kmsro swrast virgl radeonsi nouveau freedreno panfrost v3d
- BOARD_MESA3D_VULKAN_DRIVERS := swrast
+ BOARD_MESA3D_VULKAN_DRIVERS := swrast freedreno broadcom virtio
  
  BOARD_VENDOR_SEPOLICY_DIRS += \
 +    device/redroid/sepolicy/vendor \
@@ -56,11 +56,11 @@ index 2ba0af5..db90e80 100644
      hardware/floral/power/sepolicy/vendor \
      hardware/floral/radio/sepolicy/vendor \
 diff --git a/redroid_arm64_only/BoardConfig.mk b/redroid_arm64_only/BoardConfig.mk
-index 2bfd4d3..f21df60 100644
+index 770013a..b682aaa 100644
 --- a/redroid_arm64_only/BoardConfig.mk
 +++ b/redroid_arm64_only/BoardConfig.mk
 @@ -19,6 +19,7 @@ BOARD_GPU_DRIVERS := kmsro swrast virgl radeonsi nouveau freedreno panfrost v3d
- BOARD_MESA3D_VULKAN_DRIVERS := swrast
+ BOARD_MESA3D_VULKAN_DRIVERS := swrast freedreno broadcom virtio
  
  BOARD_VENDOR_SEPOLICY_DIRS += \
 +    device/redroid/sepolicy/vendor \
@@ -68,11 +68,11 @@ index 2bfd4d3..f21df60 100644
      hardware/floral/power/sepolicy/vendor \
      hardware/floral/radio/sepolicy/vendor \
 diff --git a/redroid_x86_64/BoardConfig.mk b/redroid_x86_64/BoardConfig.mk
-index a18093a..f712c08 100755
+index 14475ce..8923882 100755
 --- a/redroid_x86_64/BoardConfig.mk
 +++ b/redroid_x86_64/BoardConfig.mk
 @@ -31,6 +31,7 @@ BOARD_GPU_DRIVERS := swrast virgl radeonsi
- BOARD_MESA3D_VULKAN_DRIVERS := swrast
+ BOARD_MESA3D_VULKAN_DRIVERS := swrast intel virtio
  
  BOARD_VENDOR_SEPOLICY_DIRS += \
 +    device/redroid/sepolicy/vendor \
@@ -80,11 +80,11 @@ index a18093a..f712c08 100755
      hardware/floral/power/sepolicy/vendor \
      hardware/floral/radio/sepolicy/vendor \
 diff --git a/redroid_x86_64_only/BoardConfig.mk b/redroid_x86_64_only/BoardConfig.mk
-index 4d490d0..7e0ea90 100755
+index b483d63..f5b95d5 100755
 --- a/redroid_x86_64_only/BoardConfig.mk
 +++ b/redroid_x86_64_only/BoardConfig.mk
 @@ -22,6 +22,7 @@ BOARD_GPU_DRIVERS := swrast virgl radeonsi
- BOARD_MESA3D_VULKAN_DRIVERS := swrast
+ BOARD_MESA3D_VULKAN_DRIVERS := swrast intel virtio
  
  BOARD_VENDOR_SEPOLICY_DIRS += \
 +    device/redroid/sepolicy/vendor \

@@ -1,21 +1,21 @@
-From 16bc9a21bcac21387f6d679078fbb705c33a71aa Mon Sep 17 00:00:00 2001
+From bb952b0b6adc63a28025a813d5b7867e99d90f8d Mon Sep 17 00:00:00 2001
 From: 5656565566 <contact@home56.top>
 Date: Thu, 15 Oct 2026 13:38:09 +0800
 Subject: [PATCH] init: separate vendor probes from platform configuration
 
 Run GPU and ashmem probes in a dedicated vendor domain before zygote startup. Let vendor_init set protected graphics selectors and platform init own sys.use_memfd. Move the Ethernet configuration helper to system so it can create platform data without violating Treble isolation. Detect DRM drivers through sysfs instead of debugfs.
 ---
- gpu_config.sh            | 52 +++++++++++++++-------------------------
+ gpu_config.sh            | 48 ++++++++++++++--------------------------
  ipconfigstore/Android.bp |  1 -
  post-fs-data.redroid.sh  | 11 +++++----
- redroid.common.rc        | 27 ++++++++++-----------
+ redroid.common.rc        | 26 +++++++++-------------
  redroid.platform.rc      | 11 +++++++++
  vendor.mk                |  1 +
- 6 files changed, 50 insertions(+), 53 deletions(-)
+ 6 files changed, 47 insertions(+), 51 deletions(-)
  create mode 100644 redroid.platform.rc
 
 diff --git a/gpu_config.sh b/gpu_config.sh
-index ff3775f..1c5335f 100755
+index 29890b1..18c78f7 100755
 --- a/gpu_config.sh
 +++ b/gpu_config.sh
 @@ -1,26 +1,26 @@
@@ -106,30 +106,26 @@ index ff3775f..1c5335f 100755
          chmod 666 "$node"
          return 0
      done
-@@ -89,9 +75,9 @@ setup_render_node() {
+@@ -89,8 +75,8 @@ setup_render_node() {
  gpu_setup_host() {
      echo "use GPU host mode"
  
 -    setprop gralloc.gbm.backend drm
 -    setprop ro.hardware.egl mesa
--    setprop ro.hardware.gralloc gbm
 +    setprop vendor.floral.gpu.backend drm
 +    setprop vendor.floral.gpu.egl mesa
-+    setprop vendor.floral.gpu.gralloc gbm
  }
  
  gpu_setup_guest() {
-@@ -109,10 +95,10 @@ gpu_setup_guest() {
+@@ -108,9 +94,9 @@ gpu_setup_guest() {
          return 1
      fi
  
 -    setprop gralloc.gbm.backend software
 -    setprop ro.hardware.egl $egl
--    setprop ro.hardware.gralloc gbm
 -    setprop ro.hardware.vulkan pastel
 +    setprop vendor.floral.gpu.backend software
 +    setprop vendor.floral.gpu.egl $egl
-+    setprop vendor.floral.gpu.gralloc gbm
 +    setprop vendor.floral.gpu.vulkan pastel
  }
  
@@ -163,7 +159,7 @@ index 67cd1b4..8366cd4 100755
 +    setprop vendor.floral.init.memfd 1
 +fi
 diff --git a/redroid.common.rc b/redroid.common.rc
-index bf6d5a8..f0e92c7 100644
+index bf6d5a8..f76f39d 100644
 --- a/redroid.common.rc
 +++ b/redroid.common.rc
 @@ -1,6 +1,4 @@
@@ -185,7 +181,7 @@ index bf6d5a8..f0e92c7 100644
  on init
      # lxcfs better
      write /data/.empty 0
-@@ -76,18 +69,22 @@ on init
+@@ -76,18 +69,21 @@ on init
  
  
  on post-fs-data
@@ -206,7 +202,6 @@ index bf6d5a8..f0e92c7 100644
 +# These actions run after the probes and before zygote-start and boot.
 +on load_persist_props_action
 +    setprop ro.hardware.egl ${vendor.floral.gpu.egl}
-+    setprop ro.hardware.gralloc ${vendor.floral.gpu.gralloc}
 +    setprop gralloc.gbm.backend ${vendor.floral.gpu.backend}
  
 -    # before HAL / SurfaceFlinger
@@ -234,10 +229,10 @@ index 0000000..7563768
 +on load_persist_props_action && property:ro.boot.use_memfd=*
 +    setprop sys.use_memfd ${ro.boot.use_memfd}
 diff --git a/vendor.mk b/vendor.mk
-index 907657b..3d24ab3 100644
+index 16ffe56..89c6f7b 100644
 --- a/vendor.mk
 +++ b/vendor.mk
-@@ -7,5 +7,6 @@ PRODUCT_PACKAGES += \
+@@ -6,5 +6,6 @@ PRODUCT_PACKAGES += \
  PRODUCT_COPY_FILES += \
      vendor/redroid/gpu_config.sh:$(TARGET_COPY_OUT_VENDOR)/bin/gpu_config.sh \
      vendor/redroid/post-fs-data.redroid.sh:$(TARGET_COPY_OUT_VENDOR)/bin/post-fs-data.redroid.sh \
